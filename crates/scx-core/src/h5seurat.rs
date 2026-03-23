@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
-use hdf5::File;
+use hdf5::{File, Group, SimpleExtents};
 use hdf5::types::{TypeDescriptor, FloatSize, VarLenUnicode};
-use ndarray::s;
+use ndarray::{s, Array1, Array2};
 
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, UnsTable, VarTable},
-    stream::DatasetReader,
+    stream::{DatasetReader, DatasetWriter},
 };
 
 /// Reader for the SeuratDisk H5Seurat format (Seurat v3/v4).
@@ -426,6 +427,305 @@ impl DatasetReader for H5SeuratReader {
 }
 
 // ---------------------------------------------------------------------------
+// H5SeuratWriter
+// ---------------------------------------------------------------------------
+
+const SEURAT_CHUNK_ELEMS: usize = 65_536;
+
+/// Streaming writer for the SeuratDisk H5Seurat format (Seurat v3/v4).
+///
+/// Schema written (mirrors what `H5SeuratReader` expects):
+///   /cell.names                          VarLenUnicode (n_obs,)
+///   /assays/{assay}/features             VarLenUnicode (n_vars,)
+///   /assays/{assay}/{layer}/
+///     data                               typed        (nnz,)
+///     indices                            i32          (nnz,)  — gene indices
+///     indptr                             i32/i64      (n_obs+1,) — cell pointers
+///     attr:dims                          i32[2]       [n_vars, n_obs]
+///   /meta.data/
+///     attr:logicals    string array — names of Bool columns
+///     <float_col>      float64 (n_obs,)
+///     <int_col>        int32   (n_obs,)
+///     <bool_col>       int32   (n_obs,)   0=F 1=T
+///     <str_col>        VarLenUnicode (n_obs,)
+///     <factor_col>/    group
+///       values         int32 (n_obs,)  — 1-indexed codes
+///       levels         VarLenUnicode (n_levels,)
+///   /assays/{assay}/meta.features/       (omitted when var.columns is empty)
+///   /reductions/{name}/
+///     cell.embeddings  float64 (n_comps, n_obs)  — transposed from IR (n_obs, n_comps)
+///
+/// Call order: write_obs → write_var → write_obsm → write_uns → write_x_chunk* → finalize.
+/// The first four may arrive in any order; chunks must arrive in cell order.
+pub struct H5SeuratWriter {
+    file: File,
+    assay: String,
+    layer: String,
+    n_obs: usize,
+    n_vars: usize,
+    dtype: DataType,
+    /// Accumulated cell indptr (n_obs + 1 entries when finalized).
+    x_indptr: Vec<u64>,
+}
+
+impl H5SeuratWriter {
+    /// Create a new H5Seurat file for writing.
+    pub fn create<P: AsRef<Path>>(
+        path: P,
+        n_obs: usize,
+        n_vars: usize,
+        dtype: DataType,
+        assay: Option<&str>,
+        layer: Option<&str>,
+    ) -> Result<Self> {
+        let assay = assay.unwrap_or("RNA").to_string();
+        let layer = layer.unwrap_or("counts").to_string();
+
+        let file = File::create(path.as_ref())?;
+
+        // Pre-create the group hierarchy needed before the resizable datasets.
+        file.create_group("assays")?;
+        file.create_group(&format!("assays/{assay}"))?;
+        file.create_group(&format!("assays/{assay}/{layer}"))?;
+
+        // Resizable datasets for streaming x-chunk writes.
+        let data_path    = format!("assays/{assay}/{layer}/data");
+        let indices_path = format!("assays/{assay}/{layer}/indices");
+        match dtype {
+            DataType::F32 => seurat_init_resizable::<f32>(&file, &data_path)?,
+            DataType::F64 => seurat_init_resizable::<f64>(&file, &data_path)?,
+            DataType::I32 => seurat_init_resizable::<i32>(&file, &data_path)?,
+            DataType::U32 => seurat_init_resizable::<u32>(&file, &data_path)?,
+        }
+        seurat_init_resizable::<i32>(&file, &indices_path)?;
+
+        Ok(Self { file, assay, layer, n_obs, n_vars, dtype, x_indptr: vec![0u64] })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Write helpers
+// ---------------------------------------------------------------------------
+
+fn seurat_init_resizable<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()> {
+    file.new_dataset::<T>()
+        .chunk(SEURAT_CHUNK_ELEMS)
+        .shape(SimpleExtents::resizable([0usize]))
+        .create(path)?;
+    Ok(())
+}
+
+fn seurat_write_strings(grp: &Group, name: &str, strings: &[String]) -> Result<()> {
+    let vals: Vec<VarLenUnicode> = strings
+        .iter()
+        .map(|s| VarLenUnicode::from_str(s).unwrap_or_default())
+        .collect();
+    let ds = grp.new_dataset::<VarLenUnicode>().shape(vals.len()).create(name)?;
+    ds.write(&Array1::from_vec(vals))?;
+    Ok(())
+}
+
+/// Write all metadata columns into `grp`.  Also writes the `logicals` attribute
+/// listing the names of Bool columns (R's integer-encoded logicals convention).
+fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
+    let logical_names: Vec<VarLenUnicode> = columns
+        .iter()
+        .filter(|c| matches!(c.data, ColumnData::Bool(_)))
+        .map(|c| VarLenUnicode::from_str(&c.name).unwrap_or_default())
+        .collect();
+    if !logical_names.is_empty() {
+        let attr = grp.new_attr::<VarLenUnicode>()
+            .shape(logical_names.len())
+            .create("logicals")?;
+        attr.write(&Array1::from_vec(logical_names))?;
+    }
+    for col in columns {
+        seurat_write_col(grp, &col.name, &col.data)?;
+    }
+    Ok(())
+}
+
+fn seurat_write_col(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
+    match data {
+        ColumnData::Float(v) => {
+            let ds = grp.new_dataset::<f64>().shape(v.len()).create(name)?;
+            ds.write(&Array1::from_vec(v.clone()))?;
+        }
+        ColumnData::Int(v) => {
+            let ds = grp.new_dataset::<i32>().shape(v.len()).create(name)?;
+            ds.write(&Array1::from_vec(v.clone()))?;
+        }
+        ColumnData::Bool(v) => {
+            // Stored as int32 (0/1); column name is tracked in the `logicals` attr
+            let vi: Vec<i32> = v.iter().map(|&b| b as i32).collect();
+            let ds = grp.new_dataset::<i32>().shape(vi.len()).create(name)?;
+            ds.write(&Array1::from_vec(vi))?;
+        }
+        ColumnData::String(v) => {
+            seurat_write_strings(grp, name, v)?;
+        }
+        ColumnData::Categorical { codes, levels } => {
+            let col_grp = grp.create_group(name)?;
+            // 0-indexed codes → 1-indexed values (R dgCMatrix convention)
+            let values: Vec<i32> = codes.iter().map(|&c| c as i32 + 1).collect();
+            let ds = col_grp.new_dataset::<i32>().shape(values.len()).create("values")?;
+            ds.write(&Array1::from_vec(values))?;
+            seurat_write_strings(&col_grp, "levels", levels)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DatasetWriter impl
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl DatasetWriter for H5SeuratWriter {
+    async fn write_obs(&mut self, obs: &ObsTable) -> Result<()> {
+        // /cell.names — root-level cell barcode array
+        let root = self.file.group("/")?;
+        seurat_write_strings(&root, "cell.names", &obs.index)?;
+
+        // /meta.data/ — always created even when obs.columns is empty
+        let meta_grp = self.file.create_group("meta.data")?;
+        seurat_write_meta_cols(&meta_grp, &obs.columns)?;
+
+        Ok(())
+    }
+
+    async fn write_var(&mut self, var: &VarTable) -> Result<()> {
+        // /assays/{assay}/features
+        let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
+        seurat_write_strings(&assay_grp, "features", &var.index)?;
+
+        // /assays/{assay}/meta.features/ — only when var has columns
+        if !var.columns.is_empty() {
+            let mf_grp = assay_grp.create_group("meta.features")?;
+            seurat_write_meta_cols(&mf_grp, &var.columns)?;
+        }
+
+        Ok(())
+    }
+
+    async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
+        if obsm.map.is_empty() {
+            return Ok(());
+        }
+        let reds_grp = self.file.create_group("reductions")?;
+        for (key, mat) in &obsm.map {
+            let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
+            let red_grp  = reds_grp.create_group(red_name)?;
+
+            let (n_obs, n_comps) = mat.shape;
+            // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs)
+            // Build a new C-contiguous (n_comps, n_obs) array.
+            // Avoid .t().to_owned(): hdf5-rs 0.8 rejects non-standard-layout inputs.
+            let mut buf = vec![0.0f64; n_obs * n_comps];
+            for j in 0..n_obs {
+                for i in 0..n_comps {
+                    buf[i * n_obs + j] = mat.data[j * n_comps + i];
+                }
+            }
+            let arr_t = Array2::from_shape_vec((n_comps, n_obs), buf)
+                .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+            let ds = red_grp
+                .new_dataset::<f64>()
+                .shape((n_comps, n_obs))
+                .create("cell.embeddings")?;
+            ds.write(&arr_t)?;
+        }
+        Ok(())
+    }
+
+    async fn write_uns(&mut self, _uns: &UnsTable) -> Result<()> {
+        Ok(()) // H5Seurat has no uns equivalent
+    }
+
+    async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        let csr = &chunk.data;
+        let nnz = csr.indices.len();
+
+        if nnz > 0 {
+            let data_path    = format!("assays/{}/{}/data",    self.assay, self.layer);
+            let indices_path = format!("assays/{}/{}/indices", self.assay, self.layer);
+
+            // Append values
+            let data_ds = self.file.dataset(&data_path)?;
+            let old_len = data_ds.shape()[0];
+            let new_len = old_len + nnz;
+            data_ds.resize(new_len)?;
+            match self.dtype {
+                DataType::F32 => {
+                    let v: Vec<f32> = csr.data.to_f64().into_iter().map(|x| x as f32).collect();
+                    data_ds.write_slice(&Array1::from_vec(v), s![old_len..new_len])?;
+                }
+                DataType::F64 => {
+                    data_ds.write_slice(&Array1::from_vec(csr.data.to_f64()), s![old_len..new_len])?;
+                }
+                DataType::I32 => {
+                    let v: Vec<i32> = csr.data.to_f64().into_iter().map(|x| x as i32).collect();
+                    data_ds.write_slice(&Array1::from_vec(v), s![old_len..new_len])?;
+                }
+                DataType::U32 => {
+                    let v: Vec<u32> = csr.data.to_f64().into_iter().map(|x| x as u32).collect();
+                    data_ds.write_slice(&Array1::from_vec(v), s![old_len..new_len])?;
+                }
+            }
+
+            // Append gene indices as i32
+            let idx_ds = self.file.dataset(&indices_path)?;
+            let old_idx = idx_ds.shape()[0];
+            idx_ds.resize(new_len)?;
+            let genes_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
+            idx_ds.write_slice(&Array1::from_vec(genes_i32), s![old_idx..new_len])?;
+        }
+
+        // Accumulate cell-level indptr
+        let base = *self.x_indptr.last().unwrap();
+        for i in 1..=chunk.nrows {
+            self.x_indptr.push(base + csr.indptr[i]);
+        }
+
+        Ok(())
+    }
+
+    async fn finalize(&mut self) -> Result<()> {
+        let layer_path = format!("assays/{}/{}", self.assay, self.layer);
+
+        // Write indptr (i32 if nnz fits, i64 otherwise)
+        let max_ptr     = self.x_indptr.iter().copied().max().unwrap_or(0);
+        let indptr_path = format!("{layer_path}/indptr");
+        if max_ptr > i32::MAX as u64 {
+            let v: Vec<i64> = self.x_indptr.iter().map(|&x| x as i64).collect();
+            let ds = self.file.new_dataset::<i64>().shape(v.len()).create(indptr_path.as_str())?;
+            ds.write(&Array1::from_vec(v))?;
+        } else {
+            let v: Vec<i32> = self.x_indptr.iter().map(|&x| x as i32).collect();
+            let ds = self.file.new_dataset::<i32>().shape(v.len()).create(indptr_path.as_str())?;
+            ds.write(&Array1::from_vec(v))?;
+        }
+
+        // dims attribute: [n_vars, n_obs]
+        let layer_grp = self.file.group(&layer_path)?;
+        let dims = vec![self.n_vars as i32, self.n_obs as i32];
+        let attr = layer_grp.new_attr::<i32>().shape(2).create("dims")?;
+        attr.write(&Array1::from_vec(dims))?;
+
+        tracing::info!(
+            n_obs  = self.n_obs,
+            n_vars = self.n_vars,
+            nnz    = self.x_indptr.last().copied().unwrap_or(0),
+            assay  = %self.assay,
+            layer  = %self.layer,
+            "h5seurat finalized"
+        );
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -498,5 +798,58 @@ mod tests {
         }
         assert_eq!(total_cells, 2700);
         assert_eq!(total_nnz,   2282976);
+    }
+
+    #[tokio::test]
+    async fn test_h5seurat_roundtrip() {
+        if !golden_exists() { return; }
+
+        let mut reader = H5SeuratReader::open(GOLDEN, 500, None, None).unwrap();
+        let (n_obs, n_vars) = reader.shape();
+
+        let obs  = reader.obs().await.unwrap();
+        let var  = reader.var().await.unwrap();
+        let obsm = reader.obsm().await.unwrap();
+        let uns  = reader.uns().await.unwrap();
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let out = tmp.path().to_path_buf();
+
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, None).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_obsm(&obsm).await.unwrap();
+        writer.write_uns(&uns).await.unwrap();
+
+        let mut stream = reader.x_stream();
+        while let Some(chunk) = stream.next().await {
+            writer.write_x_chunk(&chunk.unwrap()).await.unwrap();
+        }
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        // Re-open and verify with H5SeuratReader
+        let mut rt = H5SeuratReader::open(&out, 500, None, None).unwrap();
+        assert_eq!(rt.shape(), (n_obs, n_vars));
+
+        let rt_obs = rt.obs().await.unwrap();
+        assert_eq!(rt_obs.index.len(), n_obs);
+        assert_eq!(rt_obs.index[0], obs.index[0]);
+        assert_eq!(rt_obs.columns.len(), obs.columns.len());
+
+        let rt_var = rt.var().await.unwrap();
+        assert_eq!(rt_var.index.len(), n_vars);
+        assert_eq!(rt_var.index[0], var.index[0]);
+
+        let rt_obsm = rt.obsm().await.unwrap();
+        assert!(rt_obsm.map.contains_key("X_pca"), "X_pca missing after roundtrip");
+        assert_eq!(rt_obsm.map["X_pca"].shape, obsm.map["X_pca"].shape);
+
+        let mut total_nnz = 0usize;
+        let mut stream = rt.x_stream();
+        while let Some(chunk) = stream.next().await {
+            total_nnz += chunk.unwrap().data.indices.len();
+        }
+        assert_eq!(total_nnz, 2282976, "nnz changed after H5Seurat roundtrip");
     }
 }

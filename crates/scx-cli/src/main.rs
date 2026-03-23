@@ -8,24 +8,28 @@ use scx_core::{
     dtype::DataType,
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
-    h5seurat::H5SeuratReader,
+    h5seurat::{H5SeuratReader, H5SeuratWriter},
     stream::{DatasetReader, DatasetWriter},
 };
 
 #[derive(Parser)]
 #[command(name = "scx", about = "Single-cell streaming interop engine")]
 enum Cli {
-    /// Convert a single-cell file to AnnData .h5ad
+    /// Convert between single-cell formats
     ///
-    /// Auto-detects format by extension:
+    /// Input auto-detected by content:
     ///   .h5seurat  — SeuratDisk H5Seurat (Seurat v3/v4)
     ///   .h5ad      — AnnData H5AD (CSR X only)
     ///   .h5        — SCX internal HDF5 schema
+    ///
+    /// Output format selected by extension:
+    ///   .h5ad      — AnnData H5AD  (default)
+    ///   .h5seurat  — SeuratDisk H5Seurat
     Convert {
-        /// Input file (.h5seurat or .h5)
+        /// Input file
         input: String,
 
-        /// Output file (.h5ad)
+        /// Output file (.h5ad or .h5seurat)
         output: String,
 
         /// Cells per streaming chunk
@@ -90,17 +94,17 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
                     let mut reader = H5SeuratReader::open(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
                     let mut reader = H5AdReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
                 }
                 Some(Format::ScxH5) | None => {
                     tracing::info!(path = %input, "detected format: SCX H5 (internal)");
                     let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
                 }
             }
         }
@@ -113,14 +117,19 @@ async fn convert_with_reader(
     reader: &mut dyn DatasetReader,
     output: &Path,
     out_dtype: DataType,
+    out_assay: &str,
+    out_layer: &str,
 ) -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
+
+    let is_h5seurat = output.extension().and_then(|e| e.to_str()) == Some("h5seurat");
 
     tracing::info!(
         output = %output.display(),
         n_obs, n_vars,
         dtype = %out_dtype,
+        format = if is_h5seurat { "h5seurat" } else { "h5ad" },
         "starting conversion"
     );
 
@@ -136,7 +145,12 @@ async fn convert_with_reader(
         "metadata loaded in {:.2?}", t0.elapsed()
     );
 
-    let mut writer = H5AdWriter::create(output, n_obs, n_vars, out_dtype)?;
+    let mut writer: Box<dyn DatasetWriter> = if is_h5seurat {
+        Box::new(H5SeuratWriter::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(out_layer))?)
+    } else {
+        Box::new(H5AdWriter::create(output, n_obs, n_vars, out_dtype)?)
+    };
+
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
     writer.write_obsm(&obsm).await?;
