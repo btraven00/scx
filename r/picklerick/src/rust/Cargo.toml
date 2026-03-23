@@ -1,0 +1,24 @@
+[package]
+name    = "picklerick-r"
+version = "0.0.3"
+edition = "2021"
+
+# This crate is NOT part of the top-level Cargo workspace.
+# It is compiled separately by R's build system (src/Makevars.in) when
+# native bindings are activated.  Path dependency reaches up to scx-core
+# in the parent workspace.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+extendr-api = "0.7"
+scx-core    = { path = "../../../../crates/scx-core" }
+tokio       = { version = "1", features = ["rt"] }
+futures     = "0.3"
+anyhow      = "1"
+
+[profile.release]
+lto           = true
+codegen-units = 1
