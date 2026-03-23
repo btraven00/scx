@@ -1,0 +1,8 @@
+/target/
+tests/golden/*.h5seurat
+tests/golden/*.h5ad
+tests/golden/*.json
+tests/benchmark_results/*
+*.pyc
+*.swp
+*.swo

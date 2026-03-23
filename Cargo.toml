@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/scx-core", "crates/scx-cli"]
+resolver = "2"

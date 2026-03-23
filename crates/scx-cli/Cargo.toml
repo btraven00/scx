@@ -1,0 +1,17 @@
+[package]
+name = "scx-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "scx"
+path = "src/main.rs"
+
+[dependencies]
+scx-core = { path = "../scx-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
