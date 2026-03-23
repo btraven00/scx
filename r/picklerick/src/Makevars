@@ -1,0 +1,21 @@
+# HDF5 headers needed for the API-version shim in entrypoint.c
+PKG_CFLAGS = $(shell pkg-config --cflags hdf5 2>/dev/null)
+
+TARGET_DIR = ./rust/target
+LIBDIR     = $(TARGET_DIR)/release
+STATLIB    = $(LIBDIR)/libpicklerick_r.a
+
+# HDF5 is required by scx-core.  Use only the -L search paths from pkg-config
+# and link the shared library directly (-lhdf5).  Avoid pulling in transitive
+# static deps (e.g. -lz) that may not be separately installed.
+HDF5_LDFLAGS = $(shell pkg-config --libs-only-L hdf5 2>/dev/null)
+
+PKG_LIBS   = $(STATLIB) $(HDF5_LDFLAGS) -lhdf5 -lm
+
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	cargo build --lib --release --manifest-path=./rust/Cargo.toml
+
+clean:
+	rm -Rf $(SHLIB) $(STATLIB) $(TARGET_DIR)

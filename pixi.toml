@@ -48,6 +48,9 @@ prepare-h5seurat     = { cmd = "Rscript scripts/prepare_h5seurat_test.R",  descr
 prepare-h5ad-ref     = { cmd = "Rscript scripts/prepare_h5ad_reference.R", description = "Generate reference H5AD via anndataR (oracle)", depends-on = ["prepare-h5seurat"] }
 fixtures             = { description = "Generate all golden test fixtures", depends-on = ["prepare-h5ad-ref"] }
 
+# --- install scx binary into env ---
+install-scx = { cmd = "cargo build --release && cp target/release/scx $CONDA_PREFIX/bin/scx", description = "Build scx and install to pixi env bin/", depends-on = ["build-release"] }
+
 # --- conversion under test ---
 convert-h5seurat-to-h5ad = { cmd = "cargo run --release --bin scx -- convert tests/golden/pbmc3k.h5seurat tests/golden/pbmc3k_scx.h5ad", description = "Run SCX conversion: H5Seurat → H5AD" }
 

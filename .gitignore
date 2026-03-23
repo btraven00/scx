@@ -6,3 +6,5 @@ tests/benchmark_results/*
 *.pyc
 *.swp
 *.swo
+.RData
+.Rhistory

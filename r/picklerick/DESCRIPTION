@@ -1,0 +1,20 @@
+Package: picklerick
+Title: Fast Single-Cell Format Conversion via SCX
+Version: 0.0.3.9000
+Authors@R:
+    person("SCX Authors", role = c("aut", "cre"),
+           email = "placeholder@example.com")
+Description: R bindings to the SCX streaming interop engine for single-cell
+    genomics. Converts between H5Seurat, H5AD, and SCX internal formats via
+    a memory-bounded streaming pipeline. Returns 'anndataR::InMemoryAnnData'
+    objects. No Python dependency.
+License: MIT + file LICENSE
+Imports:
+    anndataR (>= 0.0.1),
+    Matrix
+Suggests:
+    testthat (>= 3.0.0)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+SystemRequirements: Cargo (rustup) >= 1.70
