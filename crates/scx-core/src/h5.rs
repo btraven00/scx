@@ -11,7 +11,8 @@ use ndarray::s;
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, UnsTable, VarTable},
+    ir::{Column, ColumnData, DenseMatrix, Embeddings, Layers, MatrixChunk, Obsp, ObsTable,
+         SparseMatrixCSR, UnsTable, VarTable, Varm, Varp},
     stream::DatasetReader,
 };
 
@@ -311,6 +312,11 @@ impl DatasetReader for ScxH5Reader {
     async fn uns(&mut self) -> Result<UnsTable> {
         Ok(UnsTable::default())
     }
+
+    async fn layers(&mut self) -> Result<Layers> { Ok(Layers::default()) }
+    async fn obsp(&mut self)   -> Result<Obsp>   { Ok(Obsp::default()) }
+    async fn varp(&mut self)   -> Result<Varp>   { Ok(Varp::default()) }
+    async fn varm(&mut self)   -> Result<Varm>   { Ok(Varm::default()) }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
         let path       = self.path.clone();

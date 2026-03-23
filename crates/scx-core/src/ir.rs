@@ -84,6 +84,34 @@ pub struct Embeddings {
     pub map: HashMap<String, DenseMatrix>,
 }
 
+/// Named additional count matrices (e.g., "data", "spliced", "unspliced").
+/// Each entry has shape (n_obs, n_vars).
+#[derive(Debug, Clone, Default)]
+pub struct Layers {
+    pub map: HashMap<String, SparseMatrixCSR>,
+}
+
+/// Pairwise observation (cell) matrices (e.g., neighbor graphs).
+/// Each entry has shape (n_obs, n_obs).
+#[derive(Debug, Clone, Default)]
+pub struct Obsp {
+    pub map: HashMap<String, SparseMatrixCSR>,
+}
+
+/// Pairwise variable (gene) matrices (e.g., gene co-expression).
+/// Each entry has shape (n_vars, n_vars).
+#[derive(Debug, Clone, Default)]
+pub struct Varp {
+    pub map: HashMap<String, SparseMatrixCSR>,
+}
+
+/// Named variable (gene) embedding matrices (e.g., PCA gene loadings).
+/// Each entry has shape (n_vars, k).
+#[derive(Debug, Clone, Default)]
+pub struct Varm {
+    pub map: HashMap<String, DenseMatrix>,
+}
+
 /// Row-major dense matrix.
 #[derive(Debug, Clone)]
 pub struct DenseMatrix {
@@ -107,4 +135,8 @@ pub struct SingleCellDataset {
     pub var: VarTable,
     pub obsm: Embeddings,
     pub uns: UnsTable,
+    pub layers: Layers,
+    pub obsp: Obsp,
+    pub varp: Varp,
+    pub varm: Varm,
 }
