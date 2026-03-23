@@ -14,7 +14,8 @@ use ndarray::{s, Array1, Array2};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, UnsTable, VarTable},
+    ir::{Column, ColumnData, DenseMatrix, Embeddings, Layers, MatrixChunk, Obsp, ObsTable,
+         SparseMatrixCSR, UnsTable, VarTable, Varm, Varp},
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -439,6 +440,111 @@ fn read_uns_sync(path: &Path) -> Result<UnsTable> {
 }
 
 // ---------------------------------------------------------------------------
+// Slot parity helpers
+// ---------------------------------------------------------------------------
+
+/// Read a full CSC sparse matrix group (H5Seurat convention) as SparseMatrixCSR.
+/// `group_path` is e.g. "graphs/RNA_nn".  `dims` attr is [n_rows, n_cols] (col-major order).
+fn seurat_read_csc_as_csr(file: &File, group_path: &str) -> Result<SparseMatrixCSR> {
+    let grp = file.group(group_path)?;
+    let dims_attr = grp.attr("dims")?;
+    let dims: Vec<i32> = dims_attr.read_1d::<i32>()?.to_vec();
+    // H5Seurat dims attr is [n_rows, n_cols] where columns = CSC dimension
+    let (nrows, ncols) = (dims[0] as usize, dims[1] as usize);
+
+    let indptr = read_indptr_from(file, &format!("{group_path}/indptr"))?;
+    let nnz = *indptr.last().unwrap_or(&0) as usize;
+
+    let indices: Vec<u32> = if nnz > 0 {
+        read_indices_at(file, &format!("{group_path}/indices"), 0, nnz)?
+    } else {
+        Vec::new()
+    };
+
+    let data: TypedVec = if nnz > 0 {
+        let ds = file.dataset(&format!("{group_path}/data"))?;
+        match ds.dtype()?.to_descriptor()? {
+            TypeDescriptor::Float(FloatSize::U4) => TypedVec::F32(ds.read_1d::<f32>()?.to_vec()),
+            TypeDescriptor::Float(_)             => TypedVec::F64(ds.read_1d::<f64>()?.to_vec()),
+            TypeDescriptor::Integer(_)           => TypedVec::I32(ds.read_1d::<i32>()?.to_vec()),
+            _                                    => TypedVec::F32(ds.read_1d::<f32>()?.to_vec()),
+        }
+    } else {
+        TypedVec::F32(Vec::new())
+    };
+
+    // CSC (cols=nrows) == CSR (rows=nrows): indptr length = ncols+1, but
+    // for graphs ncols == nrows. Shape is (nrows, ncols).
+    Ok(SparseMatrixCSR { shape: (nrows, ncols), indptr, indices, data })
+}
+
+fn read_layers_sync(path: &Path, assay: &str, primary_layer: &str) -> Result<Layers> {
+    let file = File::open(path)?;
+    let assay_grp = match file.group(&format!("assays/{assay}")) {
+        Err(_) => return Ok(Layers::default()),
+        Ok(g)  => g,
+    };
+    let mut map = HashMap::new();
+    for name in assay_grp.member_names().unwrap_or_default() {
+        if name == primary_layer { continue; }
+        let grp_path = format!("assays/{assay}/{name}");
+        // Only process groups that look like sparse matrix groups (have indptr)
+        if file.dataset(&format!("{grp_path}/indptr")).is_err() { continue; }
+        match seurat_read_csc_as_csr(&file, &grp_path) {
+            Ok(m)  => { map.insert(name, m); }
+            Err(e) => tracing::warn!("skipping assay layer '{name}': {e}"),
+        }
+    }
+    Ok(Layers { map })
+}
+
+fn read_obsp_sync(path: &Path) -> Result<Obsp> {
+    let file = File::open(path)?;
+    let grp = match file.group("graphs") {
+        Err(_) => return Ok(Obsp::default()),
+        Ok(g)  => g,
+    };
+    let mut map = HashMap::new();
+    for name in grp.member_names().unwrap_or_default() {
+        match seurat_read_csc_as_csr(&file, &format!("graphs/{name}")) {
+            Ok(m)  => { map.insert(name, m); }
+            Err(e) => tracing::warn!("skipping graph '{name}': {e}"),
+        }
+    }
+    Ok(Obsp { map })
+}
+
+fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
+    let file = File::open(path)?;
+    let reds_grp = match file.group("reductions") {
+        Err(_) => return Ok(Varm::default()),
+        Ok(g)  => g,
+    };
+    let mut map = HashMap::new();
+    for red_name in reds_grp.member_names().unwrap_or_default() {
+        let ds_path = format!("reductions/{red_name}/feature.loadings");
+        let ds = match file.dataset(&ds_path) {
+            Ok(d)  => d,
+            Err(_) => continue,
+        };
+        let arr: ndarray::Array2<f64> = match ds.read::<f64, ndarray::Ix2>() {
+            Ok(a)  => a,
+            Err(e) => { tracing::warn!("skipping varm '{red_name}': {e}"); continue; }
+        };
+        // feature.loadings stored as (k, n_vars) — transpose to (n_vars, k)
+        let arr = if arr.shape()[1] == n_vars && arr.shape()[0] != n_vars {
+            arr.t().to_owned()
+        } else {
+            arr
+        };
+        let shape = (arr.shape()[0], arr.shape()[1]);
+        let varm_key = format!("X_{}", red_name.to_lowercase());
+        map.insert(varm_key, DenseMatrix { shape, data: arr.into_raw_vec() });
+    }
+    Ok(Varm { map })
+}
+
+// ---------------------------------------------------------------------------
 // DatasetReader impl
 // ---------------------------------------------------------------------------
 
@@ -466,6 +572,22 @@ impl DatasetReader for H5SeuratReader {
 
     async fn uns(&mut self) -> Result<UnsTable> {
         read_uns_sync(&self.path)
+    }
+
+    async fn layers(&mut self) -> Result<Layers> {
+        read_layers_sync(&self.path, &self.assay, &self.layer)
+    }
+
+    async fn obsp(&mut self) -> Result<Obsp> {
+        read_obsp_sync(&self.path)
+    }
+
+    async fn varp(&mut self) -> Result<Varp> {
+        Ok(Varp::default())
+    }
+
+    async fn varm(&mut self) -> Result<Varm> {
+        read_varm_sync(&self.path, self.n_vars)
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
@@ -710,6 +832,22 @@ impl DatasetWriter for H5SeuratWriter {
 
     async fn write_uns(&mut self, _uns: &UnsTable) -> Result<()> {
         Ok(()) // H5Seurat has no uns equivalent
+    }
+
+    async fn write_layers(&mut self, _layers: &Layers) -> Result<()> {
+        Ok(()) // TODO: write as assays/{assay}/{name}/
+    }
+
+    async fn write_obsp(&mut self, _obsp: &Obsp) -> Result<()> {
+        Ok(()) // TODO: write as graphs/{name}/
+    }
+
+    async fn write_varp(&mut self, _varp: &Varp) -> Result<()> {
+        Ok(()) // H5Seurat has no varp equivalent
+    }
+
+    async fn write_varm(&mut self, _varm: &Varm) -> Result<()> {
+        Ok(()) // TODO: write as reductions/{name}/feature.loadings
     }
 
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {

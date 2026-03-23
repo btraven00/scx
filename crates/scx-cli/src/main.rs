@@ -133,10 +133,14 @@ async fn convert_with_reader(
         "starting conversion"
     );
 
-    let obs  = reader.obs().await?;
-    let var  = reader.var().await?;
-    let obsm = reader.obsm().await?;
-    let uns  = reader.uns().await?;
+    let obs    = reader.obs().await?;
+    let var    = reader.var().await?;
+    let obsm   = reader.obsm().await?;
+    let uns    = reader.uns().await?;
+    let layers = reader.layers().await?;
+    let obsp   = reader.obsp().await?;
+    let varp   = reader.varp().await?;
+    let varm   = reader.varm().await?;
 
     tracing::info!(
         obs_cols = obs.columns.len(),
@@ -155,6 +159,10 @@ async fn convert_with_reader(
     writer.write_var(&var).await?;
     writer.write_obsm(&obsm).await?;
     writer.write_uns(&uns).await?;
+    writer.write_layers(&layers).await?;
+    writer.write_obsp(&obsp).await?;
+    writer.write_varp(&varp).await?;
+    writer.write_varm(&varm).await?;
 
     let t_x = std::time::Instant::now();
     let mut stream = reader.x_stream();

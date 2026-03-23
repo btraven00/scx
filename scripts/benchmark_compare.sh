@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # benchmark_compare.sh
 #
-# Compares scx vs zellconverter for Seurat-to-AnnData conversion.
+# Compares scx vs anndataR for Seurat-to-AnnData conversion.
 # Both start from the same pre-processed data (SCX HDF5 golden file).
-# Measures wall time and peak RSS.
+# Measures wall time (via hyperfine) and peak RSS (via GNU time).
 #
 # Usage:
-#   pixi run bash scripts/benchmark_compare.sh
+#   bash scripts/benchmark_compare.sh
 #
 # Requirements:
 #   - scx release binary (built via cargo build --release)
-#   - R with zellconverter, Matrix, hdf5r installed
+#   - hyperfine (https://github.com/sharkdp/hyperfine)
+#   - rv (R package manager) with rproject.toml at repo root
 #   - GNU time (/usr/bin/time -v)
 
 set -euo pipefail
@@ -21,7 +22,7 @@ OUT_DIR="tests/benchmark_results"
 GTIME="/usr/bin/time"
 
 mkdir -p "$OUT_DIR"
-echo "tool,wall_s,peak_rss_mb" > "$OUT_DIR/results.csv"
+echo "tool,mean_s,stddev_s,min_s,max_s,peak_rss_mb" > "$OUT_DIR/results.csv"
 
 if [ ! -f "$GOLDEN" ]; then
   echo "ERROR: $GOLDEN not found — run: pixi run prepare-test-data"
@@ -32,40 +33,26 @@ if [ ! -f "$SCX_BIN" ]; then
   cargo build --release --bin scx
 fi
 
+if ! command -v hyperfine &>/dev/null; then
+  echo "ERROR: hyperfine not found — install with: cargo install hyperfine"
+  exit 1
+fi
+
 echo "============================================================"
 echo "SCX benchmark — $(date)"
 echo "Dataset: $GOLDEN"
 echo "============================================================"
 echo ""
 
-# ─── Helper: run with GNU time, extract wall + RSS ────────────────────────────
+# ─── Helper: peak RSS via GNU time ────────────────────────────────────────────
 
-run_measured() {
-  local label="$1"; shift
-  local cmd=("$@")
+peak_rss_mb() {
   local tmplog
   tmplog=$(mktemp)
-
-  echo "--- $label ---"
-  echo "  cmd: ${cmd[*]}"
-
-  # GNU time writes to stderr; redirect to tmplog
-  if "$GTIME" -v "${cmd[@]}" > /dev/null 2>"$tmplog"; then
-    true
-  else
-    echo "  WARNING: command exited non-zero (may still have timing data)"
-  fi
-
-  local wall rss_kb rss_mb
-  wall=$(grep "Elapsed (wall" "$tmplog" | grep -oP '[\d:]+\.\d+' | tail -1)
+  "$GTIME" -v "$@" > /dev/null 2>"$tmplog" || true
+  local rss_kb
   rss_kb=$(grep "Maximum resident" "$tmplog" | grep -oP '\d+' | tail -1)
-  rss_mb=$(( ${rss_kb:-0} / 1024 ))
-
-  echo "  Wall time : $wall"
-  echo "  Peak RSS  : ${rss_mb} MB"
-  echo ""
-
-  echo "$label,$wall,$rss_mb" >> "$OUT_DIR/results.csv"
+  echo $(( ${rss_kb:-0} / 1024 ))
   rm -f "$tmplog"
 }
 
@@ -75,63 +62,121 @@ echo "=== scx (Rust, release) ==="
 
 for chunk in 500 2700; do
   out="$OUT_DIR/scx_chunk${chunk}.h5ad"
-  run_measured "scx_chunk${chunk}" \
-    "$SCX_BIN" convert "$GOLDEN" "$out" --chunk-size "$chunk"
+  label="scx_chunk${chunk}"
+
+  echo "--- $label ---"
+
+  # hyperfine: 3 warmup runs, 10 timed runs, export JSON for parsing
+  hf_json="$OUT_DIR/${label}_hyperfine.json"
+  hyperfine \
+    --warmup 3 \
+    --runs 10 \
+    --prepare "rm -f $out" \
+    --export-json "$hf_json" \
+    --command-name "$label" \
+    "$SCX_BIN convert $GOLDEN $out --chunk-size $chunk"
+
+  # Extract stats from hyperfine JSON (mean, stddev, min, max in seconds)
+  mean=$(python3 -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['mean']:.4f}\")")
+  std=$(python3  -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['stddev']:.4f}\")")
+  tmin=$(python3 -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['min']:.4f}\")")
+  tmax=$(python3 -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['max']:.4f}\")")
+
+  # Peak RSS from a single /usr/bin/time run
+  rss=$(peak_rss_mb "$SCX_BIN" convert "$GOLDEN" "$out" --chunk-size "$chunk")
+  echo "  Peak RSS  : ${rss} MB"
+  echo ""
+
+  echo "$label,$mean,$std,$tmin,$tmax,$rss" >> "$OUT_DIR/results.csv"
 done
 
-# ─── zellconverter ────────────────────────────────────────────────────────────
+# ─── anndataR ─────────────────────────────────────────────────────────────────
 
-echo "=== zellconverter (R/Bioconductor) ==="
+echo "=== anndataR (R/Bioconductor) ==="
 
-ZELL_SCRIPT=$(mktemp /tmp/zell_XXXXXX.R)
-# Detect pixi-managed Python so reticulate doesn't try to install its own
-PIXI_PYTHON=$(pixi run python -c "import sys; print(sys.executable)" 2>/dev/null || true)
+RV_LIB=$(rv library)
+ANNDATA_SCRIPT=$(mktemp /tmp/anndata_XXXXXX.R)
 
-cat > "$ZELL_SCRIPT" << 'REOF'
+cat > "$ANNDATA_SCRIPT" << 'REOF'
 suppressPackageStartupMessages({
-  library(zellkonverter)
-  library(SingleCellExperiment)
+  library(anndataR)
+  library(rhdf5)
   library(Matrix)
-  library(hdf5r)
 })
 
-# Load from same SCX HDF5 golden file as scx uses —
-# reconstruct dgCMatrix (CSC, genes x cells) then write h5ad via zellconverter.
-f <- H5File$new("tests/golden/pbmc3k.h5", mode = "r")
-data_vals  <- f[["X/data"]][]
-indices    <- f[["X/indices"]][]   # 0-based gene indices
-indptr     <- f[["X/indptr"]][]
-shape_vec  <- f[["X/shape"]][]
-gene_names <- f[["var/index"]][]
-cell_names <- f[["obs/index"]][]
-f$close_all()
+f <- "tests/golden/pbmc3k.h5"
 
-n_genes <- as.integer(shape_vec[1])
-n_cells <- as.integer(shape_vec[2])
+# Count matrix
+data_vals <- h5read(f, "X/data")
+indices   <- h5read(f, "X/indices")   # 0-based gene indices
+indptr    <- h5read(f, "X/indptr")
+shape_vec <- h5read(f, "X/shape")
+n_genes   <- as.integer(shape_vec[1])
+n_cells   <- as.integer(shape_vec[2])
 
-mat <- sparseMatrix(
+# SCX HDF5 stores CSC (gene-major). Reconstruct dgCMatrix then transpose to CSR (cell-major).
+mat_csc <- sparseMatrix(
   i    = indices + 1L,
   p    = indptr,
-  x    = data_vals,
-  dims = c(n_genes, n_cells),
-  dimnames = list(gene_names, cell_names)
+  x    = as.numeric(data_vals),
+  dims = c(n_genes, n_cells)
+)
+mat_csr <- t(mat_csc)  # (n_cells, n_genes)
+
+# obs metadata
+cell_names <- h5read(f, "obs/index")
+obs_df <- data.frame(
+  nCount_RNA   = h5read(f, "obs/nCount_RNA"),
+  nFeature_RNA = h5read(f, "obs/nFeature_RNA"),
+  orig.ident   = h5read(f, "obs/orig.ident"),
+  row.names    = cell_names
 )
 
-sce <- SingleCellExperiment(assays = list(counts = mat))
-out <- "tests/benchmark_results/zellkonverter.h5ad"
-writeH5AD(sce, file = out, verbose = FALSE)
-message(sprintf("zellkonverter written %d cells x %d genes -> %s", n_cells, n_genes, out))
+# var metadata (index only in golden file)
+gene_names <- h5read(f, "var/index")
+var_df <- data.frame(row.names = gene_names)
+
+# obsm embeddings — stored (n_comps, n_cells); transpose to (n_cells, n_comps)
+read_obsm <- function(key) {
+  m <- h5read(f, paste0("obsm/", key))
+  if (ncol(m) == n_cells && nrow(m) != n_cells) m <- t(m)
+  m
+}
+obsm_list <- list(
+  X_pca  = read_obsm("X_pca"),
+  X_umap = read_obsm("X_umap")
+)
+
+adata <- AnnData(X = mat_csr, obs = obs_df, var = var_df, obsm = obsm_list)
+
+out <- tempfile(fileext = ".h5ad")
+write_h5ad(adata, out, mode = "w")
+message(sprintf("anndataR written %d cells x %d genes -> %s (%.1f MB)", n_cells, n_genes, out, file.size(out) / 1e6))
 REOF
 
-if pixi run Rscript -e "requireNamespace('zellkonverter', quietly=TRUE)" 2>/dev/null; then
-  run_measured "zellkonverter" \
-    env RETICULATE_PYTHON="${PIXI_PYTHON}" pixi run Rscript "$ZELL_SCRIPT"
-else
-  echo "  SKIP: zellkonverter not in pixi env — add bioconductor-zellkonverter to pixi.toml"
-  echo ""
-fi
+R_LIBS_USER="$RV_LIB" Rscript -e "requireNamespace('anndataR', quietly=TRUE)" 2>/dev/null
+hf_json="$OUT_DIR/anndataR_hyperfine.json"
 
-rm -f "$ZELL_SCRIPT"
+echo "--- anndataR ---"
+hyperfine \
+  --warmup 1 \
+  --runs 5 \
+  --export-json "$hf_json" \
+  --command-name "anndataR" \
+  "R_LIBS_USER=$RV_LIB Rscript $ANNDATA_SCRIPT"
+
+mean=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['mean']:.4f}\")")
+std=$(python3  -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['stddev']:.4f}\")")
+tmin=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['min']:.4f}\")")
+tmax=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['max']:.4f}\")")
+
+rss=$(peak_rss_mb env R_LIBS_USER="$RV_LIB" Rscript "$ANNDATA_SCRIPT")
+echo "  Peak RSS  : ${rss} MB"
+echo ""
+
+echo "anndataR,$mean,$std,$tmin,$tmax,$rss" >> "$OUT_DIR/results.csv"
+
+rm -f "$ANNDATA_SCRIPT"
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
@@ -140,5 +185,6 @@ echo "Results:"
 echo ""
 column -t -s',' "$OUT_DIR/results.csv"
 echo ""
-echo "Full results: $OUT_DIR/results.csv"
+echo "Full results : $OUT_DIR/results.csv"
+echo "Hyperfine JSON: $OUT_DIR/*_hyperfine.json"
 echo "============================================================"

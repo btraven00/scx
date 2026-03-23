@@ -94,11 +94,20 @@ fn bench_roundtrip(c: &mut Criterion) {
                     let obsm = reader.obsm().await.unwrap();
                     let uns  = reader.uns().await.unwrap();
 
+                    let layers = reader.layers().await.unwrap();
+                    let obsp   = reader.obsp().await.unwrap();
+                    let varp   = reader.varp().await.unwrap();
+                    let varm   = reader.varm().await.unwrap();
+
                     let mut writer = H5AdWriter::create(tmp.path(), n_obs, n_vars, DataType::F32).unwrap();
                     writer.write_obs(&obs).await.unwrap();
                     writer.write_var(&var).await.unwrap();
                     writer.write_obsm(&obsm).await.unwrap();
                     writer.write_uns(&uns).await.unwrap();
+                    writer.write_layers(&layers).await.unwrap();
+                    writer.write_obsp(&obsp).await.unwrap();
+                    writer.write_varp(&varp).await.unwrap();
+                    writer.write_varm(&varm).await.unwrap();
 
                     let mut stream = reader.x_stream();
                     while let Some(chunk) = stream.next().await {
