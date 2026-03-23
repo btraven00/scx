@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
 
+use serde_json;
+
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use hdf5::{File, Group, SimpleExtents};
@@ -369,6 +371,74 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
 }
 
 // ---------------------------------------------------------------------------
+// uns helpers — walk misc/ into a serde_json::Value tree
+// ---------------------------------------------------------------------------
+
+/// Recursively walk an HDF5 group into a JSON object.
+/// Unreadable or unsupported nodes are silently replaced with `null`.
+fn seurat_walk_group(file: &File, group_path: &str) -> serde_json::Value {
+    let grp = match file.group(group_path) {
+        Ok(g)  => g,
+        Err(_) => return serde_json::Value::Null,
+    };
+    let members = grp.member_names().unwrap_or_default();
+    let mut map = serde_json::Map::new();
+    for name in members {
+        let child = format!("{group_path}/{name}");
+        let is_grp = file.group(&child).is_ok() && file.dataset(&child).is_err();
+        let value  = if is_grp {
+            seurat_walk_group(file, &child)
+        } else {
+            seurat_ds_to_json(file, &child).unwrap_or(serde_json::Value::Null)
+        };
+        map.insert(name, value);
+    }
+    serde_json::Value::Object(map)
+}
+
+fn seurat_ds_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
+    let ds        = file.dataset(path)?;
+    let is_scalar = ds.ndim() == 0;
+    match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::Float(_) => {
+            if is_scalar {
+                Ok(serde_json::Value::from(ds.read_scalar::<f64>()?))
+            } else {
+                let v: Vec<f64> = ds.read_1d::<f64>()?.to_vec();
+                Ok(serde_json::json!(v))
+            }
+        }
+        TypeDescriptor::Integer(_) => {
+            if is_scalar {
+                Ok(serde_json::Value::from(ds.read_scalar::<i64>()?))
+            } else {
+                let v: Vec<i64> = ds.read_1d::<i64>()?.to_vec();
+                Ok(serde_json::json!(v))
+            }
+        }
+        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
+            let strings = read_strings(file, path)?;
+            if is_scalar || strings.len() == 1 {
+                Ok(serde_json::Value::String(
+                    strings.into_iter().next().unwrap_or_default()
+                ))
+            } else {
+                Ok(serde_json::json!(strings))
+            }
+        }
+        _ => Ok(serde_json::Value::Null),
+    }
+}
+
+fn read_uns_sync(path: &Path) -> Result<UnsTable> {
+    let file = File::open(path)?;
+    if file.group("misc").is_err() {
+        return Ok(UnsTable::default());
+    }
+    Ok(UnsTable { raw: seurat_walk_group(&file, "misc") })
+}
+
+// ---------------------------------------------------------------------------
 // DatasetReader impl
 // ---------------------------------------------------------------------------
 
@@ -395,7 +465,7 @@ impl DatasetReader for H5SeuratReader {
     }
 
     async fn uns(&mut self) -> Result<UnsTable> {
-        Ok(UnsTable::default())
+        read_uns_sync(&self.path)
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
@@ -851,5 +921,107 @@ mod tests {
             total_nnz += chunk.unwrap().data.indices.len();
         }
         assert_eq!(total_nnz, 2282976, "nnz changed after H5Seurat roundtrip");
+    }
+
+    // -----------------------------------------------------------------------
+    // data-layer test (synthetic 3×4 matrix written with layer="data")
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_data_layer() {
+        // Write a 3-cell × 4-gene matrix under the "data" layer and read it back.
+        let n_obs = 3usize;
+        let n_vars = 4usize;
+
+        let obs = ObsTable {
+            index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+            columns: vec![],
+        };
+        // Non-zeros at (0,0),(0,2),(1,1),(1,3),(2,0),(2,3) → nnz = 6
+        let chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr:  vec![0, 2, 4, 6],
+                indices: vec![0, 2, 1, 3, 0, 3],
+                data:    TypedVec::F32(vec![1.1, 2.2, 3.3, 4.4, 5.5, 6.6]),
+            },
+        };
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let out = tmp.path().to_path_buf();
+
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, Some("data")).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_obsm(&Embeddings::default()).await.unwrap();
+        writer.write_uns(&UnsTable::default()).await.unwrap();
+        writer.write_x_chunk(&chunk).await.unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        let mut reader = H5SeuratReader::open(&out, 100, None, Some("data")).unwrap();
+        assert_eq!(reader.shape(), (n_obs, n_vars));
+
+        let mut total_nnz = 0usize;
+        let mut stream = reader.x_stream();
+        while let Some(c) = stream.next().await {
+            total_nnz += c.unwrap().data.indices.len();
+        }
+        assert_eq!(total_nnz, 6, "nnz mismatch for data layer");
+    }
+
+    // -----------------------------------------------------------------------
+    // uns / misc pass-through test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_uns_misc_passthrough() {
+        // Create a minimal valid H5Seurat with H5SeuratWriter, then inject a
+        // misc/ group.  Verify that uns() surfaces it as JSON.
+        let obs = ObsTable { index: vec!["c0".into()], columns: vec![] };
+        let var = VarTable { index: vec!["g0".into()], columns: vec![] };
+        let chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: 1,
+            data: SparseMatrixCSR {
+                shape: (1, 1),
+                indptr:  vec![0, 1],
+                indices: vec![0],
+                data:    TypedVec::F32(vec![1.0]),
+            },
+        };
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut writer = H5SeuratWriter::create(&path, 1, 1, DataType::F32, None, None).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_obsm(&Embeddings::default()).await.unwrap();
+        writer.write_uns(&UnsTable::default()).await.unwrap();
+        writer.write_x_chunk(&chunk).await.unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        // Inject misc/ with a scalar dataset and a numeric array
+        {
+            let file = File::open_rw(&path).unwrap();
+            let misc  = file.create_group("misc").unwrap();
+            let ds    = misc.new_dataset::<f64>().shape(3).create("weights").unwrap();
+            ds.write(&Array1::from_vec(vec![0.1f64, 0.2, 0.3])).unwrap();
+        }
+
+        let mut reader = H5SeuratReader::open(&path, 100, None, None).unwrap();
+        let uns = reader.uns().await.unwrap();
+
+        assert!(uns.raw.is_object(), "uns.raw should be a JSON object");
+        assert!(uns.raw.get("weights").is_some(), "misc/weights missing from uns");
+        assert_eq!(uns.raw["weights"], serde_json::json!([0.1, 0.2, 0.3]));
     }
 }
