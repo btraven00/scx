@@ -842,9 +842,14 @@ impl DatasetReader for NpyIrReader {
         let n_obs      = self.dataset.x.shape.0;
         let n_vars     = self.dataset.x.shape.1;
         let chunk_size = self.chunk_size;
-        let indptr  = Arc::new(self.dataset.x.indptr.clone());
-        let indices = Arc::new(self.dataset.x.indices.clone());
-        let data    = Arc::new(self.dataset.x.data.clone());
+        // Move X arrays into Arcs without cloning — avoids a full duplicate
+        // of the X data in memory while the stream is live.
+        let indptr  = Arc::new(std::mem::take(&mut self.dataset.x.indptr));
+        let indices = Arc::new(std::mem::take(&mut self.dataset.x.indices));
+        let data    = Arc::new(std::mem::replace(
+            &mut self.dataset.x.data,
+            TypedVec::F32(vec![]),
+        ));
 
         Box::pin(stream::unfold(0usize, move |row_start| {
             let indptr  = Arc::clone(&indptr);

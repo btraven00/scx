@@ -305,21 +305,37 @@ impl DatasetWriter for H5AdWriter {
             let new_len = old_len + nnz;
             data_ds.resize(new_len)?;
 
-            match self.dtype {
-                DataType::F32 => {
-                    let v: Vec<f32> = csr.data.to_f64().into_iter().map(|x| x as f32).collect();
-                    data_ds.write_slice(&Array1::from_vec(v), s![old_len..new_len])?;
+            // Convert directly from source type to target type — avoids the
+            // intermediate f64 Vec that to_f64() would allocate.
+            match (&csr.data, self.dtype) {
+                (TypedVec::F32(v), DataType::F32) => {
+                    data_ds.write_slice(&Array1::from_vec(v.clone()), s![old_len..new_len])?;
                 }
-                DataType::F64 => {
+                (TypedVec::F64(v), DataType::F64) => {
+                    data_ds.write_slice(&Array1::from_vec(v.clone()), s![old_len..new_len])?;
+                }
+                (TypedVec::F64(v), DataType::F32) => {
+                    let w: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
+                }
+                (TypedVec::F32(v), DataType::F64) => {
+                    let w: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
+                }
+                (_, DataType::F32) => {
+                    let w: Vec<f32> = csr.data.to_f64().into_iter().map(|x| x as f32).collect();
+                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
+                }
+                (_, DataType::F64) => {
                     data_ds.write_slice(&Array1::from_vec(csr.data.to_f64()), s![old_len..new_len])?;
                 }
-                DataType::I32 => {
-                    let v: Vec<i32> = csr.data.to_f64().into_iter().map(|x| x as i32).collect();
-                    data_ds.write_slice(&Array1::from_vec(v), s![old_len..new_len])?;
+                (_, DataType::I32) => {
+                    let w: Vec<i32> = csr.data.to_f64().into_iter().map(|x| x as i32).collect();
+                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
-                DataType::U32 => {
-                    let v: Vec<u32> = csr.data.to_f64().into_iter().map(|x| x as u32).collect();
-                    data_ds.write_slice(&Array1::from_vec(v), s![old_len..new_len])?;
+                (_, DataType::U32) => {
+                    let w: Vec<u32> = csr.data.to_f64().into_iter().map(|x| x as u32).collect();
+                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
             }
 
