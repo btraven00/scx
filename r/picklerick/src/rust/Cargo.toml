@@ -18,6 +18,11 @@ scx-core    = { path = "../../../../crates/scx-core" }
 tokio       = { version = "1", features = ["rt"] }
 futures     = "0.3"
 anyhow      = "1"
+# Dynamic system HDF5.  Static HDF5 (hdf5-sys features=["static","zlib"]) was
+# tried but libz-sys >= 1.1 builds zlib-ng with -DZ_SOLO, which rejects the
+# NULL zalloc/zfree that HDF5's H5Z_filter_deflate passes → inflateInit() fails.
+# See docs/roadmap.md §0.0.6 "Static-linking investigation" for full details.
+# TODO 0.0.6: test whether dynamic HDF5 + rhdf5 co-existence is safe in practice.
 
 [profile.release]
 lto           = true

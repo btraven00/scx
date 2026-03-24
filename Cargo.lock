@@ -918,6 +918,7 @@ dependencies = [
  "clap",
  "futures",
  "scx-core",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

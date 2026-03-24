@@ -17,7 +17,7 @@ use crate::{
     stream::{DatasetReader, DatasetWriter},
 };
 
-/// Number of elements per HDF5 chunk for resizable datasets.
+/// Number of elements per HDF5 chunk for the streaming X arrays (resizable datasets require chunks).
 const CHUNK_ELEMS: usize = 65_536;
 
 /// Streaming writer for the AnnData `.h5ad` format.
@@ -112,12 +112,17 @@ fn write_encoding_on_ds(ds: &Dataset, enc_type: &str, enc_version: &str) -> Resu
 // ---------------------------------------------------------------------------
 
 fn init_resizable_1d<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()> {
-    // In hdf5 0.8: resizability lives in SimpleExtents, not the builder.
     file.new_dataset::<T>()
         .chunk(CHUNK_ELEMS)
         .shape(SimpleExtents::resizable([0usize]))
         .create(path)?;
     Ok(())
+}
+
+fn write_1d<T: hdf5::H5Type>(grp: &Group, name: &str, data: Array1<T>) -> Result<Dataset> {
+    let ds = grp.new_dataset::<T>().shape(data.len()).create(name)?;
+    ds.write(&data)?;
+    Ok(ds)
 }
 
 fn write_vlen_str_dataset(grp: &Group, name: &str, strings: &[String]) -> Result<Dataset> {
@@ -170,22 +175,20 @@ fn write_dataframe(
 fn write_column(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
     match data {
         ColumnData::Float(v) => {
-            let ds = grp.new_dataset::<f64>().shape(v.len()).create(name)?;
-            ds.write(&Array1::from_vec(v.clone()))?;
+            let ds = write_1d(grp, name, Array1::from_vec(v.clone()))?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::Int(v) => {
-            let ds = grp.new_dataset::<i32>().shape(v.len()).create(name)?;
-            ds.write(&Array1::from_vec(v.clone()))?;
+            let ds = write_1d(grp, name, Array1::from_vec(v.clone()))?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::Bool(v) => {
             let vi: Vec<u8> = v.iter().map(|&b| b as u8).collect();
-            let ds = grp.new_dataset::<u8>().shape(vi.len()).create(name)?;
-            ds.write(&Array1::from_vec(vi))?;
+            let ds = write_1d(grp, name, Array1::from_vec(vi))?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::String(v) => {
+            // VarLen strings don't support HDF5 filters — written uncompressed.
             let ds = write_vlen_str_dataset(grp, name, v)?;
             write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
         }
@@ -199,13 +202,11 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
             // codes (i8 for ≤127 categories, i16 otherwise)
             if levels.len() <= 127 {
                 let c: Vec<i8> = codes.iter().map(|&x| x as i8).collect();
-                let ds = cat_grp.new_dataset::<i8>().shape(c.len()).create("codes")?;
-                ds.write(&Array1::from_vec(c))?;
+                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c))?;
                 write_encoding_on_ds(&ds, "array", "0.2.0")?;
             } else {
                 let c: Vec<i16> = codes.iter().map(|&x| x as i16).collect();
-                let ds = cat_grp.new_dataset::<i16>().shape(c.len()).create("codes")?;
-                ds.write(&Array1::from_vec(c))?;
+                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c))?;
                 write_encoding_on_ds(&ds, "array", "0.2.0")?;
             }
 
@@ -340,20 +341,19 @@ impl DatasetWriter for H5AdWriter {
     }
 
     async fn finalize(&mut self) -> Result<()> {
+        let x_grp = self.file.group("X")?;
+
         // Write X/indptr — use i32 if small enough, i64 otherwise
         let max_val = self.x_indptr.iter().copied().max().unwrap_or(0);
         if max_val > i32::MAX as u64 {
             let v: Vec<i64> = self.x_indptr.iter().map(|&x| x as i64).collect();
-            let ds = self.file.new_dataset::<i64>().shape(v.len()).create("X/indptr")?;
-            ds.write(&Array1::from_vec(v))?;
+            write_1d(&x_grp, "indptr", Array1::from_vec(v))?;
         } else {
             let v: Vec<i32> = self.x_indptr.iter().map(|&x| x as i32).collect();
-            let ds = self.file.new_dataset::<i32>().shape(v.len()).create("X/indptr")?;
-            ds.write(&Array1::from_vec(v))?;
+            write_1d(&x_grp, "indptr", Array1::from_vec(v))?;
         }
 
         // Write X/shape attribute: [n_obs, n_vars] (required by AnnData spec)
-        let x_grp = self.file.group("X")?;
         let shape_vals = vec![self.n_obs as i64, self.n_vars as i64];
         let attr = x_grp.new_attr::<i64>().shape(2).create("shape")?;
         attr.write(&Array1::from_vec(shape_vals))?;
@@ -805,24 +805,20 @@ fn ad_write_csr_group(file: &File, group_path: &str, mat: &SparseMatrixCSR) -> R
     attr.write(&Array1::from_vec(shape_vals))?;
 
     let data_f32: Vec<f32> = mat.data.to_f64().into_iter().map(|x| x as f32).collect();
-    let ds = grp.new_dataset::<f32>().shape(data_f32.len()).create("data")?;
-    ds.write(&Array1::from_vec(data_f32))?;
+    let ds = write_1d(&grp, "data", Array1::from_vec(data_f32))?;
     write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
     let indices_i32: Vec<i32> = mat.indices.iter().map(|&x| x as i32).collect();
-    let ds = grp.new_dataset::<i32>().shape(indices_i32.len()).create("indices")?;
-    ds.write(&Array1::from_vec(indices_i32))?;
+    let ds = write_1d(&grp, "indices", Array1::from_vec(indices_i32))?;
     write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
     let max_val = mat.indptr.iter().copied().max().unwrap_or(0);
     if max_val > i32::MAX as u64 {
         let v: Vec<i64> = mat.indptr.iter().map(|&x| x as i64).collect();
-        let ds = grp.new_dataset::<i64>().shape(v.len()).create("indptr")?;
-        ds.write(&Array1::from_vec(v))?;
+        write_1d(&grp, "indptr", Array1::from_vec(v))?;
     } else {
         let v: Vec<i32> = mat.indptr.iter().map(|&x| x as i32).collect();
-        let ds = grp.new_dataset::<i32>().shape(v.len()).create("indptr")?;
-        ds.write(&Array1::from_vec(v))?;
+        write_1d(&grp, "indptr", Array1::from_vec(v))?;
     }
 
     Ok(())
