@@ -377,15 +377,15 @@ impl DatasetWriter for H5AdWriter {
 ///
 /// Spec: <https://anndata.readthedocs.io/en/latest/fileformat-prose.html>
 ///
-/// Only CSR-encoded X is supported. Files with CSC X (e.g. written by older
-/// scanpy versions) must be converted first:
+/// Supports both sparse (CSR) and dense X storage.
+/// Files with CSC X must be converted first:
 ///   `adata.X = adata.X.tocsr(); adata.write_h5ad(path)`
 pub struct H5AdReader {
     path: PathBuf,
     n_obs: usize,
     n_vars: usize,
-    /// CSR row pointer array (n_obs + 1 entries). Small enough to hold in RAM.
-    indptr: Vec<u64>,
+    /// CSR row pointer array (n_obs + 1 entries). None when X is dense.
+    indptr: Option<Vec<u64>>,
     chunk_size: usize,
     dtype: DataType,
 }
@@ -406,43 +406,61 @@ impl H5AdReader {
             }
         }
 
-        let x_grp = file.group("X").map_err(|_| {
-            ScxError::InvalidFormat("missing /X group — not a valid H5AD file".into())
-        })?;
+        // X can be stored as a dense 2-D dataset or a sparse CSR group.
+        let x_is_dense = file.dataset("X").is_ok() && file.group("X").is_err();
 
-        if let Ok(enc) = read_str_attr_on_group(&x_grp, "encoding-type") {
-            if enc == "csc_matrix" {
+        let (n_obs, n_vars, indptr, dtype) = if x_is_dense {
+            let ds = file.dataset("X")?;
+            let sh = ds.shape();
+            if sh.len() != 2 {
                 return Err(ScxError::InvalidFormat(
-                    "X is stored as CSC. Convert to CSR first: \
-                     adata.X = adata.X.tocsr(); adata.write_h5ad(path)".into(),
+                    "dense X must be 2-D".into(),
                 ));
             }
-        }
+            let dtype = match ds.dtype()?.to_descriptor()? {
+                TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
+                TypeDescriptor::Float(_)             => DataType::F64,
+                TypeDescriptor::Integer(_)           => DataType::I32,
+                _                                    => DataType::F32,
+            };
+            (sh[0], sh[1], None, dtype)
+        } else {
+            let x_grp = file.group("X").map_err(|_| {
+                ScxError::InvalidFormat("missing /X — not a valid H5AD file".into())
+            })?;
 
-        // Shape attribute: [n_obs, n_vars], written as i64 by our writer.
-        // Older AnnData files may use i32.
-        let shape_attr = x_grp.attr("shape").map_err(|_| {
-            ScxError::InvalidFormat("missing X/shape attribute".into())
-        })?;
-        let (n_obs, n_vars) = match shape_attr.dtype()?.to_descriptor()? {
-            TypeDescriptor::Integer(IntSize::U8) => {
-                let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
-                (s[0] as usize, s[1] as usize)
+            if let Ok(enc) = read_str_attr_on_group(&x_grp, "encoding-type") {
+                if enc == "csc_matrix" {
+                    return Err(ScxError::InvalidFormat(
+                        "X is stored as CSC. Convert to CSR first: \
+                         adata.X = adata.X.tocsr(); adata.write_h5ad(path)".into(),
+                    ));
+                }
             }
-            _ => {
-                let s: Vec<i32> = shape_attr.read_1d::<i32>()?.to_vec();
-                (s[0] as usize, s[1] as usize)
+
+            let shape_attr = x_grp.attr("shape").map_err(|_| {
+                ScxError::InvalidFormat("missing X/shape attribute".into())
+            })?;
+            let (n_obs, n_vars) = match shape_attr.dtype()?.to_descriptor()? {
+                TypeDescriptor::Integer(IntSize::U8) => {
+                    let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
+                    (s[0] as usize, s[1] as usize)
+                }
+                _ => {
+                    let s: Vec<i32> = shape_attr.read_1d::<i32>()?.to_vec();
+                    (s[0] as usize, s[1] as usize)
+                }
+            };
+
+            let indptr = ad_read_indptr(&file, "X/indptr")?;
+            if indptr.len() != n_obs + 1 {
+                return Err(ScxError::InvalidFormat(format!(
+                    "X/indptr length {} != n_obs+1 {}", indptr.len(), n_obs + 1
+                )));
             }
+            let dtype = ad_detect_dtype(&file, "X/data")?;
+            (n_obs, n_vars, Some(indptr), dtype)
         };
-
-        let indptr = ad_read_indptr(&file, "X/indptr")?;
-        if indptr.len() != n_obs + 1 {
-            return Err(ScxError::InvalidFormat(format!(
-                "X/indptr length {} != n_obs+1 {}", indptr.len(), n_obs + 1
-            )));
-        }
-
-        let dtype = ad_detect_dtype(&file, "X/data")?;
 
         Ok(Self { path, n_obs, n_vars, indptr, chunk_size, dtype })
     }
@@ -489,6 +507,67 @@ fn ad_detect_dtype(file: &File, path: &str) -> Result<DataType> {
         TypeDescriptor::Integer(IntSize::U8) => DataType::I32, // i64 → i32 (counts fit)
         _                                    => DataType::F32,
     })
+}
+
+/// Read a row slice of a dense 2-D dataset and convert to a sparse CSR chunk.
+fn ad_read_dense_chunk(
+    path: &Path,
+    row_start: usize,
+    row_end: usize,
+    n_vars: usize,
+    dtype: DataType,
+) -> Result<MatrixChunk> {
+    let file  = File::open(path)?;
+    let ds    = file.dataset("X")?;
+    let nrows = row_end - row_start;
+
+    // Read the slice as f64 regardless of stored dtype; cast after.
+    let slice = ds.read_slice::<f64, _, _>(s![row_start..row_end, ..])?;
+    let csr = dense_array2_to_csr(slice.view(), nrows, n_vars, dtype);
+    Ok(MatrixChunk { row_offset: row_start, nrows, data: csr })
+}
+
+/// Convert a dense 2-D array view to a CSR sparse matrix, skipping exact zeros.
+fn dense_array2_to_csr(
+    arr: ndarray::ArrayView2<f64>,
+    nrows: usize,
+    ncols: usize,
+    dtype: DataType,
+) -> SparseMatrixCSR {
+    let mut indices: Vec<u32> = Vec::new();
+    let mut data_f64: Vec<f64> = Vec::new();
+    let mut indptr: Vec<u64> = Vec::with_capacity(nrows + 1);
+    indptr.push(0);
+    for row in arr.rows() {
+        for (j, &v) in row.iter().enumerate() {
+            if v != 0.0 {
+                indices.push(j as u32);
+                data_f64.push(v);
+            }
+        }
+        indptr.push(indices.len() as u64);
+    }
+    let data = match dtype {
+        DataType::F32 => TypedVec::F32(data_f64.iter().map(|&x| x as f32).collect()),
+        DataType::F64 => TypedVec::F64(data_f64),
+        DataType::I32 => TypedVec::I32(data_f64.iter().map(|&x| x as i32).collect()),
+        DataType::U32 => TypedVec::U32(data_f64.iter().map(|&x| x as u32).collect()),
+    };
+    SparseMatrixCSR { shape: (nrows, ncols), indptr, indices, data }
+}
+
+/// Read a dense 2-D dataset as a full CSR matrix (for layers/obsp/varp).
+fn ad_read_dense_as_csr(file: &File, path: &str) -> Result<SparseMatrixCSR> {
+    let ds  = file.dataset(path)?;
+    let sh  = ds.shape();
+    if sh.len() != 2 {
+        return Err(ScxError::InvalidFormat(format!(
+            "dense layer '{path}' must be 2-D, got {}D", sh.len()
+        )));
+    }
+    let (nrows, ncols) = (sh[0], sh[1]);
+    let arr = ds.read::<f64, ndarray::Ix2>()?;
+    Ok(dense_array2_to_csr(arr.view(), nrows, ncols, DataType::F32))
 }
 
 fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
@@ -597,9 +676,21 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
             && file.dataset(&col_path).is_err();
 
         let col_data = if is_group {
-            match ad_read_categorical(file, &col_path) {
+            // Distinguish categorical (codes+categories) from nullable (values+mask)
+            let has_codes  = file.dataset(&format!("{col_path}/codes")).is_ok();
+            let has_values = file.dataset(&format!("{col_path}/values")).is_ok();
+            let result = if has_codes {
+                ad_read_categorical(file, &col_path)
+            } else if has_values {
+                ad_read_nullable(file, &col_path)
+            } else {
+                Err(ScxError::InvalidFormat(format!(
+                    "unknown group encoding at '{col_path}'"
+                )))
+            };
+            match result {
                 Ok(cd) => cd,
-                Err(e) => { tracing::warn!("skipping categorical '{col_name}': {e}"); continue; }
+                Err(e) => { tracing::warn!("skipping column '{col_name}': {e}"); continue; }
             }
         } else {
             match ad_read_column(file, &col_path) {
@@ -673,6 +764,66 @@ fn ad_read_categorical(file: &File, grp_path: &str) -> Result<ColumnData> {
 
     let levels = ad_read_strings(file, &format!("{grp_path}/categories"))?;
     Ok(ColumnData::Categorical { codes, levels })
+}
+
+/// Read a nullable column group (values + mask) as ColumnData.
+/// mask == 0 means valid, mask == 1 means NA.
+/// Float/Int columns use NaN for NA; Bool columns use false.
+fn ad_read_nullable(file: &File, grp_path: &str) -> Result<ColumnData> {
+    let values_path = format!("{grp_path}/values");
+    let mask_path   = format!("{grp_path}/mask");
+
+    let ds = file.dataset(&values_path)?;
+    let mask: Vec<bool> = if let Ok(mds) = file.dataset(&mask_path) {
+        match mds.dtype()?.to_descriptor()? {
+            TypeDescriptor::Boolean => mds.read_1d::<bool>()?.to_vec(),
+            TypeDescriptor::Integer(_) => {
+                mds.read_1d::<i8>()?.iter().map(|&x| x != 0).collect()
+            }
+            _ => vec![false; ds.shape().first().copied().unwrap_or(0)],
+        }
+    } else {
+        vec![false; ds.shape().first().copied().unwrap_or(0)]
+    };
+
+    match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::Float(FloatSize::U4) => {
+            let vals: Vec<f32> = ds.read_1d::<f32>()?.to_vec();
+            Ok(ColumnData::Float(
+                vals.iter().zip(&mask)
+                    .map(|(&v, &na)| if na { f64::NAN } else { v as f64 })
+                    .collect()
+            ))
+        }
+        TypeDescriptor::Float(_) => {
+            let vals: Vec<f64> = ds.read_1d::<f64>()?.to_vec();
+            Ok(ColumnData::Float(
+                vals.iter().zip(&mask)
+                    .map(|(&v, &na)| if na { f64::NAN } else { v })
+                    .collect()
+            ))
+        }
+        TypeDescriptor::Integer(_) => {
+            // Widen nullable int to f64 with NaN for NA
+            let vals: Vec<i32> = ds.read_1d::<i32>()?.to_vec();
+            Ok(ColumnData::Float(
+                vals.iter().zip(&mask)
+                    .map(|(&v, &na)| if na { f64::NAN } else { v as f64 })
+                    .collect()
+            ))
+        }
+        TypeDescriptor::Boolean => {
+            let vals: Vec<bool> = ds.read_1d::<bool>()?.to_vec();
+            Ok(ColumnData::Bool(
+                vals.iter().zip(&mask)
+                    .map(|(&v, &na)| if na { false } else { v })
+                    .collect()
+            ))
+        }
+        other => Err(ScxError::InvalidFormat(format!(
+            "unsupported nullable column dtype {:?} at '{grp_path}'", other
+        ))),
+    }
 }
 
 /// Read the obsm group as named dense matrices.
@@ -877,7 +1028,13 @@ impl DatasetReader for H5AdReader {
         };
         let mut map = HashMap::new();
         for name in grp.member_names().unwrap_or_default() {
-            match ad_read_full_csr(&file, &format!("layers/{name}")) {
+            let path = format!("layers/{name}");
+            let result = if file.dataset(&path).is_ok() && file.group(&path).is_err() {
+                ad_read_dense_as_csr(&file, &path)
+            } else {
+                ad_read_full_csr(&file, &path)
+            };
+            match result {
                 Ok(m)  => { map.insert(name, m); }
                 Err(e) => tracing::warn!("skipping layers['{name}']: {e}"),
             }
@@ -942,22 +1099,38 @@ impl DatasetReader for H5AdReader {
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
         let path       = self.path.clone();
-        let indptr     = self.indptr.clone();
         let n_obs      = self.n_obs;
         let n_vars     = self.n_vars;
         let chunk_size = self.chunk_size;
         let dtype      = self.dtype;
 
-        Box::pin(stream::unfold(0usize, move |row_start| {
-            let path   = path.clone();
-            let indptr = indptr.clone();
-            async move {
-                if row_start >= n_obs { return None; }
-                let row_end = (row_start + chunk_size).min(n_obs);
-                let chunk = ad_read_chunk(&path, &indptr, row_start, row_end, n_vars, dtype);
-                Some((chunk, row_end))
+        match &self.indptr {
+            Some(indptr) => {
+                let indptr = indptr.clone();
+                Box::pin(stream::unfold(0usize, move |row_start| {
+                    let path   = path.clone();
+                    let indptr = indptr.clone();
+                    async move {
+                        if row_start >= n_obs { return None; }
+                        let row_end = (row_start + chunk_size).min(n_obs);
+                        let chunk = ad_read_chunk(&path, &indptr, row_start, row_end, n_vars, dtype);
+                        Some((chunk, row_end))
+                    }
+                }))
             }
-        }))
+            None => {
+                // Dense X: read rows slice-by-slice and convert to sparse CSR
+                Box::pin(stream::unfold(0usize, move |row_start| {
+                    let path = path.clone();
+                    async move {
+                        if row_start >= n_obs { return None; }
+                        let row_end = (row_start + chunk_size).min(n_obs);
+                        let chunk = ad_read_dense_chunk(&path, row_start, row_end, n_vars, dtype);
+                        Some((chunk, row_end))
+                    }
+                }))
+            }
+        }
     }
 }
 

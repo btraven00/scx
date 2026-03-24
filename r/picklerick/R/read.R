@@ -86,3 +86,46 @@ read_dataset <- function(path, ...) {
     read_h5seurat(path, ...)
   }
 }
+
+#' Read an H5Seurat file directly into a Seurat object
+#'
+#' Converts the file to a temporary H5AD via the SCX engine, reads it with
+#' [anndataR::read_h5ad()], then coerces to a `Seurat` object via
+#' [anndataR::as_Seurat()]. Requires the **Seurat** package (>= 5).
+#'
+#' @inheritParams read_h5seurat
+#' @return A `Seurat` object.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' seu <- read_seurat("pbmc3k.h5seurat")
+#' }
+read_seurat <- function(path, ...) {
+  if (!requireNamespace("Seurat", quietly = TRUE))
+    stop("Seurat package required for read_seurat()", call. = FALSE)
+  adata <- read_h5seurat(path, ...)
+  adata$as_Seurat()
+}
+
+#' Read an H5Seurat file directly into a SingleCellExperiment object
+#'
+#' Converts the file to a temporary H5AD via the SCX engine, reads it with
+#' [anndataR::read_h5ad()], then coerces to a `SingleCellExperiment` via
+#' [anndataR::as_SingleCellExperiment()]. Requires the
+#' **SingleCellExperiment** package.
+#'
+#' @inheritParams read_h5seurat
+#' @return A `SingleCellExperiment` object.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' sce <- read_sce("pbmc3k.h5seurat")
+#' }
+read_sce <- function(path, ...) {
+  if (!requireNamespace("SingleCellExperiment", quietly = TRUE))
+    stop("SingleCellExperiment package required for read_sce()", call. = FALSE)
+  adata <- read_h5seurat(path, ...)
+  adata$as_SingleCellExperiment()
+}

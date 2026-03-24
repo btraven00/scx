@@ -8,7 +8,7 @@ Description: R bindings to the SCX streaming interop engine for single-cell
     genomics. Converts between H5Seurat, H5AD, and SCX internal formats via
     a memory-bounded streaming pipeline. Returns 'anndataR::InMemoryAnnData'
     objects. No Python dependency.
-License: MIT + file LICENSE
+License: GPL-3
 Imports:
     anndataR (>= 0.0.1),
     Matrix
