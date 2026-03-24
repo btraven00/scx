@@ -2,6 +2,7 @@ use std::path::Path;
 
 use clap::Parser;
 use futures::StreamExt;
+use owo_colors::{OwoColorize, Stream::Stdout};
 use scx_core::{
     detect,
     detect::Format,
@@ -9,7 +10,7 @@ use scx_core::{
     ir::ColumnData,
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
-    h5seurat::{H5SeuratReader, H5SeuratWriter, open_h5seurat},
+    h5seurat::{H5SeuratWriter, open_h5seurat},
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     stream::{DatasetReader, DatasetWriter},
 };
@@ -443,130 +444,166 @@ fn cat_levels_preview(data: &ColumnData) -> String {
 async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) -> anyhow::Result<()> {
     let (n_obs, n_vars) = reader.shape();
 
-    println!("File   : {path}");
-    println!("Format : {format_name}");
-    println!("Shape  : {n_obs} obs × {n_vars} vars");
-    println!("X dtype: {}", reader.dtype());
+    // Colour helpers -- all checks against Stdout so piped output stays plain.
+    macro_rules! bold  { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.bold()) } }
+    macro_rules! cyan  { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.bright_cyan()) } }
+    macro_rules! green { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.bright_green()) } }
+    macro_rules! dim   { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.dimmed()) } }
+    // yellow! and bold_cyan! use Style to avoid borrow-of-temporary when chaining.
+    macro_rules! yellow { ($x:expr) => {{
+        use owo_colors::Style;
+        $x.if_supports_color(Stdout, |t| t.style(Style::new().bright_yellow()))
+    }} }
+    macro_rules! bold_cyan { ($x:expr) => {{
+        use owo_colors::Style;
+        $x.if_supports_color(Stdout, |t| t.style(Style::new().bold().bright_cyan()))
+    }} }
+
+    println!("{} {}",  bold!("File   :"), green!(path));
+    println!("{} {}",  bold!("Format :"), cyan!(format_name));
+    println!("{} {} × {}  {}",
+        bold!("Shape  :"),
+        yellow!(n_obs),
+        yellow!(n_vars),
+        dim!("obs × vars"),
+    );
+    let dtype_str = reader.dtype().to_string();
+    println!("{} {}", bold!("X dtype:"), cyan!(&dtype_str));
     println!();
 
-    // obs
+    // section header helper
+    let section = |name: &str, count: usize, unit: &str| {
+        let label = format!(" {unit}):");
+        println!("{} {}{}{}",
+            bold_cyan!(name),
+            bold!("("),
+            yellow!(count),
+            bold!(&label),
+        );
+    };
+
+    // ── obs ──────────────────────────────────────────────────────────────────
     let obs = reader.obs().await?;
-    println!("obs ({} columns):", obs.columns.len());
-    if obs.columns.is_empty() {
-        println!("  (none)");
-    }
+    section("obs", obs.columns.len(), "columns");
+    if obs.columns.is_empty() { println!("  {}", dim!("(none)")); }
     for col in &obs.columns {
         let extra = cat_levels_preview(&col.data);
+        let type_str = col_type_str(&col.data);
         if extra.is_empty() {
-            println!("  {:<30} {}", col.name, col_type_str(&col.data));
+            println!("  {:<30} {}", col.name, dim!(&type_str));
         } else {
-            println!("  {:<30} {}  — {}", col.name, col_type_str(&col.data), extra);
+            println!("  {:<30} {}  {} {}", col.name, dim!(&type_str), dim!("—"), dim!(&extra));
         }
     }
     println!();
 
-    // var
+    // ── var ──────────────────────────────────────────────────────────────────
     let var = reader.var().await?;
-    println!("var ({} columns):", var.columns.len());
-    if var.columns.is_empty() {
-        println!("  (none)");
-    }
+    section("var", var.columns.len(), "columns");
+    if var.columns.is_empty() { println!("  {}", dim!("(none)")); }
     for col in &var.columns {
         let extra = cat_levels_preview(&col.data);
+        let type_str = col_type_str(&col.data);
         if extra.is_empty() {
-            println!("  {:<30} {}", col.name, col_type_str(&col.data));
+            println!("  {:<30} {}", col.name, dim!(&type_str));
         } else {
-            println!("  {:<30} {}  — {}", col.name, col_type_str(&col.data), extra);
+            println!("  {:<30} {}  {} {}", col.name, dim!(&type_str), dim!("—"), dim!(&extra));
         }
     }
     println!();
 
-    // obsm
+    // ── obsm ─────────────────────────────────────────────────────────────────
     let obsm = reader.obsm().await?;
-    println!("obsm ({} keys):", obsm.map.len());
+    section("obsm", obsm.map.len(), "keys");
     let mut keys: Vec<_> = obsm.map.keys().collect();
     keys.sort();
     for k in keys {
         let m = &obsm.map[k];
-        println!("  {:<30} ({}, {})", k, m.shape.0, m.shape.1);
+        let shape = format!("({}, {})", m.shape.0, m.shape.1);
+        println!("  {:<30} {}", k, dim!(&shape));
     }
-    if obsm.map.is_empty() { println!("  (none)"); }
+    if obsm.map.is_empty() { println!("  {}", dim!("(none)")); }
     println!();
 
-    // varm
+    // ── varm ─────────────────────────────────────────────────────────────────
     let varm = reader.varm().await?;
-    println!("varm ({} keys):", varm.map.len());
+    section("varm", varm.map.len(), "keys");
     let mut keys: Vec<_> = varm.map.keys().collect();
     keys.sort();
     for k in keys {
         let m = &varm.map[k];
-        println!("  {:<30} ({}, {})", k, m.shape.0, m.shape.1);
+        let shape = format!("({}, {})", m.shape.0, m.shape.1);
+        println!("  {:<30} {}", k, dim!(&shape));
     }
-    if varm.map.is_empty() { println!("  (none)"); }
+    if varm.map.is_empty() { println!("  {}", dim!("(none)")); }
     println!();
 
-    // layers
+    // ── layers ───────────────────────────────────────────────────────────────
     let layers = reader.layers().await?;
-    println!("layers ({} keys):", layers.map.len());
+    section("layers", layers.map.len(), "keys");
     let mut keys: Vec<_> = layers.map.keys().collect();
     keys.sort();
     for k in keys {
         let m = &layers.map[k];
-        let nnz = m.indices.len();
-        println!("  {:<30} {} × {}  nnz={}", k, m.shape.0, m.shape.1, nnz);
+        println!("  {:<30} {} × {}  {}{}",
+            k, yellow!(m.shape.0), yellow!(m.shape.1),
+            dim!("nnz="), yellow!(m.indices.len()));
     }
-    if layers.map.is_empty() { println!("  (none)"); }
+    if layers.map.is_empty() { println!("  {}", dim!("(none)")); }
     println!();
 
-    // obsp
+    // ── obsp ─────────────────────────────────────────────────────────────────
     let obsp = reader.obsp().await?;
-    println!("obsp ({} keys):", obsp.map.len());
+    section("obsp", obsp.map.len(), "keys");
     let mut keys: Vec<_> = obsp.map.keys().collect();
     keys.sort();
     for k in keys {
         let m = &obsp.map[k];
-        let nnz = m.indices.len();
-        println!("  {:<30} {} × {}  nnz={}", k, m.shape.0, m.shape.1, nnz);
+        println!("  {:<30} {} × {}  {}{}",
+            k, yellow!(m.shape.0), yellow!(m.shape.1),
+            dim!("nnz="), yellow!(m.indices.len()));
     }
-    if obsp.map.is_empty() { println!("  (none)"); }
+    if obsp.map.is_empty() { println!("  {}", dim!("(none)")); }
     println!();
 
-    // varp
+    // ── varp ─────────────────────────────────────────────────────────────────
     let varp = reader.varp().await?;
-    println!("varp ({} keys):", varp.map.len());
+    section("varp", varp.map.len(), "keys");
     let mut keys: Vec<_> = varp.map.keys().collect();
     keys.sort();
     for k in keys {
         let m = &varp.map[k];
-        let nnz = m.indices.len();
-        println!("  {:<30} {} × {}  nnz={}", k, m.shape.0, m.shape.1, nnz);
+        println!("  {:<30} {} × {}  {}{}",
+            k, yellow!(m.shape.0), yellow!(m.shape.1),
+            dim!("nnz="), yellow!(m.indices.len()));
     }
-    if varp.map.is_empty() { println!("  (none)"); }
+    if varp.map.is_empty() { println!("  {}", dim!("(none)")); }
     println!();
 
-    // uns
+    // ── uns ──────────────────────────────────────────────────────────────────
     let uns = reader.uns().await?;
     if uns.raw.is_null() {
-        println!("uns: (empty)");
+        section("uns", 0, "keys");
+        println!("  {}", dim!("(none)"));
     } else if let Some(obj) = uns.raw.as_object() {
-        println!("uns ({} keys):", obj.len());
+        section("uns", obj.len(), "keys");
         let mut keys: Vec<_> = obj.keys().collect();
         keys.sort();
         for k in keys {
             let v = &obj[k];
             let summary = match v {
-                serde_json::Value::Array(a) => format!("array [{}]", a.len()),
+                serde_json::Value::Array(a)  => format!("array [{}]", a.len()),
                 serde_json::Value::Object(o) => format!("dict  ({} keys)", o.len()),
                 serde_json::Value::String(s) => {
                     if s.len() > 60 { format!("\"{}...\"", &s[..57]) }
-                    else { format!("\"{}\"", s) }
+                    else { format!("\"{s}\"") }
                 }
                 other => format!("{other}"),
             };
-            println!("  {:<30} {}", k, summary);
+            println!("  {:<30} {}", k, dim!(&summary));
         }
     } else {
-        println!("uns: {}", uns.raw);
+        println!("{} {}", bold_cyan!("uns"), uns.raw);
     }
 
     Ok(())
