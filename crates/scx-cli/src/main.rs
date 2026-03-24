@@ -9,7 +9,8 @@ use scx_core::{
     ir::ColumnData,
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
-    h5seurat::{H5SeuratReader, H5SeuratWriter},
+    h5seurat::{H5SeuratReader, H5SeuratWriter, open_h5seurat},
+    npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -66,6 +67,50 @@ enum Cli {
         #[arg(long, default_value = "counts")]
         layer: String,
     },
+
+    /// Dump a materialised IR snapshot to a directory of NPY files
+    ///
+    /// Reads the input file and writes raw-binary NPY arrays plus a
+    /// meta.json manifest to OUTPUT_DIR.  The snapshot can then be fed
+    /// back into `scx convert` for benchmarking isolated from I/O.
+    ///
+    /// Examples:
+    ///   scx snapshot pbmc.h5seurat ir/          # everything
+    ///   scx snapshot pbmc.h5seurat ir/ --only X,obs_index
+    ///   scx snapshot pbmc.h5seurat ir/ --exclude layers,obsp
+    ///
+    /// Slot specifiers for --only / --exclude:
+    ///   X, obs_index, var_index, uns
+    ///   obs, obs:col_name, var, var:col_name
+    ///   obsm, obsm:key, varm, varm:key
+    ///   layers, layers:key, obsp, obsp:key, varp, varp:key
+    Snapshot {
+        /// Input file (.h5seurat, .h5ad, …)
+        input: String,
+
+        /// Output directory (created if absent)
+        output_dir: String,
+
+        /// Include only these comma-separated slot specifiers
+        #[arg(long, conflicts_with = "exclude")]
+        only: Option<String>,
+
+        /// Exclude these comma-separated slot specifiers
+        #[arg(long, conflicts_with = "only")]
+        exclude: Option<String>,
+
+        /// Cells per streaming chunk (for reading the input)
+        #[arg(long, default_value = "5000")]
+        chunk_size: usize,
+
+        /// Seurat assay (H5Seurat only)
+        #[arg(long, default_value = "RNA")]
+        assay: String,
+
+        /// Seurat layer (H5Seurat only)
+        #[arg(long, default_value = "counts")]
+        layer: String,
+    },
 }
 
 #[tokio::main]
@@ -89,19 +134,25 @@ async fn run() -> anyhow::Result<()> {
     match cli {
         Cli::Inspect { input, assay, layer } => {
             let input_path = Path::new(&input);
-            let fmt = detect::sniff(input_path).or_else(|| {
-                match input_path.extension().and_then(|e| e.to_str()) {
-                    Some("h5seurat") => Some(Format::H5Seurat),
-                    Some("h5ad")     => Some(Format::H5Ad),
-                    _                => Some(Format::ScxH5),
-                }
-            });
+            let fmt = detect::sniff_dir(input_path)
+                .or_else(|| detect::sniff(input_path))
+                .or_else(|| {
+                    match input_path.extension().and_then(|e| e.to_str()) {
+                        Some("h5seurat") => Some(Format::H5Seurat),
+                        Some("h5ad")     => Some(Format::H5Ad),
+                        _                => Some(Format::ScxH5),
+                    }
+                });
 
-            let chunk = 1000; // only used for reader init, not streaming
+            let chunk = 1000;
             match fmt {
+                Some(Format::NpyDir) => {
+                    let mut r = NpyIrReader::open(input_path, chunk)?;
+                    inspect(&mut r, &input, "NPY snapshot").await?;
+                }
                 Some(Format::H5Seurat) => {
-                    let mut r = H5SeuratReader::open(input_path, chunk, Some(&assay), Some(&layer))?;
-                    inspect(&mut r, &input, "H5Seurat").await?;
+                    let mut r = open_h5seurat(input_path, chunk, Some(&assay), Some(&layer))?;
+                    inspect(&mut *r, &input, "H5Seurat").await?;
                 }
                 Some(Format::H5Ad) => {
                     let mut r = H5AdReader::open(input_path, chunk)?;
@@ -125,21 +176,27 @@ async fn run() -> anyhow::Result<()> {
 
             let input_path = Path::new(&input);
 
-            // Detect format by content; fall back to extension only for
-            // files that don't match any HDF5 fingerprint (e.g. non-HDF5).
-            let fmt = detect::sniff(input_path).or_else(|| {
-                match input_path.extension().and_then(|e| e.to_str()) {
-                    Some("h5seurat") => Some(Format::H5Seurat),
-                    Some("h5ad")     => Some(Format::H5Ad),
-                    _                => Some(Format::ScxH5),
-                }
-            });
+            // NPY snapshot directory takes priority.
+            let fmt = detect::sniff_dir(input_path)
+                .or_else(|| detect::sniff(input_path))
+                .or_else(|| {
+                    match input_path.extension().and_then(|e| e.to_str()) {
+                        Some("h5seurat") => Some(Format::H5Seurat),
+                        Some("h5ad")     => Some(Format::H5Ad),
+                        _                => Some(Format::ScxH5),
+                    }
+                });
 
             match fmt {
+                Some(Format::NpyDir) => {
+                    tracing::info!(path = %input, "detected format: NPY snapshot directory");
+                    let mut reader = NpyIrReader::open(input_path, chunk_size)?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
+                }
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
-                    let mut reader = H5SeuratReader::open(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
+                    let mut reader = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
+                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer).await?;
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
@@ -153,9 +210,125 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         }
+
+        Cli::Snapshot { input, output_dir, only, exclude, chunk_size, assay, layer } => {
+            let input_path = Path::new(&input);
+            let output_path = Path::new(&output_dir);
+
+            let filter = match (only.as_deref(), exclude.as_deref()) {
+                (Some(o), _) => SlotFilter::from_only(o),
+                (_, Some(e)) => SlotFilter::from_exclude(e),
+                _            => SlotFilter::all(),
+            };
+
+            tracing::info!(
+                input = %input,
+                output = %output_dir,
+                "materialising IR snapshot"
+            );
+
+            // Read the full dataset from any supported input format.
+            let fmt = detect::sniff_dir(input_path)
+                .or_else(|| detect::sniff(input_path))
+                .or_else(|| {
+                    match input_path.extension().and_then(|e| e.to_str()) {
+                        Some("h5seurat") => Some(Format::H5Seurat),
+                        Some("h5ad")     => Some(Format::H5Ad),
+                        _                => Some(Format::ScxH5),
+                    }
+                });
+
+            let dataset = match fmt {
+                Some(Format::NpyDir) => {
+                    NpyIrReader::open(input_path, chunk_size)?.into_dataset()
+                }
+                Some(Format::H5Seurat) => {
+                    let mut r = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
+                    materialise_dataset(&mut *r).await?
+                }
+                Some(Format::H5Ad) => {
+                    materialise_dataset(&mut H5AdReader::open(input_path, chunk_size)?).await?
+                }
+                Some(Format::ScxH5) | None => {
+                    materialise_dataset(&mut ScxH5Reader::open(input_path, chunk_size)?).await?
+                }
+            };
+
+            NpyIrWriter::write(output_path, &dataset, &filter)?;
+
+            tracing::info!(
+                output = %output_dir,
+                n_obs  = dataset.x.shape.0,
+                n_vars = dataset.x.shape.1,
+                "snapshot written"
+            );
+        }
     }
 
     Ok(())
+}
+
+/// Fully materialise a streaming reader into a [`SingleCellDataset`].
+async fn materialise_dataset(
+    reader: &mut dyn DatasetReader,
+) -> anyhow::Result<scx_core::ir::SingleCellDataset> {
+    use futures::StreamExt;
+    use scx_core::ir::{SparseMatrixCSR, SingleCellDataset};
+    use scx_core::dtype::TypedVec;
+
+    let (n_obs, n_vars) = reader.shape();
+    let x_dtype = reader.dtype();
+
+    let obs    = reader.obs().await?;
+    let var    = reader.var().await?;
+    let obsm   = reader.obsm().await?;
+    let uns    = reader.uns().await?;
+    let layers = reader.layers().await?;
+    let obsp   = reader.obsp().await?;
+    let varp   = reader.varp().await?;
+    let varm   = reader.varm().await?;
+
+    // Accumulate X chunks into a full CSR.
+    let mut x_indptr: Vec<u64> = Vec::with_capacity(n_obs + 1);
+    x_indptr.push(0);
+    let mut x_indices: Vec<u32> = Vec::new();
+    let mut x_data_f32: Vec<f32> = Vec::new();
+    let mut x_data_f64: Vec<f64> = Vec::new();
+    let mut x_data_i32: Vec<i32> = Vec::new();
+    let mut x_data_u32: Vec<u32> = Vec::new();
+
+    let mut stream = reader.x_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        x_indices.extend_from_slice(&chunk.data.indices);
+        match &chunk.data.data {
+            TypedVec::F32(v) => x_data_f32.extend_from_slice(v),
+            TypedVec::F64(v) => x_data_f64.extend_from_slice(v),
+            TypedVec::I32(v) => x_data_i32.extend_from_slice(v),
+            TypedVec::U32(v) => x_data_u32.extend_from_slice(v),
+        }
+        // Extend indptr (skip the leading 0 of each chunk's indptr).
+        let base = *x_indptr.last().unwrap();
+        for &p in &chunk.data.indptr[1..] {
+            x_indptr.push(base + p);
+        }
+    }
+
+    let x_data = match x_dtype {
+        DataType::F32 => TypedVec::F32(x_data_f32),
+        DataType::F64 => TypedVec::F64(x_data_f64),
+        DataType::I32 => TypedVec::I32(x_data_i32),
+        DataType::U32 => TypedVec::U32(x_data_u32),
+    };
+
+    let x = SparseMatrixCSR {
+        shape: (n_obs, n_vars),
+        indptr: x_indptr,
+        indices: x_indices,
+        data: x_data,
+    };
+
+    Ok(SingleCellDataset { x, x_dtype, obs, var, obsm, uns, layers, obsp, varp, varm })
 }
 
 async fn convert_with_reader(
