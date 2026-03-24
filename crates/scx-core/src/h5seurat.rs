@@ -545,6 +545,54 @@ fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
 }
 
 // ---------------------------------------------------------------------------
+// Seurat v5 / BPCells routing
+// ---------------------------------------------------------------------------
+
+/// Candidate group paths to probe within an H5Seurat file, in priority order.
+///
+/// Seurat v4/v3: `assays/{assay}/{layer}` (dgCMatrix or BPCells)
+/// Seurat v5:    `assays/{assay}/layers/{layer}` (BPCells or future formats)
+fn candidate_group_paths(assay: &str, layer: &str) -> Vec<String> {
+    vec![
+        format!("assays/{assay}/{layer}"),
+        format!("assays/{assay}/layers/{layer}"),
+    ]
+}
+
+/// Open an H5Seurat file, automatically routing to `BpcellsDatasetReader`
+/// when the matrix group carries a BPCells `version` attribute.
+///
+/// Falls back to the standard `H5SeuratReader` (dgCMatrix path) otherwise.
+pub fn open_h5seurat<P: AsRef<Path>>(
+    path: P,
+    chunk_size: usize,
+    assay: Option<&str>,
+    layer: Option<&str>,
+) -> Result<Box<dyn crate::stream::DatasetReader + Send>> {
+    use crate::h5bpcells::{open_bpcells_h5, probe_bpcells_version};
+
+    let path = path.as_ref();
+    let assay = assay.unwrap_or("RNA");
+    let layer = layer.unwrap_or("counts");
+    let file = File::open(path)?;
+
+    // Walk candidate paths; first one that exists and is BPCells wins.
+    for grp_path in candidate_group_paths(assay, layer) {
+        if file.group(&grp_path).is_ok() {
+            if probe_bpcells_version(&file, &grp_path).is_some() {
+                let reader = open_bpcells_h5(&file, &grp_path, chunk_size)?;
+                return Ok(Box::new(reader));
+            }
+            // Found the group but it's dgCMatrix — stop searching.
+            break;
+        }
+    }
+
+    // Standard dgCMatrix path.
+    Ok(Box::new(H5SeuratReader::open(path, chunk_size, Some(assay), Some(layer))?))
+}
+
+// ---------------------------------------------------------------------------
 // DatasetReader impl
 // ---------------------------------------------------------------------------
 
