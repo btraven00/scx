@@ -30,6 +30,7 @@ if [[ $LARGE -eq 1 ]]; then
   R_RUNS=3;   R_WARMUP=0
 else
   GOLDEN="tests/golden/pbmc3k.h5"
+  GOLDEN_SEURAT="tests/golden/pbmc3k.h5seurat"
   DATASET_LABEL="pbmc3k (2.7k cells)"
   SCX_RUNS=10; SCX_WARMUP=3
   R_RUNS=5;    R_WARMUP=1
@@ -82,34 +83,84 @@ peak_rss_mb() {
 
 echo "=== scx (Rust, release) ==="
 
-for chunk in 500 2700; do
-  out="$OUT_DIR/scx_chunk${chunk}.h5ad"
-  label="scx_chunk${chunk}"
+# ── scx: SCX H5 → H5AD ────────────────────────────────────────────────────────
+label="scx_h5"
+out="$OUT_DIR/${label}.h5ad"
+hf_json="$OUT_DIR/${label}_hyperfine.json"
+echo "--- $label (SCX H5 → H5AD) ---"
+hyperfine \
+  --warmup "$SCX_WARMUP" \
+  --runs   "$SCX_RUNS" \
+  --prepare "rm -f $out" \
+  --export-json "$hf_json" \
+  --command-name "$label" \
+  "$SCX_BIN convert $GOLDEN $out"
+mean=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['mean']:.4f}\")")
+std=$(python3  -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['stddev']:.4f}\")")
+tmin=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['min']:.4f}\")")
+tmax=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['max']:.4f}\")")
+rss=$(peak_rss_mb "$SCX_BIN" convert "$GOLDEN" "$out")
+echo "  Peak RSS  : ${rss} MB"
+echo ""
+echo "$label,$mean,$std,$tmin,$tmax,$rss" >> "$OUT_DIR/results.csv"
 
-  echo "--- $label ---"
-
+# ── scx: H5Seurat → H5AD ──────────────────────────────────────────────────────
+if [[ -n "${GOLDEN_SEURAT:-}" && -f "$GOLDEN_SEURAT" ]]; then
+  label="scx_h5seurat"
+  out="$OUT_DIR/${label}.h5ad"
   hf_json="$OUT_DIR/${label}_hyperfine.json"
+  echo "--- $label (H5Seurat → H5AD) ---"
   hyperfine \
     --warmup "$SCX_WARMUP" \
     --runs   "$SCX_RUNS" \
     --prepare "rm -f $out" \
     --export-json "$hf_json" \
     --command-name "$label" \
-    "$SCX_BIN convert $GOLDEN $out --chunk-size $chunk"
-
-  # Extract stats from hyperfine JSON (mean, stddev, min, max in seconds)
-  mean=$(python3 -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['mean']:.4f}\")")
-  std=$(python3  -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['stddev']:.4f}\")")
-  tmin=$(python3 -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['min']:.4f}\")")
-  tmax=$(python3 -c "import json,sys; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['max']:.4f}\")")
-
-  # Peak RSS from a single /usr/bin/time run
-  rss=$(peak_rss_mb "$SCX_BIN" convert "$GOLDEN" "$out" --chunk-size "$chunk")
+    "$SCX_BIN convert $GOLDEN_SEURAT $out"
+  mean=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['mean']:.4f}\")")
+  std=$(python3  -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['stddev']:.4f}\")")
+  tmin=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['min']:.4f}\")")
+  tmax=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['max']:.4f}\")")
+  rss=$(peak_rss_mb "$SCX_BIN" convert "$GOLDEN_SEURAT" "$out")
   echo "  Peak RSS  : ${rss} MB"
   echo ""
-
   echo "$label,$mean,$std,$tmin,$tmax,$rss" >> "$OUT_DIR/results.csv"
-done
+else
+  echo "--- scx_h5seurat: SKIPPED (no H5Seurat fixture) ---"
+  echo ""
+fi
+
+# ─── scx NPY (full round-trip: h5 → npy dir → h5ad) ──────────────────────────
+#
+# Comparable to scx_chunk*: both measure a complete h5 → h5ad pipeline.
+# The NPY path serialises to a staging directory first, so it exercises the
+# snapshot writer and the NPY reader back-to-back in a single timed command.
+
+echo "=== scx NPY round-trip ==="
+
+NPY_DIR="$OUT_DIR/scx_npy_rt"
+NPY_OUT="$OUT_DIR/scx_npy_rt.h5ad"
+label="scx_npy"
+hf_json="$OUT_DIR/${label}_hyperfine.json"
+
+echo "--- $label ---"
+hyperfine \
+  --warmup "$SCX_WARMUP" \
+  --runs   "$SCX_RUNS" \
+  --prepare "rm -rf $NPY_DIR $NPY_OUT" \
+  --export-json "$hf_json" \
+  --command-name "$label" \
+  "$SCX_BIN snapshot $GOLDEN $NPY_DIR --only X,obs_index,var_index && $SCX_BIN convert $NPY_DIR $NPY_OUT"
+
+mean=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['mean']:.4f}\")")
+std=$(python3  -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['stddev']:.4f}\")")
+tmin=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['min']:.4f}\")")
+tmax=$(python3 -c "import json; d=json.load(open('$hf_json')); print(f\"{d['results'][0]['max']:.4f}\")")
+
+rss=$(peak_rss_mb bash -c "\"$SCX_BIN\" snapshot \"$GOLDEN\" \"${NPY_DIR}_rss\" --only X,obs_index,var_index && \"$SCX_BIN\" convert \"${NPY_DIR}_rss\" \"${NPY_OUT%.h5ad}_rss.h5ad\"")
+echo "  Peak RSS  : ${rss} MB"
+echo ""
+echo "$label,$mean,$std,$tmin,$tmax,$rss" >> "$OUT_DIR/results.csv"
 
 # ─── anndataR ─────────────────────────────────────────────────────────────────
 
