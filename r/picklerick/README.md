@@ -1,9 +1,9 @@
 # picklerick
 
-R bindings to the [SCX](https://github.com/your-org/scx) streaming single-cell interop engine.
+R bindings to the SCX single-cell format conversion engine.
 
-Converts between H5Seurat, H5AD, and SCX formats via a memory-bounded Rust pipeline.
-Returns `anndataR::InMemoryAnnData` objects. No Python dependency.
+Converts between H5Seurat, H5AD, and SCX formats via a memory-bounded pipeline
+written in Rust. Returns `anndataR::InMemoryAnnData` objects. No Python dependency.
 
 ## Install
 
