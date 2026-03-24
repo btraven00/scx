@@ -50,11 +50,10 @@ convert <- function(input, output,
 # ---------------------------------------------------------------------------
 
 .native_available <- function() {
-  # Native Rust HDF5 bindings share libhdf5.so with R's hdf5r/rhdf5.
-  # HDF5 global state (property list IDs) gets corrupted when the Rust
-  # hdf5 crate initialises alongside R's HDF5 runtime.
-  # Disabled until hdf5-sys uses static HDF5 linking.
-  FALSE
+  # Phase B: HDF5 is statically linked in libpicklerick_r.a, so the Rust
+  # side has its own isolated HDF5 instance separate from R's rhdf5/hdf5r.
+  # The native .Call path is now safe to use.
+  is.loaded("wrap__scx_convert", PACKAGE = "picklerick")
 }
 
 .convert_via_cli <- function(input, output, chunk_size, dtype, assay, layer) {

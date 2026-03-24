@@ -2,13 +2,10 @@
 //!
 //! # Status
 //!
-//! Phase A (current): R functions call the `scx` CLI binary.  This crate is
-//! compiled but not yet wired into the R package build (`src/Makevars.in` is
-//! absent).  Activate native bindings by adding `configure` + `src/Makevars.in`
-//! + `src/entrypoint.c` and removing the CLI shim in `R/convert.R`.
-//!
-//! Phase B (target): `scx_convert` runs in-process; no temp files, no spawned
-//! subprocesses.
+//! Phase B: `scx_convert` runs in-process via extendr FFI.
+//! HDF5 is statically linked (hdf5-sys features=["static"]) so this .so has
+//! its own isolated HDF5 instance that does not share global state with R's
+//! rhdf5 / hdf5r shared libhdf5.so.
 
 use extendr_api::prelude::*;
 use futures::StreamExt;
@@ -16,6 +13,7 @@ use scx_core::{
     detect,
     detect::Format,
     dtype::DataType,
+    h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5seurat::H5SeuratReader,
     stream::{DatasetReader, DatasetWriter},
@@ -45,16 +43,24 @@ async fn do_convert(
     dtype: DataType,
 ) -> anyhow::Result<()> {
     let (n_obs, n_vars) = reader.shape();
-    let obs  = reader.obs().await?;
-    let var  = reader.var().await?;
-    let obsm = reader.obsm().await?;
-    let uns  = reader.uns().await?;
+    let obs    = reader.obs().await?;
+    let var    = reader.var().await?;
+    let obsm   = reader.obsm().await?;
+    let uns    = reader.uns().await?;
+    let layers = reader.layers().await?;
+    let obsp   = reader.obsp().await?;
+    let varp   = reader.varp().await?;
+    let varm   = reader.varm().await?;
 
     let mut writer = H5AdWriter::create(output, n_obs, n_vars, dtype)?;
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
     writer.write_obsm(&obsm).await?;
     writer.write_uns(&uns).await?;
+    writer.write_layers(&layers).await?;
+    writer.write_obsp(&obsp).await?;
+    writer.write_varp(&varp).await?;
+    writer.write_varm(&varm).await?;
 
     let mut stream = reader.x_stream();
     while let Some(chunk) = stream.next().await {
@@ -122,7 +128,9 @@ fn scx_convert(
                 do_convert(&mut r, Path::new(output), dtype).await
             }
             Some(Format::ScxH5) => {
-                Err(anyhow::anyhow!("ScxH5 not yet supported via native bindings"))
+                let mut r = ScxH5Reader::open(input_path, chunk)
+                    .map_err(anyhow::Error::from)?;
+                do_convert(&mut r, Path::new(output), dtype).await
             }
         }
     });

@@ -359,7 +359,7 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
         // After HDF5 read in row-major, we get shape (n_components, n_obs) unless
         // the writer already transposed. Detect and fix.
         let arr = if arr.shape()[0] != n_obs && arr.shape()[1] == n_obs {
-            arr.t().to_owned()
+            arr.t().as_standard_layout().into_owned()
         } else {
             arr
         };
@@ -533,7 +533,7 @@ fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
         };
         // feature.loadings stored as (k, n_vars) — transpose to (n_vars, k)
         let arr = if arr.shape()[1] == n_vars && arr.shape()[0] != n_vars {
-            arr.t().to_owned()
+            arr.t().as_standard_layout().into_owned()
         } else {
             arr
         };
@@ -737,6 +737,46 @@ fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
     Ok(())
 }
 
+/// Write sparse matrix datasets (data, indices, indptr, dims attr) into an existing group.
+/// Used for layers and obsp; mirrors what `seurat_read_csc_as_csr` expects to read back.
+fn seurat_write_csr_into(grp: &Group, mat: &SparseMatrixCSR) -> Result<()> {
+    let nnz = mat.indices.len();
+
+    {
+        let v = mat.data.to_f64();
+        let ds = grp.new_dataset::<f64>().shape(nnz).create("data")?;
+        if nnz > 0 {
+            ds.write(&Array1::from_vec(v))?;
+        }
+    }
+    {
+        let v: Vec<i32> = mat.indices.iter().map(|&x| x as i32).collect();
+        let ds = grp.new_dataset::<i32>().shape(nnz).create("indices")?;
+        if nnz > 0 {
+            ds.write(&Array1::from_vec(v))?;
+        }
+    }
+    {
+        let max_ptr = mat.indptr.iter().copied().max().unwrap_or(0);
+        if max_ptr > i32::MAX as u64 {
+            let v: Vec<i64> = mat.indptr.iter().map(|&x| x as i64).collect();
+            let ds = grp.new_dataset::<i64>().shape(v.len()).create("indptr")?;
+            ds.write(&Array1::from_vec(v))?;
+        } else {
+            let v: Vec<i32> = mat.indptr.iter().map(|&x| x as i32).collect();
+            let ds = grp.new_dataset::<i32>().shape(v.len()).create("indptr")?;
+            ds.write(&Array1::from_vec(v))?;
+        }
+    }
+
+    let (nrows, ncols) = mat.shape;
+    let dims = vec![nrows as i32, ncols as i32];
+    let attr = grp.new_attr::<i32>().shape(2).create("dims")?;
+    attr.write(&Array1::from_vec(dims))?;
+
+    Ok(())
+}
+
 fn seurat_write_col(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
     match data {
         ColumnData::Float(v) => {
@@ -834,20 +874,70 @@ impl DatasetWriter for H5SeuratWriter {
         Ok(()) // H5Seurat has no uns equivalent
     }
 
-    async fn write_layers(&mut self, _layers: &Layers) -> Result<()> {
-        Ok(()) // TODO: write as assays/{assay}/{name}/
+    async fn write_layers(&mut self, layers: &Layers) -> Result<()> {
+        if layers.map.is_empty() {
+            return Ok(());
+        }
+        let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
+        for (name, mat) in &layers.map {
+            let layer_grp = assay_grp.create_group(name)?;
+            seurat_write_csr_into(&layer_grp, mat)?;
+        }
+        Ok(())
     }
 
-    async fn write_obsp(&mut self, _obsp: &Obsp) -> Result<()> {
-        Ok(()) // TODO: write as graphs/{name}/
+    async fn write_obsp(&mut self, obsp: &Obsp) -> Result<()> {
+        if obsp.map.is_empty() {
+            return Ok(());
+        }
+        let graphs_grp = match self.file.group("graphs") {
+            Ok(g)  => g,
+            Err(_) => self.file.create_group("graphs")?,
+        };
+        for (name, mat) in &obsp.map {
+            let mat_grp = graphs_grp.create_group(name)?;
+            seurat_write_csr_into(&mat_grp, mat)?;
+        }
+        Ok(())
     }
 
     async fn write_varp(&mut self, _varp: &Varp) -> Result<()> {
         Ok(()) // H5Seurat has no varp equivalent
     }
 
-    async fn write_varm(&mut self, _varm: &Varm) -> Result<()> {
-        Ok(()) // TODO: write as reductions/{name}/feature.loadings
+    async fn write_varm(&mut self, varm: &Varm) -> Result<()> {
+        if varm.map.is_empty() {
+            return Ok(());
+        }
+        // reductions/ may already exist (write_obsm creates it)
+        let reds_grp = match self.file.group("reductions") {
+            Ok(g)  => g,
+            Err(_) => self.file.create_group("reductions")?,
+        };
+        for (key, mat) in &varm.map {
+            let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
+            // reduction sub-group may already exist from write_obsm
+            let red_grp = match reds_grp.group(red_name) {
+                Ok(g)  => g,
+                Err(_) => reds_grp.create_group(red_name)?,
+            };
+            let (n_vars, k) = mat.shape;
+            // IR: (n_vars, k) row-major → H5Seurat: (k, n_vars)
+            let mut buf = vec![0.0f64; n_vars * k];
+            for i in 0..n_vars {
+                for j in 0..k {
+                    buf[j * n_vars + i] = mat.data[i * k + j];
+                }
+            }
+            let arr_t = Array2::from_shape_vec((k, n_vars), buf)
+                .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+            let ds = red_grp
+                .new_dataset::<f64>()
+                .shape((k, n_vars))
+                .create("feature.loadings")?;
+            ds.write(&arr_t)?;
+        }
+        Ok(())
     }
 
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
@@ -1161,5 +1251,105 @@ mod tests {
         assert!(uns.raw.is_object(), "uns.raw should be a JSON object");
         assert!(uns.raw.get("weights").is_some(), "misc/weights missing from uns");
         assert_eq!(uns.raw["weights"], serde_json::json!([0.1, 0.2, 0.3]));
+    }
+
+    // -----------------------------------------------------------------------
+    // Slot parity: layers, obsp, varm write → read roundtrip (synthetic)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_slot_parity_roundtrip() {
+        // 3 cells × 4 genes synthetic dataset.
+        let n_obs  = 3usize;
+        let n_vars = 4usize;
+
+        let obs = ObsTable { index: vec!["c0".into(), "c1".into(), "c2".into()], columns: vec![] };
+        let var = VarTable {
+            index: vec!["g0".into(), "g1".into(), "g2".into(), "g3".into()],
+            columns: vec![],
+        };
+
+        // X: sparse 3×4, 4 non-zeros
+        let x_chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape:   (n_obs, n_vars),
+                indptr:  vec![0, 2, 3, 4],
+                indices: vec![0, 2, 1, 3],
+                data:    TypedVec::F32(vec![1.0, 2.0, 3.0, 4.0]),
+            },
+        };
+
+        // layers["data"]: same shape, different values
+        let layer_mat = SparseMatrixCSR {
+            shape:   (n_vars, n_obs), // stored dims = [n_vars, n_obs] (CSC convention)
+            indptr:  vec![0, 1, 2, 3],
+            indices: vec![1, 0, 2],
+            data:    TypedVec::F32(vec![10.0, 20.0, 30.0]),
+        };
+
+        // obsp["knn"]: 3×3 cell-cell graph
+        let obsp_mat = SparseMatrixCSR {
+            shape:   (n_obs, n_obs),
+            indptr:  vec![0, 1, 2, 3],
+            indices: vec![1, 2, 0],
+            data:    TypedVec::F32(vec![0.5, 0.6, 0.7]),
+        };
+
+        // varm["X_pca"]: 4 genes × 2 PCs
+        let varm_mat = DenseMatrix {
+            shape: (n_vars, 2),
+            data:  vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        };
+
+        let mut layers = Layers::default();
+        layers.map.insert("data".into(), layer_mat.clone());
+
+        let mut obsp = Obsp::default();
+        obsp.map.insert("knn".into(), obsp_mat.clone());
+
+        let mut varm = Varm::default();
+        varm.map.insert("X_pca".into(), varm_mat.clone());
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut writer = H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_obsm(&Embeddings::default()).await.unwrap();
+        writer.write_uns(&UnsTable::default()).await.unwrap();
+        writer.write_layers(&layers).await.unwrap();
+        writer.write_obsp(&obsp).await.unwrap();
+        writer.write_varm(&varm).await.unwrap();
+        writer.write_x_chunk(&x_chunk).await.unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        // Re-read and verify
+        let mut reader = H5SeuratReader::open(&path, 100, None, None).unwrap();
+        assert_eq!(reader.shape(), (n_obs, n_vars));
+
+        let rt_layers = reader.layers().await.unwrap();
+        assert!(rt_layers.map.contains_key("data"), "layers['data'] missing");
+        let rt_layer = &rt_layers.map["data"];
+        assert_eq!(rt_layer.shape,   layer_mat.shape);
+        assert_eq!(rt_layer.indptr,  layer_mat.indptr);
+        assert_eq!(rt_layer.indices, layer_mat.indices);
+
+        let rt_obsp = reader.obsp().await.unwrap();
+        assert!(rt_obsp.map.contains_key("knn"), "obsp['knn'] missing");
+        let rt_knn = &rt_obsp.map["knn"];
+        assert_eq!(rt_knn.shape,   obsp_mat.shape);
+        assert_eq!(rt_knn.indices, obsp_mat.indices);
+
+        let rt_varm = reader.varm().await.unwrap();
+        assert!(rt_varm.map.contains_key("X_pca"), "varm['X_pca'] missing");
+        let rt_pca = &rt_varm.map["X_pca"];
+        assert_eq!(rt_pca.shape, varm_mat.shape);
+        for (a, b) in rt_pca.data.iter().zip(varm_mat.data.iter()) {
+            assert!((a - b).abs() < 1e-10, "varm data mismatch: {a} vs {b}");
+        }
     }
 }
