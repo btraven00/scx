@@ -1,0 +1,15 @@
+[project]
+name = "scx"
+r_version = "4.5"
+
+repositories = [
+    {alias = "CRAN",            url = "https://cloud.r-project.org/"},
+    {alias = "Bioc",            url = "https://bioconductor.org/packages/3.20/bioc"},
+    {alias = "BiocAnnotation",  url = "https://bioconductor.org/packages/3.20/data/annotation"},
+    {alias = "BiocExperiment",  url = "https://bioconductor.org/packages/3.20/data/experiment"},
+]
+
+dependencies = [
+    {name = "anndataR", git = "https://github.com/scverse/anndataR.git", commit = "e065626d8863a1923ab6b322fb7a14b95d0e9c6e"},
+    "rhdf5",
+]

@@ -631,6 +631,10 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
         TypeDescriptor::Float(_) => {
             Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec()))
         }
+        // Native HDF5 boolean type (anndata >= 0.10 uses this for bool columns)
+        TypeDescriptor::Boolean => {
+            Ok(ColumnData::Bool(ds.read_1d::<bool>()?.to_vec()))
+        }
         // uint8 is used for bool columns (AnnData encodes bool as u8 0/1)
         TypeDescriptor::Integer(IntSize::U1) => {
             let v: Vec<u8> = ds.read_1d::<u8>()?.to_vec();
