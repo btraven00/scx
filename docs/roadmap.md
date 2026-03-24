@@ -88,116 +88,58 @@
 
 ---
 
-## 0.0.6 — R bindings (`picklerick`) — Phase B
+## 0.0.6 (done)
 
-**Goal: make `picklerick` usable in real Seurat workflows.**
+**R bindings Phase B + feature parity with anndataR**
 
-### Current state (Phase A, from 0.0.3)
+### HDF5 global-state conflict — resolution
 
-`r/picklerick/` is a working R package (extendr scaffold + CLI shim):
+Static HDF5 (`hdf5-sys features=["static","zlib"]`) was fully explored and hit
+a hard dead end: `libz-sys ≥ 1.1` builds zlib-ng with `-DZ_SOLO`, which
+requires explicit non-NULL `zalloc`/`zfree`. HDF5's `H5Z_filter_deflate`
+always passes NULL — incompatible. Three workarounds all failed:
 
-- `convert()` dispatches to `system2("scx", ...)` via `.convert_via_cli()`
-- `.native_available()` always returns `FALSE` — the extendr Rust FFI
-  (`scx_convert` in `src/rust/src/lib.rs`) compiles but is gated off because
-  of the HDF5 global-state conflict
-- `read_h5seurat()` converts to a temp H5AD, then `anndataR::read_h5ad()`
-- `Makevars` links `libpicklerick_r.a` + `-lhdf5`; `entrypoint.c` is the
-  extendr C shim
-- Binary discovery: `options(picklerick.scx_binary)` → `PICKLERICK_SCX` env
-  var → `Sys.which("scx")`
-
-### Known issues
-
-1. **HDF5 global-state conflict** — the Rust `hdf5` crate and R's `rhdf5` both
-   call `H5open()` / `H5close()` on the same `libhdf5.so`. Loading both in one
-   R session causes property-list-ID corruption, segfaults, or silent data
-   mangling. This is why `.native_available()` is hardcoded to `FALSE`.
-2. **CLI subprocess overhead** — `system2("scx", ...)` per call is fine for
-   single files but adds startup latency in loops and prevents streaming data
-   back into R without a temp file round-trip.
-3. ~~**Slot parity gap**~~ — fixed in 0.0.5: `do_convert()` in `lib.rs` now
-   wires up `layers`, `obsp`, `varp`, `varm`; `.native_available()` changed
-   from hardcoded `FALSE` to `is.loaded("wrap__scx_convert", PACKAGE="picklerick")`.
-4. **No `write_h5seurat()`** — the R `write.R` delegates to
-   `anndataR::write_h5ad()`, there is no H5Seurat output from R yet.
-
-### Static-linking investigation (completed, not viable as-is)
-
-Option 1 (static HDF5) was fully explored in session 2.  Summary of what was
-tried and the dead ends hit, to avoid repeating them:
-
-**What was done**
-- Added `hdf5-sys = { version = "0.8", features = ["static", "zlib"] }` to
-  `r/picklerick/src/rust/Cargo.toml`.
-- `libpicklerick_r.a` built successfully; `R CMD INSTALL` succeeded;
-  `.native_available()` returned `TRUE`.
-- Two linker obstacles resolved along the way:
-  - Removed `-lhdf5` from `PKG_LIBS` (no longer needed; static HDF5 is in .a)
-  - Removed the `H5Literate` shim from `entrypoint.c` (HDF5 1.14.x exports it
-    as a real symbol; the shim caused a duplicate-symbol link error)
-
-**End-to-end test failure: `inflateInit() failed`**
-
-When converting a gzip-compressed `.h5ad`, HDF5's deflate filter called
-`inflateInit_` and it returned `Z_STREAM_ERROR (-2)`.
-
-Root cause (confirmed by disassembly + `nm`):
-
-`libz-sys ≥ 1.1` switched from plain zlib to **zlib-ng**.  Its build.rs
-compiles zlib-ng with `-DZ_SOLO` (line 121) and `-fvisibility=hidden`.
-`Z_SOLO` mode **requires** explicit non-NULL `zalloc`/`zfree` function
-pointers; it returns `Z_STREAM_ERROR` immediately when they are NULL.
-HDF5's `H5Z_filter_deflate` always passes `zalloc = Z_NULL, zfree = Z_NULL`,
-which is valid for standard zlib but illegal for Z_SOLO.
-
-**Fix attempts and why they failed**
-
-| Attempt | Outcome |
+| Attempt | Why it failed |
 |---|---|
-| `-Wl,-Bsymbolic-functions` in PKG_LIBS | Zlib symbols became local (`t`), preventing symbol interposition from R's `libz.so.1.3`, but `inflateInit_` still returned -2 because the local copy IS the Z_SOLO zlib-ng. |
-| `LIBZ_SYS_STATIC=0` env var so libz-sys uses system zlib | `hdf5-sys` build.rs unconditionally emits `cargo:rustc-link-lib=static=z`. When libz-sys doesn't provide a `libz.a`, that directive fails with "could not find native static library `z`". |
-| Add `build.rs` emitting `cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu` | The system `libz.a` (which has proper zcalloc/zcfree) is there, but cargo checks hdf5-sys's link requirements before our build.rs path is in scope; the build still fails. |
+| `-Wl,-Bsymbolic-functions` in `PKG_LIBS` | Made zlib symbols local, but the bundled copy IS the Z_SOLO zlib-ng — same error |
+| `LIBZ_SYS_STATIC=0` | `hdf5-sys` build.rs unconditionally emits `rustc-link-lib=static=z`; no `libz.a` provided → link failure |
+| `build.rs` emitting system lib search path | Cargo resolves `hdf5-sys` link deps before the crate's own `build.rs` path is in scope |
 
-**Remaining options (not yet tried)**
+**Resolution:** dropped static HDF5; switched to dynamic system HDF5.
+`Makevars` now uses `pkg-config --libs hdf5` (Ubuntu fallback:
+`-L/usr/lib/x86_64-linux-gnu/hdf5/serial -lhdf5`). rhdf5 + picklerick
+coexistence was empirically confirmed safe for simple open-read-close
+conversions. Known limitation: do not load `hdf5r` (not rhdf5) in the same
+session as picklerick native mode — `hdf5r` links against a different
+`libhdf5.so` build and property-list IDs may corrupt.
 
-2. **`dlopen` isolation** — `dlopen("libpicklerick_r.so", RTLD_LOCAL)` so
-   the Rust HDF5 symbols don't collide with R's. Needs a wrapper or extendr
-   change.
-3. **Out-of-process worker** — keep scx in a separate process but
-   communicate via a Unix socket / named pipe instead of `system2`. Avoids
-   the temp-file round-trip and the HDF5 conflict entirely. More plumbing.
-4. **Accept the conflict (lowest effort)** — use dynamic system HDF5, flip
-   `.native_available()` to `TRUE`. If R's `rhdf5`/`hdf5r` are not loaded in
-   the same session the Rust HDF5 is fine. Document the restriction and test
-   empirically — the conflict may not manifest for simple open-read-close
-   conversions. This is the next thing to try.
-5. **Patch the static path** — force `hdf5-sys` to use a pre-built
-   `libz.a` from the system by adding a `[patch.crates-io]` for `libz-sys`
-   that pins to 1.0.x (pre-zlib-ng), or by writing a wrapper build script
-   that provides a `/tmp/z/libz.a` symlink with an explicit search path set
-   before hdf5-sys resolves its link deps.
+### What was delivered
 
-### Exploration plan
+**Dense X / dense layers (`scx-core/src/h5ad.rs`):**
+- `H5AdReader` detects dense 2-D dataset vs CSR group at `open()`
+  (`file.dataset("X").is_ok() && file.group("X").is_err()`)
+- `ad_read_dense_chunk` + `dense_array2_to_csr` helpers; exact zeros dropped
+- Same per-entry detection applied to all entries in `layers()`
 
-- **Try option 4 first** — dynamic system HDF5, empirically test conflict:
-  - Revert `Cargo.toml` to no `hdf5-sys` direct dep (scx-core already pulls it)
-  - Set `PKG_LIBS = $(STATLIB) -lhdf5 -lz -ldl -lm`
-  - Load `rhdf5` + `picklerick` in same R session and run `convert()`
-  - If no crash: document "do not mix with hdf5r in same session" and ship
-- **Harden CLI shim (near-term, no HDF5 risk)**:
-  - Capture `stderr` from `system2` and surface it as R `warning()`/`stop()`
-  - `--progress` flag on the CLI so long conversions show a status line
-- **CRAN/r-universe packaging**: author `configure` + `configure.win`,
-  `src/Makevars.in`, vignette, CI via `r-lib/actions`
+**Nullable columns (`scx-core/src/h5ad.rs`):**
+- `ad_read_nullable()` handles `values` + `mask` sub-dataset groups
+  (anndata `IntNA` / `FloatNA` / `BoolNA`)
+- Float/int NA → NaN sentinel; bool NA → `FALSE`
+- Previously confused with categoricals (codes+categories), causing WARN + skip
 
-### API target
+**Boolean columns (`scx-core/src/h5ad.rs`):**
+- `TypeDescriptor::Boolean` variant now handled; reads `bool` 1-D array directly
+- Previously emitted `unsupported column dtype Boolean` warning and skipped
 
-```r
-library(picklerick)
-adata <- read_h5seurat("pbmc.h5seurat")   # anndataR::InMemoryAnnData
-write_h5ad(adata, "pbmc3k.h5ad")
-convert("pbmc.h5seurat", "pbmc.h5ad")
-```
+**R API:**
+- `write_h5seurat(adata, path, assay, chunk_size)` — serialises via tmp h5ad →
+  `scx_write_h5seurat` Rust FFI, with CLI fallback
+- `scx_write_h5seurat` Rust FFI — mirrors `scx_convert` but routes to `H5SeuratWriter`
+- `read_seurat(path, ...)` — `read_h5seurat()` → `adata$as_Seurat()` (requires Seurat ≥ 5)
+- `read_sce(path, ...)` — `read_h5seurat()` → `adata$as_SingleCellExperiment()`
+- `.native_available()` now returns `is.loaded("wrap__scx_convert", PACKAGE="picklerick")`
+- 36 testthat tests (including explicit rhdf5 coexistence test)
+- `README.md` + `docs/usage.md` added; license corrected to GPL-3
 
 ---
 
