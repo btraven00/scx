@@ -1,0 +1,39 @@
+context:
+  name: scx
+  version: "0.1.0"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script:
+    - cargo build --release --bin scx
+    - mkdir -p $PREFIX/bin
+    - cp target/release/scx $PREFIX/bin/scx
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    - pkg-config
+  host:
+    - hdf5
+  run:
+    - hdf5
+
+tests:
+  - script:
+      - scx --help
+
+about:
+  homepage: https://github.com/your-username/scx
+  license: MIT
+  license_file: LICENSE
+  summary: "Single-cell streaming interop engine"
+  description: |
+    scx is a fast, streaming interop engine for single-cell data formats
+    (H5Seurat, H5AD, BPCells, etc.), built in Rust.
