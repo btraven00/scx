@@ -3,7 +3,7 @@ use std::process::Command;
 
 fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/release/scx")
+        .join("../../target/debug/scx")
 }
 
 fn golden_path(filename: &str) -> PathBuf {
