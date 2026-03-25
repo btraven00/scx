@@ -59,4 +59,16 @@ impl TypedVec {
             TypedVec::U32(v) => v.iter().map(|&x| x as f64).collect(),
         }
     }
+
+    /// Parallel version of `to_f64` — use when len() is large (>100k elements).
+    /// Within each rayon thread LLVM auto-vectorises the cast loop to AVX2/SSE4.
+    pub fn to_f64_par(&self) -> Vec<f64> {
+        use rayon::prelude::*;
+        match self {
+            TypedVec::F32(v) => v.par_iter().map(|&x| x as f64).collect(),
+            TypedVec::F64(v) => v.clone(),
+            TypedVec::I32(v) => v.par_iter().map(|&x| x as f64).collect(),
+            TypedVec::U32(v) => v.par_iter().map(|&x| x as f64).collect(),
+        }
+    }
 }
