@@ -945,6 +945,7 @@ dependencies = [
  "owo-colors",
  "scx-core",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

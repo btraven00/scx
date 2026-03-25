@@ -21,7 +21,7 @@ use crate::bpcells::{
 };
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
-use crate::ir::{Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
+use crate::ir::{Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
 use crate::stream::DatasetWriter;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -115,6 +115,76 @@ pub fn read_version_attr(grp: &Group) -> Option<String> {
         return arr.into_iter().next().map(|s| s.to_string());
     }
     None
+}
+
+fn seurat_write_strings_local(grp: &Group, name: &str, strings: &[String]) -> Result<()> {
+    if grp.link_exists(name) {
+        grp.unlink(name).map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+        })?;
+    }
+    let vals: Vec<VarLenUnicode> = strings
+        .iter()
+        .map(|s| {
+            <VarLenUnicode as std::str::FromStr>::from_str(s)
+                .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: invalid UTF-8 string for '{name}': {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    grp.new_dataset_builder()
+        .with_data(&vals)
+        .create(name)
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
+    Ok(())
+}
+
+fn seurat_write_col_local(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
+    match data {
+        ColumnData::Float(v) => {
+            let ds = grp.new_dataset::<f64>().shape(v.len()).create(name)?;
+            ds.write(&Array1::from_vec(v.clone()))?;
+        }
+        ColumnData::Int(v) => {
+            let ds = grp.new_dataset::<i32>().shape(v.len()).create(name)?;
+            ds.write(&Array1::from_vec(v.clone()))?;
+        }
+        ColumnData::Bool(v) => {
+            let vi: Vec<i32> = v.iter().map(|&b| b as i32).collect();
+            let ds = grp.new_dataset::<i32>().shape(vi.len()).create(name)?;
+            ds.write(&Array1::from_vec(vi))?;
+        }
+        ColumnData::String(v) => {
+            seurat_write_strings_local(grp, name, v)?;
+        }
+        ColumnData::Categorical { codes, levels } => {
+            let col_grp = grp.create_group(name)?;
+            let values: Vec<i32> = codes.iter().map(|&c| c as i32 + 1).collect();
+            let ds = col_grp.new_dataset::<i32>().shape(values.len()).create("values")?;
+            ds.write(&Array1::from_vec(values))?;
+            seurat_write_strings_local(&col_grp, "levels", levels)?;
+        }
+    }
+    Ok(())
+}
+
+fn seurat_write_meta_cols_local(grp: &Group, columns: &[Column]) -> Result<()> {
+    let logical_names: Vec<VarLenUnicode> = columns
+        .iter()
+        .filter(|c| matches!(c.data, ColumnData::Bool(_)))
+        .map(|c| {
+            <VarLenUnicode as std::str::FromStr>::from_str(&c.name)
+                .unwrap_or_default()
+        })
+        .collect();
+    if !logical_names.is_empty() {
+        let attr = grp.new_attr::<VarLenUnicode>()
+            .shape(logical_names.len())
+            .create("logicals")?;
+        attr.write(&Array1::from_vec(logical_names))?;
+    }
+    for col in columns {
+        seurat_write_col_local(grp, &col.name, &col.data)?;
+    }
+    Ok(())
 }
 
 /// Write a 1-D uint32 dataset into an HDF5 group, replacing any existing one.
@@ -307,14 +377,14 @@ struct BpcellsCscData {
 
 #[derive(Debug)]
 struct BpcellsCscAccumulator {
-    n_obs: usize,
+    n_vars: usize,
     entries: Vec<(u32, u32, TypedVal)>,
 }
 
 impl BpcellsCscAccumulator {
-    fn new(n_obs: usize, _n_vars: usize) -> Self {
+    fn new(n_vars: usize) -> Self {
         Self {
-            n_obs,
+            n_vars,
             entries: Vec::new(),
         }
     }
@@ -345,7 +415,7 @@ impl BpcellsCscAccumulator {
         self.entries
             .sort_unstable_by_key(|(col, row, _)| (*col, *row));
 
-        let mut idxptr = vec![0u64; self.n_obs + 1];
+        let mut idxptr = vec![0u64; self.n_vars + 1];
         let mut index = Vec::with_capacity(self.entries.len());
 
         let first_kind = self.entries.first().map(|e| match e.2 {
@@ -374,7 +444,7 @@ impl BpcellsCscAccumulator {
                         }
                     }
                 }
-                for i in 0..self.n_obs {
+                for i in 0..self.n_vars {
                     idxptr[i + 1] += idxptr[i];
                 }
                 Ok(BpcellsCscData {
@@ -397,7 +467,7 @@ impl BpcellsCscAccumulator {
                         }
                     }
                 }
-                for i in 0..self.n_obs {
+                for i in 0..self.n_vars {
                     idxptr[i + 1] += idxptr[i];
                 }
                 Ok(BpcellsCscData {
@@ -420,7 +490,7 @@ impl BpcellsCscAccumulator {
                         }
                     }
                 }
-                for i in 0..self.n_obs {
+                for i in 0..self.n_vars {
                     idxptr[i + 1] += idxptr[i];
                 }
                 Ok(BpcellsCscData {
@@ -442,8 +512,8 @@ pub struct BpcellsH5Writer {
     layer: String,
     n_obs: usize,
     n_vars: usize,
-    obs_names: Vec<String>,
-    var_names: Vec<String>,
+    obs: Option<ObsTable>,
+    var: Option<VarTable>,
     accumulator: BpcellsCscAccumulator,
 }
 
@@ -473,9 +543,9 @@ impl BpcellsH5Writer {
             layer,
             n_obs,
             n_vars,
-            obs_names: Vec::new(),
-            var_names: Vec::new(),
-            accumulator: BpcellsCscAccumulator::new(n_obs, n_vars),
+            obs: None,
+            var: None,
+            accumulator: BpcellsCscAccumulator::new(n_vars),
         })
     }
 }
@@ -483,12 +553,12 @@ impl BpcellsH5Writer {
 #[async_trait]
 impl DatasetWriter for BpcellsH5Writer {
     async fn write_obs(&mut self, obs: &ObsTable) -> Result<()> {
-        self.obs_names = obs.index.clone();
+        self.obs = Some(obs.clone());
         Ok(())
     }
 
     async fn write_var(&mut self, var: &VarTable) -> Result<()> {
-        self.var_names = var.index.clone();
+        self.var = Some(var.clone());
         Ok(())
     }
 
@@ -529,10 +599,35 @@ impl DatasetWriter for BpcellsH5Writer {
     async fn finalize(&mut self) -> Result<()> {
         let accumulator = std::mem::replace(
             &mut self.accumulator,
-            BpcellsCscAccumulator::new(self.n_obs, self.n_vars),
+            BpcellsCscAccumulator::new(self.n_vars),
         );
         let csc = accumulator.into_csc()?;
         let group_path = format!("assays/{}/{}", self.assay, self.layer);
+
+        let obs = self.obs.as_ref().ok_or_else(|| {
+            ScxError::InvalidFormat("BPCells writer finalize called before write_obs".into())
+        })?;
+        let var = self.var.as_ref().ok_or_else(|| {
+            ScxError::InvalidFormat("BPCells writer finalize called before write_var".into())
+        })?;
+
+        let root = self.file.group("/")?;
+        seurat_write_strings_local(&root, "cell.names", &obs.index)?;
+        let meta_grp = match self.file.group("meta.data") {
+            Ok(g) => g,
+            Err(_) => self.file.create_group("meta.data")?,
+        };
+        seurat_write_meta_cols_local(&meta_grp, &obs.columns)?;
+
+        let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
+        seurat_write_strings_local(&assay_grp, "features", &var.index)?;
+        if !var.columns.is_empty() {
+            let mf_grp = match assay_grp.group("meta.features") {
+                Ok(g) => g,
+                Err(_) => assay_grp.create_group("meta.features")?,
+            };
+            seurat_write_meta_cols_local(&mf_grp, &var.columns)?;
+        }
 
         write_bpcells_h5(
             &self.file,
@@ -540,8 +635,8 @@ impl DatasetWriter for BpcellsH5Writer {
             StorageOrder::Col,
             self.n_vars,
             self.n_obs,
-            &self.var_names,
-            &self.obs_names,
+            &var.index,
+            &obs.index,
             &csc.idxptr,
             &csc.index,
             &csc.values,
