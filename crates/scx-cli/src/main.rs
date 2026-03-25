@@ -192,22 +192,22 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size).await?;
                 }
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
                     let mut reader = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer).await?;
+                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size).await?;
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
                     let mut reader = H5AdReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size).await?;
                 }
                 Some(Format::ScxH5) | None => {
                     tracing::info!(path = %input, "detected format: SCX H5 (internal)");
                     let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size).await?;
                 }
             }
         }
@@ -245,13 +245,13 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Some(Format::H5Seurat) => {
                     let mut r = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    materialise_dataset(&mut *r).await?
+                    materialise_dataset(&mut *r, chunk_size).await?
                 }
                 Some(Format::H5Ad) => {
-                    materialise_dataset(&mut H5AdReader::open(input_path, chunk_size)?).await?
+                    materialise_dataset(&mut H5AdReader::open(input_path, chunk_size)?, chunk_size).await?
                 }
                 Some(Format::ScxH5) | None => {
-                    materialise_dataset(&mut ScxH5Reader::open(input_path, chunk_size)?).await?
+                    materialise_dataset(&mut ScxH5Reader::open(input_path, chunk_size)?, chunk_size).await?
                 }
             };
 
@@ -272,22 +272,69 @@ async fn run() -> anyhow::Result<()> {
 /// Fully materialise a streaming reader into a [`SingleCellDataset`].
 async fn materialise_dataset(
     reader: &mut dyn DatasetReader,
+    chunk_size: usize,
 ) -> anyhow::Result<scx_core::ir::SingleCellDataset> {
     use futures::StreamExt;
-    use scx_core::ir::{SparseMatrixCSR, SingleCellDataset};
+    use scx_core::ir::{Layers, Obsp, SparseMatrixCSR, SingleCellDataset};
     use scx_core::dtype::TypedVec;
 
     let (n_obs, n_vars) = reader.shape();
     let x_dtype = reader.dtype();
 
-    let obs    = reader.obs().await?;
-    let var    = reader.var().await?;
-    let obsm   = reader.obsm().await?;
-    let uns    = reader.uns().await?;
-    let layers = reader.layers().await?;
-    let obsp   = reader.obsp().await?;
-    let varp   = reader.varp().await?;
-    let varm   = reader.varm().await?;
+    let obs   = reader.obs().await?;
+    let var   = reader.var().await?;
+    let obsm  = reader.obsm().await?;
+    let uns   = reader.uns().await?;
+    let varm  = reader.varm().await?;
+
+    // Materialise layers by consuming the stream for each named matrix.
+    let layer_metas = reader.layer_metas().await?;
+    let mut layers = Layers::default();
+    for meta in &layer_metas {
+        let mut indptr: Vec<u64> = vec![0u64];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data_vals: Vec<f32> = Vec::new();
+        let mut stream = reader.layer_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            let base = *indptr.last().unwrap();
+            for &p in &chunk.data.indptr[1..] { indptr.push(base + p); }
+            indices.extend_from_slice(&chunk.data.indices);
+            data_vals.extend(chunk.data.data.to_f64().into_iter().map(|x| x as f32));
+        }
+        layers.map.insert(meta.name.clone(), SparseMatrixCSR {
+            shape: meta.shape,
+            indptr,
+            indices,
+            data: scx_core::dtype::TypedVec::F32(data_vals),
+        });
+    }
+
+    // Materialise obsp.
+    let obsp_metas = reader.obsp_metas().await?;
+    let mut obsp = Obsp::default();
+    for meta in &obsp_metas {
+        let mut indptr: Vec<u64> = vec![0u64];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data_vals: Vec<f32> = Vec::new();
+        let mut stream = reader.obsp_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            let base = *indptr.last().unwrap();
+            for &p in &chunk.data.indptr[1..] { indptr.push(base + p); }
+            indices.extend_from_slice(&chunk.data.indices);
+            data_vals.extend(chunk.data.data.to_f64().into_iter().map(|x| x as f32));
+        }
+        obsp.map.insert(meta.name.clone(), SparseMatrixCSR {
+            shape: meta.shape,
+            indptr,
+            indices,
+            data: scx_core::dtype::TypedVec::F32(data_vals),
+        });
+    }
+
+    // varp is not streamed (no source currently emits it), default to empty.
+    let varp = scx_core::ir::Varp::default();
 
     // Accumulate X chunks into a full CSR.
     let mut x_indptr: Vec<u64> = Vec::with_capacity(n_obs + 1);
@@ -338,6 +385,7 @@ async fn convert_with_reader(
     out_dtype: DataType,
     out_assay: &str,
     out_layer: &str,
+    chunk_size: usize,
 ) -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
@@ -352,19 +400,20 @@ async fn convert_with_reader(
         "starting conversion"
     );
 
-    let obs    = reader.obs().await?;
-    let var    = reader.var().await?;
-    let obsm   = reader.obsm().await?;
-    let uns    = reader.uns().await?;
-    let layers = reader.layers().await?;
-    let obsp   = reader.obsp().await?;
-    let varp   = reader.varp().await?;
-    let varm   = reader.varm().await?;
+    let obs          = reader.obs().await?;
+    let var          = reader.var().await?;
+    let obsm         = reader.obsm().await?;
+    let uns          = reader.uns().await?;
+    let varm         = reader.varm().await?;
+    let layer_metas  = reader.layer_metas().await?;
+    let obsp_metas   = reader.obsp_metas().await?;
 
     tracing::info!(
-        obs_cols = obs.columns.len(),
-        var_cols = var.columns.len(),
+        obs_cols   = obs.columns.len(),
+        var_cols   = var.columns.len(),
         embeddings = obsm.map.len(),
+        layers     = layer_metas.len(),
+        obsp       = obsp_metas.len(),
         "metadata loaded in {:.2?}", t0.elapsed()
     );
 
@@ -378,10 +427,29 @@ async fn convert_with_reader(
     writer.write_var(&var).await?;
     writer.write_obsm(&obsm).await?;
     writer.write_uns(&uns).await?;
-    writer.write_layers(&layers).await?;
-    writer.write_obsp(&obsp).await?;
-    writer.write_varp(&varp).await?;
     writer.write_varm(&varm).await?;
+
+    // Stream each layer — one at a time, never holding more than chunk_size rows.
+    for meta in &layer_metas {
+        tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming layer");
+        writer.begin_sparse("layers", &meta.name, meta).await?;
+        let mut stream = reader.layer_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            writer.write_sparse_chunk(&chunk?).await?;
+        }
+        writer.end_sparse().await?;
+    }
+
+    // Stream each obsp matrix.
+    for meta in &obsp_metas {
+        tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming obsp");
+        writer.begin_sparse("obsp", &meta.name, meta).await?;
+        let mut stream = reader.obsp_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            writer.write_sparse_chunk(&chunk?).await?;
+        }
+        writer.end_sparse().await?;
+    }
 
     let t_x = std::time::Instant::now();
     let mut stream = reader.x_stream();
@@ -539,45 +607,31 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
     println!();
 
     // ── layers ───────────────────────────────────────────────────────────────
-    let layers = reader.layers().await?;
-    section("layers", layers.map.len(), "keys");
-    let mut keys: Vec<_> = layers.map.keys().collect();
-    keys.sort();
-    for k in keys {
-        let m = &layers.map[k];
+    let layer_metas = reader.layer_metas().await?;
+    section("layers", layer_metas.len(), "keys");
+    let mut sorted_layers = layer_metas.clone();
+    sorted_layers.sort_by(|a, b| a.name.cmp(&b.name));
+    for m in &sorted_layers {
+        let nnz = m.indptr.last().copied().unwrap_or(0);
         println!("  {:<30} {} × {}  {}{}",
-            k, yellow!(m.shape.0), yellow!(m.shape.1),
-            dim!("nnz="), yellow!(m.indices.len()));
+            m.name, yellow!(m.shape.0), yellow!(m.shape.1),
+            dim!("nnz="), yellow!(nnz));
     }
-    if layers.map.is_empty() { println!("  {}", dim!("(none)")); }
+    if layer_metas.is_empty() { println!("  {}", dim!("(none)")); }
     println!();
 
     // ── obsp ─────────────────────────────────────────────────────────────────
-    let obsp = reader.obsp().await?;
-    section("obsp", obsp.map.len(), "keys");
-    let mut keys: Vec<_> = obsp.map.keys().collect();
-    keys.sort();
-    for k in keys {
-        let m = &obsp.map[k];
+    let obsp_metas = reader.obsp_metas().await?;
+    section("obsp", obsp_metas.len(), "keys");
+    let mut sorted_obsp = obsp_metas.clone();
+    sorted_obsp.sort_by(|a, b| a.name.cmp(&b.name));
+    for m in &sorted_obsp {
+        let nnz = m.indptr.last().copied().unwrap_or(0);
         println!("  {:<30} {} × {}  {}{}",
-            k, yellow!(m.shape.0), yellow!(m.shape.1),
-            dim!("nnz="), yellow!(m.indices.len()));
+            m.name, yellow!(m.shape.0), yellow!(m.shape.1),
+            dim!("nnz="), yellow!(nnz));
     }
-    if obsp.map.is_empty() { println!("  {}", dim!("(none)")); }
-    println!();
-
-    // ── varp ─────────────────────────────────────────────────────────────────
-    let varp = reader.varp().await?;
-    section("varp", varp.map.len(), "keys");
-    let mut keys: Vec<_> = varp.map.keys().collect();
-    keys.sort();
-    for k in keys {
-        let m = &varp.map[k];
-        println!("  {:<30} {} × {}  {}{}",
-            k, yellow!(m.shape.0), yellow!(m.shape.1),
-            dim!("nnz="), yellow!(m.indices.len()));
-    }
-    if varp.map.is_empty() { println!("  {}", dim!("(none)")); }
+    if obsp_metas.is_empty() { println!("  {}", dim!("(none)")); }
     println!();
 
     // ── uns ──────────────────────────────────────────────────────────────────

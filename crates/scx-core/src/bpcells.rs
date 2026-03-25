@@ -25,7 +25,49 @@ pub fn zigzag_decode(z: u32) -> i32 {
     ((z >> 1) as i32) ^ -((z & 1) as i32)
 }
 
-// ─── BP-128 core unpack ──────────────────────────────────────────────────────
+/// Return the minimum number of bits needed to represent `max_val`.
+pub fn bits_needed(max_val: u32) -> u8 {
+    if max_val == 0 { 0 } else { (32 - max_val.leading_zeros()) as u8 }
+}
+
+// ─── BP-128 core pack / unpack ───────────────────────────────────────────────
+
+/// Pack 128 u32 values into `4 * b` words using the BP-128 lane-interleaved
+/// layout used by BPCells.
+///
+/// **Layout** (matches BPCells' SIMD implementation):
+/// - 4 SIMD lanes, each holding 32 values at stride-4 positions.
+///   Lane `l` holds values at global positions `l, l+4, l+8, ..., l+124`.
+/// - Output words are interleaved across lanes:
+///   `packed[w*4 + l]` is word `w` of lane `l` (for `w` in `0..b`, `l` in `0..4`).
+///
+/// When `b == 0`, the packed stream is empty.
+pub fn bp128_pack(b: u8, values: &[u32; 128]) -> Vec<u32> {
+    if b == 0 {
+        return Vec::new();
+    }
+    let b = b as usize;
+    let mask = if b == 32 { u32::MAX } else { (1u32 << b) - 1 };
+    let mut out = vec![0u32; 4 * b];
+
+    for lane in 0..4usize {
+        for j in 0..32usize {
+            let v = values[lane + 4 * j] & mask;
+            let bit_start = j * b;
+            let word = bit_start / 32;
+            let bit_off = bit_start % 32;
+
+            out[word * 4 + lane] |= v << bit_off;
+
+            if bit_off + b > 32 {
+                let excess = bit_off + b - 32;
+                out[(word + 1) * 4 + lane] |= v >> (b - excess);
+            }
+        }
+    }
+
+    out
+}
 
 /// Unpack 128 u32 values from `4 * b` packed words.
 ///
@@ -63,6 +105,69 @@ pub fn bp128_unpack(b: u8, packed: &[u32]) -> [u32; 128] {
         }
     }
     out
+}
+
+/// Encode a uint32 value stream using BP-128-FOR (`v - 1` before packing).
+///
+/// Returns `(val_data, val_idx)`, where:
+/// - `val_data` is the concatenated packed words for all chunks
+/// - `val_idx[k]` is the starting word offset of chunk `k`
+/// - `val_idx.last()` is the total word count
+pub fn encode_for(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let n_chunks = values.len().div_ceil(128);
+    let mut data = Vec::new();
+    let mut idx = Vec::with_capacity(n_chunks + 1);
+    idx.push(0);
+
+    for chunk in values.chunks(128) {
+        let mut buf = [0u32; 128];
+        for (i, &v) in chunk.iter().enumerate() {
+            buf[i] = v.wrapping_sub(1);
+        }
+        let max_val = buf[..chunk.len()].iter().copied().max().unwrap_or(0);
+        let b = bits_needed(max_val);
+        let packed = bp128_pack(b, &buf);
+        data.extend_from_slice(&packed);
+        idx.push(data.len() as u32);
+    }
+
+    (data, idx)
+}
+
+/// Encode a sorted uint32 index stream using BP-128-D1Z.
+///
+/// Returns `(index_data, index_idx, index_starts)`, where:
+/// - `index_data` is the concatenated packed words for all chunks
+/// - `index_idx[k]` is the starting word offset of chunk `k`
+/// - `index_starts[k]` is the prefix value before chunk `k`
+pub fn encode_d1z(values: &[u32]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    let n_chunks = values.len().div_ceil(128);
+    let mut data = Vec::new();
+    let mut idx = Vec::with_capacity(n_chunks + 1);
+    let mut starts = Vec::with_capacity(n_chunks);
+    idx.push(0);
+
+    let mut prev = 0u32;
+
+    for chunk in values.chunks(128) {
+        starts.push(prev);
+
+        let mut buf = [0u32; 128];
+        for (i, &value) in chunk.iter().enumerate() {
+            let delta = value as i64 - prev as i64;
+            let delta_i32 = i32::try_from(delta).expect("BPCells D1Z delta out of i32 range");
+            buf[i] = zigzag_encode(delta_i32);
+            prev = value;
+        }
+
+        let max_val = buf[..chunk.len()].iter().copied().max().unwrap_or(0);
+        let b = bits_needed(max_val);
+        let packed = bp128_pack(b, &buf);
+        data.extend_from_slice(&packed);
+        idx.push(data.len() as u32);
+    }
+
+    (data, idx, starts)
 }
 
 // ─── Stream decoders ─────────────────────────────────────────────────────────
@@ -381,8 +486,8 @@ use futures::{stream, Stream};
 use crate::dtype::{DataType, TypedVec};
 use crate::error::Result;
 use crate::ir::{
-    Embeddings, Layers, MatrixChunk, Obsp, ObsTable, SparseMatrixCSR,
-    UnsTable, VarTable, Varm, Varp,
+    Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+    SparseMatrixMeta, UnsTable, VarTable, Varm,
 };
 use crate::stream::DatasetReader;
 
@@ -479,10 +584,26 @@ impl DatasetReader for BpcellsDatasetReader {
 
     async fn obsm(&mut self) -> Result<Embeddings> { Ok(Embeddings::default()) }
     async fn uns(&mut self) -> Result<UnsTable>    { Ok(UnsTable::default()) }
-    async fn layers(&mut self) -> Result<Layers>   { Ok(Layers::default()) }
-    async fn obsp(&mut self) -> Result<Obsp>       { Ok(Obsp::default()) }
-    async fn varp(&mut self) -> Result<Varp>       { Ok(Varp::default()) }
     async fn varm(&mut self) -> Result<Varm>       { Ok(Varm::default()) }
+
+    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> { Ok(Vec::new()) }
+    async fn obsp_metas(&mut self)  -> Result<Vec<SparseMatrixMeta>> { Ok(Vec::new()) }
+
+    fn layer_stream<'a>(
+        &'a self,
+        _meta: &'a SparseMatrixMeta,
+        _chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        Box::pin(stream::empty())
+    }
+
+    fn obsp_stream<'a>(
+        &'a self,
+        _meta: &'a SparseMatrixMeta,
+        _chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        Box::pin(stream::empty())
+    }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
         let n_obs      = self.n_obs;

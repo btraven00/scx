@@ -288,6 +288,64 @@ fn codec_zigzag_round_trip() {
     }
 }
 
+// ─── 2b. PARALLEL CODEC TESTS ───────────────────────────────────────────────
+// Verify that the Rayon parallel decode paths produce identical results to the
+// hand-computed expected output, regardless of thread count.
+//
+// Both tests use a b=0 synthetic stream (zero packed words per chunk) to keep
+// fixture generation trivial while exercising the full parallel dispatch.
+// N_CHUNKS = 266 > 256 (RAYON_CHUNK_THRESHOLD) → always hits the parallel path.
+
+/// Parallel decode_for produces correct results across thread counts.
+///
+/// b=0 stream: every chunk decodes to 128 ones (packed value 0 → v = 0+1 = 1).
+#[test]
+fn parallel_for_matches_sequential() {
+    const N_CHUNKS: usize = 266;
+    const COUNT: usize = N_CHUNKS * 128;
+
+    let data: Vec<u32> = vec![];
+    let offsets: Vec<u32> = vec![0u32; N_CHUNKS + 1];
+    let expected = vec![1u32; COUNT];
+
+    for n_threads in [1, 2, 4, rayon::current_num_threads()] {
+        let result = rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .unwrap()
+            .install(|| decode_for(&data, &offsets, COUNT));
+        assert_eq!(result, expected, "decode_for wrong with {n_threads} thread(s)");
+    }
+}
+
+/// Parallel decode_d1z produces correct results across thread counts.
+///
+/// b=0 stream with starts[k]=k: all deltas are zero, so chunk k outputs 128
+/// copies of k. Easy to verify without encoding anything.
+#[test]
+fn parallel_d1z_matches_sequential() {
+    const N_CHUNKS: usize = 266;
+    const COUNT: usize = N_CHUNKS * 128;
+
+    let data: Vec<u32> = vec![];
+    let offsets: Vec<u32> = vec![0u32; N_CHUNKS + 1];
+    let starts: Vec<u32> = (0..N_CHUNKS as u32).collect();
+
+    // chunk k → 128 copies of k
+    let expected: Vec<u32> = (0..N_CHUNKS as u32)
+        .flat_map(|k| std::iter::repeat(k).take(128))
+        .collect();
+
+    for n_threads in [1, 2, 4, rayon::current_num_threads()] {
+        let result = rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .unwrap()
+            .install(|| decode_d1z(&data, &offsets, &starts, COUNT));
+        assert_eq!(result, expected, "decode_d1z wrong with {n_threads} thread(s)");
+    }
+}
+
 // ─── 3. INTEGRATION TESTS ───────────────────────────────────────────────────
 
 fn load_manifest() -> serde_json::Value {

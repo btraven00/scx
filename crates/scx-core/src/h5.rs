@@ -11,8 +11,8 @@ use ndarray::s;
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, Embeddings, Layers, MatrixChunk, Obsp, ObsTable,
-         SparseMatrixCSR, UnsTable, VarTable, Varm, Varp},
+    ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
+         SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm},
     stream::DatasetReader,
 };
 
@@ -313,10 +313,26 @@ impl DatasetReader for ScxH5Reader {
         Ok(UnsTable::default())
     }
 
-    async fn layers(&mut self) -> Result<Layers> { Ok(Layers::default()) }
-    async fn obsp(&mut self)   -> Result<Obsp>   { Ok(Obsp::default()) }
-    async fn varp(&mut self)   -> Result<Varp>   { Ok(Varp::default()) }
-    async fn varm(&mut self)   -> Result<Varm>   { Ok(Varm::default()) }
+    async fn varm(&mut self) -> Result<Varm> { Ok(Varm::default()) }
+
+    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> { Ok(Vec::new()) }
+    async fn obsp_metas(&mut self)  -> Result<Vec<SparseMatrixMeta>> { Ok(Vec::new()) }
+
+    fn layer_stream<'a>(
+        &'a self,
+        _meta: &'a SparseMatrixMeta,
+        _chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        Box::pin(stream::empty())
+    }
+
+    fn obsp_stream<'a>(
+        &'a self,
+        _meta: &'a SparseMatrixMeta,
+        _chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        Box::pin(stream::empty())
+    }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
         let path       = self.path.clone();

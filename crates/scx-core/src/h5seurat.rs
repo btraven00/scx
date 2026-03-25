@@ -14,8 +14,8 @@ use ndarray::{s, Array1, Array2};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, Embeddings, Layers, MatrixChunk, Obsp, ObsTable,
-         SparseMatrixCSR, UnsTable, VarTable, Varm, Varp},
+    ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
+         SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm},
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -443,20 +443,37 @@ fn read_uns_sync(path: &Path) -> Result<UnsTable> {
 // Slot parity helpers
 // ---------------------------------------------------------------------------
 
-/// Read a full CSC sparse matrix group (H5Seurat convention) as SparseMatrixCSR.
-/// `group_path` is e.g. "graphs/RNA_nn".  `dims` attr is [n_rows, n_cols] (col-major order).
-fn seurat_read_csc_as_csr(file: &File, group_path: &str) -> Result<SparseMatrixCSR> {
+/// Read the shape and indptr for a single H5Seurat CSC sparse group.
+/// This is all that's needed to create a `SparseMatrixMeta`; data/indices
+/// are left on disk and streamed later.
+fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
     let dims_attr = grp.attr("dims")?;
     let dims: Vec<i32> = dims_attr.read_1d::<i32>()?.to_vec();
     // H5Seurat dims attr is [n_rows, n_cols] where columns = CSC dimension
     let (nrows, ncols) = (dims[0] as usize, dims[1] as usize);
-
     let indptr = read_indptr_from(file, &format!("{group_path}/indptr"))?;
-    let nnz = *indptr.last().unwrap_or(&0) as usize;
+    Ok(SparseMatrixMeta { name: name.to_string(), shape: (nrows, ncols), indptr })
+}
+
+/// Read a row-slice of an H5Seurat CSC sparse group as a CSR `MatrixChunk`.
+fn seurat_read_sparse_chunk(
+    path: &Path,
+    group_path: &str,
+    meta: &SparseMatrixMeta,
+    row_start: usize,
+    row_end: usize,
+) -> Result<MatrixChunk> {
+    let file = File::open(path)?;
+    let (_nrows, ncols) = meta.shape;
+    let chunk_rows = row_end - row_start;
+
+    let nnz_start = meta.indptr[row_start] as usize;
+    let nnz_end   = meta.indptr[row_end]   as usize;
+    let nnz = nnz_end - nnz_start;
 
     let indices: Vec<u32> = if nnz > 0 {
-        read_indices_at(file, &format!("{group_path}/indices"), 0, nnz)?
+        read_indices_at(&file, &format!("{group_path}/indices"), nnz_start, nnz_end)?
     } else {
         Vec::new()
     };
@@ -464,54 +481,71 @@ fn seurat_read_csc_as_csr(file: &File, group_path: &str) -> Result<SparseMatrixC
     let data: TypedVec = if nnz > 0 {
         let ds = file.dataset(&format!("{group_path}/data"))?;
         match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Float(FloatSize::U4) => TypedVec::F32(ds.read_1d::<f32>()?.to_vec()),
-            TypeDescriptor::Float(_)             => TypedVec::F64(ds.read_1d::<f64>()?.to_vec()),
-            TypeDescriptor::Integer(_)           => TypedVec::I32(ds.read_1d::<i32>()?.to_vec()),
-            _                                    => TypedVec::F32(ds.read_1d::<f32>()?.to_vec()),
+            TypeDescriptor::Float(FloatSize::U4) => TypedVec::F32(
+                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            TypeDescriptor::Float(_) => TypedVec::F64(
+                ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec()),
+            TypeDescriptor::Integer(_) => TypedVec::I32(
+                ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            _ => TypedVec::F32(
+                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
         }
     } else {
         TypedVec::F32(Vec::new())
     };
 
-    // CSC (cols=nrows) == CSR (rows=nrows): indptr length = ncols+1, but
-    // for graphs ncols == nrows. Shape is (nrows, ncols).
-    Ok(SparseMatrixCSR { shape: (nrows, ncols), indptr, indices, data })
+    // CSC column pointers → CSR row pointers (zero-based within chunk).
+    let csr_indptr: Vec<u64> = meta.indptr[row_start..=row_end]
+        .iter()
+        .map(|&p| p - meta.indptr[row_start])
+        .collect();
+
+    Ok(MatrixChunk {
+        row_offset: row_start,
+        nrows: chunk_rows,
+        data: SparseMatrixCSR {
+            shape: (chunk_rows, ncols),
+            indptr: csr_indptr,
+            indices,
+            data,
+        },
+    })
 }
 
-fn read_layers_sync(path: &Path, assay: &str, primary_layer: &str) -> Result<Layers> {
+fn read_layer_metas_sync(path: &Path, assay: &str, primary_layer: &str) -> Result<Vec<SparseMatrixMeta>> {
     let file = File::open(path)?;
     let assay_grp = match file.group(&format!("assays/{assay}")) {
-        Err(_) => return Ok(Layers::default()),
+        Err(_) => return Ok(Vec::new()),
         Ok(g)  => g,
     };
-    let mut map = HashMap::new();
+    let mut metas = Vec::new();
     for name in assay_grp.member_names().unwrap_or_default() {
         if name == primary_layer { continue; }
         let grp_path = format!("assays/{assay}/{name}");
-        // Only process groups that look like sparse matrix groups (have indptr)
         if file.dataset(&format!("{grp_path}/indptr")).is_err() { continue; }
-        match seurat_read_csc_as_csr(&file, &grp_path) {
-            Ok(m)  => { map.insert(name, m); }
+        match seurat_read_sparse_meta(&file, &name, &grp_path) {
+            Ok(m)  => metas.push(m),
             Err(e) => tracing::warn!("skipping assay layer '{name}': {e}"),
         }
     }
-    Ok(Layers { map })
+    Ok(metas)
 }
 
-fn read_obsp_sync(path: &Path) -> Result<Obsp> {
+fn read_obsp_metas_sync(path: &Path) -> Result<Vec<SparseMatrixMeta>> {
     let file = File::open(path)?;
     let grp = match file.group("graphs") {
-        Err(_) => return Ok(Obsp::default()),
+        Err(_) => return Ok(Vec::new()),
         Ok(g)  => g,
     };
-    let mut map = HashMap::new();
+    let mut metas = Vec::new();
     for name in grp.member_names().unwrap_or_default() {
-        match seurat_read_csc_as_csr(&file, &format!("graphs/{name}")) {
-            Ok(m)  => { map.insert(name, m); }
+        let grp_path = format!("graphs/{name}");
+        match seurat_read_sparse_meta(&file, &name, &grp_path) {
+            Ok(m)  => metas.push(m),
             Err(e) => tracing::warn!("skipping graph '{name}': {e}"),
         }
     }
-    Ok(Obsp { map })
+    Ok(metas)
 }
 
 fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
@@ -622,20 +656,57 @@ impl DatasetReader for H5SeuratReader {
         read_uns_sync(&self.path)
     }
 
-    async fn layers(&mut self) -> Result<Layers> {
-        read_layers_sync(&self.path, &self.assay, &self.layer)
-    }
-
-    async fn obsp(&mut self) -> Result<Obsp> {
-        read_obsp_sync(&self.path)
-    }
-
-    async fn varp(&mut self) -> Result<Varp> {
-        Ok(Varp::default())
-    }
-
     async fn varm(&mut self) -> Result<Varm> {
         read_varm_sync(&self.path, self.n_vars)
+    }
+
+    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
+        read_layer_metas_sync(&self.path, &self.assay, &self.layer)
+    }
+
+    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
+        read_obsp_metas_sync(&self.path)
+    }
+
+    fn layer_stream<'a>(
+        &'a self,
+        meta: &'a SparseMatrixMeta,
+        chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        let path      = self.path.clone();
+        let assay     = self.assay.clone();
+        let grp_path  = format!("assays/{}/{}", assay, meta.name);
+        let n_rows    = meta.shape.0;
+        Box::pin(stream::unfold(0usize, move |row_start| {
+            let path     = path.clone();
+            let grp_path = grp_path.clone();
+            async move {
+                if row_start >= n_rows { return None; }
+                let row_end = (row_start + chunk_size).min(n_rows);
+                let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                Some((chunk, row_end))
+            }
+        }))
+    }
+
+    fn obsp_stream<'a>(
+        &'a self,
+        meta: &'a SparseMatrixMeta,
+        chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        let path     = self.path.clone();
+        let grp_path = format!("graphs/{}", meta.name);
+        let n_rows   = meta.shape.0;
+        Box::pin(stream::unfold(0usize, move |row_start| {
+            let path     = path.clone();
+            let grp_path = grp_path.clone();
+            async move {
+                if row_start >= n_rows { return None; }
+                let row_end = (row_start + chunk_size).min(n_rows);
+                let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                Some((chunk, row_end))
+            }
+        }))
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
@@ -697,6 +768,16 @@ const SEURAT_CHUNK_ELEMS: usize = 65_536;
 ///
 /// Call order: write_obs → write_var → write_obsm → write_uns → write_x_chunk* → finalize.
 /// The first four may arrive in any order; chunks must arrive in cell order.
+/// State kept while streaming a single named sparse matrix (layer or obsp).
+struct SparseWriteState {
+    /// HDF5 group path being written (e.g. "assays/RNA/data" or "graphs/nn").
+    group_path: String,
+    /// Accumulated CSR indptr across written chunks.
+    indptr: Vec<u64>,
+    /// Shape of the matrix: (nrows, ncols).
+    shape: (usize, usize),
+}
+
 pub struct H5SeuratWriter {
     file: File,
     assay: String,
@@ -706,6 +787,8 @@ pub struct H5SeuratWriter {
     dtype: DataType,
     /// Accumulated cell indptr (n_obs + 1 entries when finalized).
     x_indptr: Vec<u64>,
+    /// State for the currently open streaming sparse matrix, if any.
+    sparse_state: Option<SparseWriteState>,
 }
 
 impl H5SeuratWriter {
@@ -739,7 +822,7 @@ impl H5SeuratWriter {
         }
         seurat_init_resizable::<i32>(&file, &indices_path)?;
 
-        Ok(Self { file, assay, layer, n_obs, n_vars, dtype, x_indptr: vec![0u64] })
+        Ok(Self { file, assay, layer, n_obs, n_vars, dtype, x_indptr: vec![0u64], sparse_state: None })
     }
 }
 
@@ -785,45 +868,7 @@ fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
     Ok(())
 }
 
-/// Write sparse matrix datasets (data, indices, indptr, dims attr) into an existing group.
-/// Used for layers and obsp; mirrors what `seurat_read_csc_as_csr` expects to read back.
-fn seurat_write_csr_into(grp: &Group, mat: &SparseMatrixCSR) -> Result<()> {
-    let nnz = mat.indices.len();
 
-    {
-        let v = mat.data.to_f64();
-        let ds = grp.new_dataset::<f64>().shape(nnz).create("data")?;
-        if nnz > 0 {
-            ds.write(&Array1::from_vec(v))?;
-        }
-    }
-    {
-        let v: Vec<i32> = mat.indices.iter().map(|&x| x as i32).collect();
-        let ds = grp.new_dataset::<i32>().shape(nnz).create("indices")?;
-        if nnz > 0 {
-            ds.write(&Array1::from_vec(v))?;
-        }
-    }
-    {
-        let max_ptr = mat.indptr.iter().copied().max().unwrap_or(0);
-        if max_ptr > i32::MAX as u64 {
-            let v: Vec<i64> = mat.indptr.iter().map(|&x| x as i64).collect();
-            let ds = grp.new_dataset::<i64>().shape(v.len()).create("indptr")?;
-            ds.write(&Array1::from_vec(v))?;
-        } else {
-            let v: Vec<i32> = mat.indptr.iter().map(|&x| x as i32).collect();
-            let ds = grp.new_dataset::<i32>().shape(v.len()).create("indptr")?;
-            ds.write(&Array1::from_vec(v))?;
-        }
-    }
-
-    let (nrows, ncols) = mat.shape;
-    let dims = vec![nrows as i32, ncols as i32];
-    let attr = grp.new_attr::<i32>().shape(2).create("dims")?;
-    attr.write(&Array1::from_vec(dims))?;
-
-    Ok(())
-}
 
 fn seurat_write_col(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
     match data {
@@ -922,35 +967,98 @@ impl DatasetWriter for H5SeuratWriter {
         Ok(()) // H5Seurat has no uns equivalent
     }
 
-    async fn write_layers(&mut self, layers: &Layers) -> Result<()> {
-        if layers.map.is_empty() {
-            return Ok(());
-        }
-        let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
-        for (name, mat) in &layers.map {
-            let layer_grp = assay_grp.create_group(name)?;
-            seurat_write_csr_into(&layer_grp, mat)?;
-        }
-        Ok(())
-    }
-
-    async fn write_obsp(&mut self, obsp: &Obsp) -> Result<()> {
-        if obsp.map.is_empty() {
-            return Ok(());
-        }
-        let graphs_grp = match self.file.group("graphs") {
-            Ok(g)  => g,
-            Err(_) => self.file.create_group("graphs")?,
+    async fn begin_sparse(
+        &mut self,
+        group_prefix: &str,
+        name: &str,
+        meta: &SparseMatrixMeta,
+    ) -> Result<()> {
+        // Determine the HDF5 group path for this sparse matrix.
+        let group_path = match group_prefix {
+            "layers" => {
+                // Ensure parent exists.
+                if self.file.group(&format!("assays/{}", self.assay)).is_err() {
+                    self.file.create_group(&format!("assays/{}", self.assay))?;
+                }
+                format!("assays/{}/{}", self.assay, name)
+            }
+            "obsp" => {
+                if self.file.group("graphs").is_err() {
+                    self.file.create_group("graphs")?;
+                }
+                format!("graphs/{name}")
+            }
+            other => format!("{other}/{name}"),
         };
-        for (name, mat) in &obsp.map {
-            let mat_grp = graphs_grp.create_group(name)?;
-            seurat_write_csr_into(&mat_grp, mat)?;
+
+        self.file.create_group(&group_path)?;
+
+        // Pre-create resizable data/indices datasets so chunks can be appended.
+        seurat_init_resizable::<f64>(&self.file, &format!("{group_path}/data"))?;
+        seurat_init_resizable::<i32>(&self.file, &format!("{group_path}/indices"))?;
+
+        self.sparse_state = Some(SparseWriteState {
+            group_path,
+            indptr: vec![0u64],
+            shape: meta.shape,
+        });
+        Ok(())
+    }
+
+    async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        let state = self.sparse_state.as_mut()
+            .ok_or_else(|| ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into()))?;
+
+        let csr = &chunk.data;
+        let nnz = csr.indices.len();
+
+        if nnz > 0 {
+            let data_ds = self.file.dataset(&format!("{}/data", state.group_path))?;
+            let old_len = data_ds.shape()[0];
+            let new_len = old_len + nnz;
+            data_ds.resize(new_len)?;
+            let vals: Vec<f64> = csr.data.to_f64();
+            data_ds.write_slice(&Array1::from_vec(vals), s![old_len..new_len])?;
+
+            let idx_ds = self.file.dataset(&format!("{}/indices", state.group_path))?;
+            idx_ds.resize(new_len)?;
+            let genes_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
+            idx_ds.write_slice(&Array1::from_vec(genes_i32), s![old_len..new_len])?;
+        }
+
+        // Accumulate indptr.
+        let base = *state.indptr.last().unwrap();
+        for i in 1..=chunk.nrows {
+            state.indptr.push(base + csr.indptr[i]);
         }
         Ok(())
     }
 
-    async fn write_varp(&mut self, _varp: &Varp) -> Result<()> {
-        Ok(()) // H5Seurat has no varp equivalent
+    async fn end_sparse(&mut self) -> Result<()> {
+        let state = self.sparse_state.take()
+            .ok_or_else(|| ScxError::InvalidFormat("end_sparse called without begin_sparse".into()))?;
+
+        let grp = self.file.group(&state.group_path)?;
+
+        // Write indptr.
+        let max_ptr = state.indptr.iter().copied().max().unwrap_or(0);
+        if max_ptr > i32::MAX as u64 {
+            let v: Vec<i64> = state.indptr.iter().map(|&x| x as i64).collect();
+            let ds = grp.new_dataset::<i64>().shape(v.len()).create("indptr")?;
+            ds.write(&Array1::from_vec(v))?;
+        } else {
+            let v: Vec<i32> = state.indptr.iter().map(|&x| x as i32).collect();
+            let ds = grp.new_dataset::<i32>().shape(v.len()).create("indptr")?;
+            ds.write(&Array1::from_vec(v))?;
+        }
+
+        // Write dims attribute: [nrows, ncols].
+        let (nrows, ncols) = state.shape;
+        let dims = vec![nrows as i32, ncols as i32];
+        let attr = grp.new_attr::<i32>().shape(2).create("dims")?;
+        attr.write(&Array1::from_vec(dims))?;
+
+        Ok(())
     }
 
     async fn write_varm(&mut self, varm: &Varm) -> Result<()> {
@@ -1329,20 +1437,38 @@ mod tests {
             },
         };
 
-        // layers["data"]: same shape, different values
-        let layer_mat = SparseMatrixCSR {
-            shape:   (n_vars, n_obs), // stored dims = [n_vars, n_obs] (CSC convention)
-            indptr:  vec![0, 1, 2, 3],
-            indices: vec![1, 0, 2],
-            data:    TypedVec::F32(vec![10.0, 20.0, 30.0]),
+        // layers["data"]: sparse chunk (n_vars × n_obs stored as CSR in H5Seurat convention)
+        let layer_chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_vars,
+            data: SparseMatrixCSR {
+                shape:   (n_vars, n_obs),
+                indptr:  vec![0, 1, 2, 3, 3],
+                indices: vec![1, 0, 2],
+                data:    TypedVec::F32(vec![10.0, 20.0, 30.0]),
+            },
+        };
+        let layer_meta = SparseMatrixMeta {
+            name:   "data".into(),
+            shape:  (n_vars, n_obs),
+            indptr: vec![0, 1, 2, 3, 3],
         };
 
         // obsp["knn"]: 3×3 cell-cell graph
-        let obsp_mat = SparseMatrixCSR {
-            shape:   (n_obs, n_obs),
-            indptr:  vec![0, 1, 2, 3],
-            indices: vec![1, 2, 0],
-            data:    TypedVec::F32(vec![0.5, 0.6, 0.7]),
+        let obsp_chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape:   (n_obs, n_obs),
+                indptr:  vec![0, 1, 2, 3],
+                indices: vec![1, 2, 0],
+                data:    TypedVec::F32(vec![0.5, 0.6, 0.7]),
+            },
+        };
+        let obsp_meta = SparseMatrixMeta {
+            name:   "knn".into(),
+            shape:  (n_obs, n_obs),
+            indptr: vec![0, 1, 2, 3],
         };
 
         // varm["X_pca"]: 4 genes × 2 PCs
@@ -1350,13 +1476,6 @@ mod tests {
             shape: (n_vars, 2),
             data:  vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
         };
-
-        let mut layers = Layers::default();
-        layers.map.insert("data".into(), layer_mat.clone());
-
-        let mut obsp = Obsp::default();
-        obsp.map.insert("knn".into(), obsp_mat.clone());
-
         let mut varm = Varm::default();
         varm.map.insert("X_pca".into(), varm_mat.clone());
 
@@ -1368,8 +1487,17 @@ mod tests {
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
         writer.write_uns(&UnsTable::default()).await.unwrap();
-        writer.write_layers(&layers).await.unwrap();
-        writer.write_obsp(&obsp).await.unwrap();
+
+        // Stream layer "data"
+        writer.begin_sparse("layers", "data", &layer_meta).await.unwrap();
+        writer.write_sparse_chunk(&layer_chunk).await.unwrap();
+        writer.end_sparse().await.unwrap();
+
+        // Stream obsp "knn"
+        writer.begin_sparse("obsp", "knn", &obsp_meta).await.unwrap();
+        writer.write_sparse_chunk(&obsp_chunk).await.unwrap();
+        writer.end_sparse().await.unwrap();
+
         writer.write_varm(&varm).await.unwrap();
         writer.write_x_chunk(&x_chunk).await.unwrap();
         writer.finalize().await.unwrap();
@@ -1379,18 +1507,28 @@ mod tests {
         let mut reader = H5SeuratReader::open(&path, 100, None, None).unwrap();
         assert_eq!(reader.shape(), (n_obs, n_vars));
 
-        let rt_layers = reader.layers().await.unwrap();
-        assert!(rt_layers.map.contains_key("data"), "layers['data'] missing");
-        let rt_layer = &rt_layers.map["data"];
-        assert_eq!(rt_layer.shape,   layer_mat.shape);
-        assert_eq!(rt_layer.indptr,  layer_mat.indptr);
-        assert_eq!(rt_layer.indices, layer_mat.indices);
+        let layer_metas = reader.layer_metas().await.unwrap();
+        assert!(layer_metas.iter().any(|m| m.name == "data"), "layers['data'] missing");
+        // Stream the layer in its own block so the borrow on `reader` ends before
+        // the next `&mut self` call.
+        let all_indices: Vec<u32> = {
+            let lm = layer_metas.iter().find(|m| m.name == "data").unwrap();
+            assert_eq!(lm.shape,  layer_meta.shape);
+            assert_eq!(lm.indptr, layer_meta.indptr);
+            let mut indices = Vec::new();
+            let mut stream = reader.layer_stream(lm, 100);
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.unwrap();
+                indices.extend_from_slice(&chunk.data.indices);
+            }
+            indices
+        };
+        assert_eq!(all_indices, layer_chunk.data.indices);
 
-        let rt_obsp = reader.obsp().await.unwrap();
-        assert!(rt_obsp.map.contains_key("knn"), "obsp['knn'] missing");
-        let rt_knn = &rt_obsp.map["knn"];
-        assert_eq!(rt_knn.shape,   obsp_mat.shape);
-        assert_eq!(rt_knn.indices, obsp_mat.indices);
+        let obsp_metas = reader.obsp_metas().await.unwrap();
+        assert!(obsp_metas.iter().any(|m| m.name == "knn"), "obsp['knn'] missing");
+        let om = obsp_metas.iter().find(|m| m.name == "knn").unwrap();
+        assert_eq!(om.shape, obsp_meta.shape);
 
         let rt_varm = reader.varm().await.unwrap();
         assert!(rt_varm.map.contains_key("X_pca"), "varm['X_pca'] missing");

@@ -30,6 +30,15 @@ pub struct MatrixChunk {
     pub data: SparseMatrixCSR,
 }
 
+/// Metadata for a named sparse matrix (shape + indptr) used as a streaming handle.
+/// The indptr is loaded upfront (cheap: n_obs+1 entries); data/indices are streamed.
+#[derive(Debug, Clone)]
+pub struct SparseMatrixMeta {
+    pub name: String,
+    pub shape: (usize, usize),
+    pub indptr: Vec<u64>,
+}
+
 /// Cell (observation) metadata table.
 #[derive(Debug, Clone, Default)]
 pub struct ObsTable {

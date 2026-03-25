@@ -12,13 +12,23 @@ use ndarray::{s, Array1, Array2};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, Embeddings, Layers, MatrixChunk, Obsp, ObsTable,
-         SparseMatrixCSR, UnsTable, VarTable, Varm, Varp},
+    ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
+         SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm},
     stream::{DatasetReader, DatasetWriter},
 };
 
 /// Number of elements per HDF5 chunk for the streaming X arrays (resizable datasets require chunks).
 const CHUNK_ELEMS: usize = 65_536;
+
+/// State kept while streaming a single named sparse matrix (layer or obsp).
+struct SparseWriteState {
+    /// Full HDF5 group path being written (e.g. "layers/spliced" or "obsp/nn").
+    group_path: String,
+    /// Accumulated CSR indptr across written chunks.
+    indptr: Vec<u64>,
+    /// Matrix shape (nrows, ncols) — written as the AnnData "shape" attribute on finalize.
+    shape: (usize, usize),
+}
 
 /// Streaming writer for the AnnData `.h5ad` format.
 ///
@@ -36,6 +46,8 @@ pub struct H5AdWriter {
     dtype: DataType,
     /// Accumulated CSR indptr across all written chunks (n_obs + 1 entries when done).
     x_indptr: Vec<u64>,
+    /// State for the currently open streaming sparse matrix, if any.
+    sparse_state: Option<SparseWriteState>,
 }
 
 impl H5AdWriter {
@@ -73,6 +85,7 @@ impl H5AdWriter {
             n_vars,
             dtype,
             x_indptr: vec![0u64],
+            sparse_state: None,
         })
     }
 }
@@ -253,29 +266,94 @@ impl DatasetWriter for H5AdWriter {
         Ok(())
     }
 
-    async fn write_layers(&mut self, layers: &Layers) -> Result<()> {
-        let grp = self.file.create_group("layers")?;
-        write_encoding_on_group(&grp, "dict", "0.1.0")?;
-        for (name, mat) in &layers.map {
-            ad_write_csr_group(&self.file, &format!("layers/{name}"), mat)?;
+    async fn begin_sparse(
+        &mut self,
+        group_prefix: &str,
+        name: &str,
+        meta: &SparseMatrixMeta,
+    ) -> Result<()> {
+        // Ensure the top-level dict group exists (created once on first call).
+        let top = match self.file.group(group_prefix) {
+            Ok(g)  => g,
+            Err(_) => {
+                let g = self.file.create_group(group_prefix)?;
+                write_encoding_on_group(&g, "dict", "0.1.0")?;
+                g
+            }
+        };
+
+        let group_path = format!("{group_prefix}/{name}");
+        let mat_grp = top.create_group(name)?;
+        write_encoding_on_group(&mat_grp, "csr_matrix", "0.1.0")?;
+
+        // Pre-create resizable data/indices datasets.
+        init_resizable_1d::<f32>(&self.file, &format!("{group_path}/data"))?;
+        let ds = self.file.dataset(&format!("{group_path}/data"))?;
+        write_encoding_on_ds(&ds, "array", "0.2.0")?;
+
+        init_resizable_1d::<i32>(&self.file, &format!("{group_path}/indices"))?;
+        let ds = self.file.dataset(&format!("{group_path}/indices"))?;
+        write_encoding_on_ds(&ds, "array", "0.2.0")?;
+
+        self.sparse_state = Some(SparseWriteState {
+            group_path,
+            indptr: vec![0u64],
+            shape: meta.shape,
+        });
+        Ok(())
+    }
+
+    async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        let state = self.sparse_state.as_mut()
+            .ok_or_else(|| ScxError::InvalidFormat(
+                "write_sparse_chunk called without begin_sparse".into()))?;
+
+        let csr = &chunk.data;
+        let nnz = csr.indices.len();
+
+        if nnz > 0 {
+            let data_ds = self.file.dataset(&format!("{}/data", state.group_path))?;
+            let old_len = data_ds.shape()[0];
+            let new_len = old_len + nnz;
+            data_ds.resize(new_len)?;
+            let vals: Vec<f32> = csr.data.to_f64().into_iter().map(|x| x as f32).collect();
+            data_ds.write_slice(&Array1::from_vec(vals), s![old_len..new_len])?;
+
+            let idx_ds = self.file.dataset(&format!("{}/indices", state.group_path))?;
+            idx_ds.resize(new_len)?;
+            let cols_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
+            idx_ds.write_slice(&Array1::from_vec(cols_i32), s![old_len..new_len])?;
+        }
+
+        let base = *state.indptr.last().unwrap();
+        for i in 1..=chunk.nrows {
+            state.indptr.push(base + csr.indptr[i]);
         }
         Ok(())
     }
 
-    async fn write_obsp(&mut self, obsp: &Obsp) -> Result<()> {
-        let grp = self.file.create_group("obsp")?;
-        write_encoding_on_group(&grp, "dict", "0.1.0")?;
-        for (name, mat) in &obsp.map {
-            ad_write_csr_group(&self.file, &format!("obsp/{name}"), mat)?;
-        }
-        Ok(())
-    }
+    async fn end_sparse(&mut self) -> Result<()> {
+        let state = self.sparse_state.take()
+            .ok_or_else(|| ScxError::InvalidFormat(
+                "end_sparse called without begin_sparse".into()))?;
 
-    async fn write_varp(&mut self, varp: &Varp) -> Result<()> {
-        let grp = self.file.create_group("varp")?;
-        write_encoding_on_group(&grp, "dict", "0.1.0")?;
-        for (name, mat) in &varp.map {
-            ad_write_csr_group(&self.file, &format!("varp/{name}"), mat)?;
+        let grp = self.file.group(&state.group_path)?;
+
+        // shape attribute
+        let shape_vals = vec![state.shape.0 as i64, state.shape.1 as i64];
+        let attr = grp.new_attr::<i64>().shape(2).create("shape")?;
+        attr.write(&Array1::from_vec(shape_vals))?;
+
+        // indptr
+        let max_val = state.indptr.iter().copied().max().unwrap_or(0);
+        if max_val > i32::MAX as u64 {
+            let v: Vec<i64> = state.indptr.iter().map(|&x| x as i64).collect();
+            let ds = write_1d(&grp, "indptr", Array1::from_vec(v))?;
+            write_encoding_on_ds(&ds, "array", "0.2.0")?;
+        } else {
+            let v: Vec<i32> = state.indptr.iter().map(|&x| x as i32).collect();
+            let ds = write_1d(&grp, "indptr", Array1::from_vec(v))?;
+            write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         Ok(())
     }
@@ -606,20 +684,6 @@ fn dense_array2_to_csr(
         DataType::U32 => TypedVec::U32(data_f64.iter().map(|&x| x as u32).collect()),
     };
     SparseMatrixCSR { shape: (nrows, ncols), indptr, indices, data }
-}
-
-/// Read a dense 2-D dataset as a full CSR matrix (for layers/obsp/varp).
-fn ad_read_dense_as_csr(file: &File, path: &str) -> Result<SparseMatrixCSR> {
-    let ds  = file.dataset(path)?;
-    let sh  = ds.shape();
-    if sh.len() != 2 {
-        return Err(ScxError::InvalidFormat(format!(
-            "dense layer '{path}' must be 2-D, got {}D", sh.len()
-        )));
-    }
-    let (nrows, ncols) = (sh[0], sh[1]);
-    let arr = ds.read::<f64, ndarray::Ix2>()?;
-    Ok(dense_array2_to_csr(arr.view(), nrows, ncols, DataType::F32))
 }
 
 fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
@@ -963,10 +1027,9 @@ fn ad_dataset_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
     }
 }
 
-/// Read a complete CSR sparse matrix from an H5AD-encoded group (e.g. "layers/X").
-fn ad_read_full_csr(file: &File, group_path: &str) -> Result<SparseMatrixCSR> {
+/// Read the shape and indptr for an H5AD CSR sparse group — used to create a `SparseMatrixMeta`.
+fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
-
     let shape_attr = grp.attr("shape")?;
     let (nrows, ncols) = match shape_attr.dtype()?.to_descriptor()? {
         TypeDescriptor::Integer(IntSize::U8) => {
@@ -978,57 +1041,73 @@ fn ad_read_full_csr(file: &File, group_path: &str) -> Result<SparseMatrixCSR> {
             (s[0] as usize, s[1] as usize)
         }
     };
-
     let indptr = ad_read_indptr(file, &format!("{group_path}/indptr"))?;
-
-    let indices_ds = file.dataset(&format!("{group_path}/indices"))?;
-    let indices: Vec<u32> = match indices_ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(_) => {
-            indices_ds.read_1d::<i32>()?.iter().map(|&x| x as u32).collect()
-        }
-        other => return Err(ScxError::InvalidFormat(format!(
-            "unexpected indices dtype {:?} at {group_path}/indices", other
-        ))),
-    };
-
-    let data_ds = file.dataset(&format!("{group_path}/data"))?;
-    let data = match data_ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(FloatSize::U4) => TypedVec::F32(data_ds.read_1d::<f32>()?.to_vec()),
-        TypeDescriptor::Float(_)             => TypedVec::F64(data_ds.read_1d::<f64>()?.to_vec()),
-        TypeDescriptor::Integer(_)           => TypedVec::I32(data_ds.read_1d::<i32>()?.to_vec()),
-        _                                    => TypedVec::F32(data_ds.read_1d::<f32>()?.to_vec()),
-    };
-
-    Ok(SparseMatrixCSR { shape: (nrows, ncols), indptr, indices, data })
+    Ok(SparseMatrixMeta { name: name.to_string(), shape: (nrows, ncols), indptr })
 }
 
-/// Write a complete CSR sparse matrix as an H5AD-encoded group (data stored as f32).
-fn ad_write_csr_group(file: &File, group_path: &str, mat: &SparseMatrixCSR) -> Result<()> {
-    let grp = file.create_group(group_path)?;
-    write_encoding_on_group(&grp, "csr_matrix", "0.1.0")?;
+/// Read a row-slice of an H5AD CSR sparse group as a `MatrixChunk`.
+fn ad_read_sparse_chunk(
+    path: &Path,
+    group_path: &str,
+    meta: &SparseMatrixMeta,
+    row_start: usize,
+    row_end: usize,
+) -> Result<MatrixChunk> {
+    let file = File::open(path)?;
+    let (_, ncols) = meta.shape;
+    let chunk_rows = row_end - row_start;
 
-    let shape_vals = vec![mat.shape.0 as i64, mat.shape.1 as i64];
-    let attr = grp.new_attr::<i64>().shape(2).create("shape")?;
-    attr.write(&Array1::from_vec(shape_vals))?;
+    let nnz_start = meta.indptr[row_start] as usize;
+    let nnz_end   = meta.indptr[row_end]   as usize;
+    let nnz = nnz_end - nnz_start;
 
-    let data_f32: Vec<f32> = mat.data.to_f64().into_iter().map(|x| x as f32).collect();
-    let ds = write_1d(&grp, "data", Array1::from_vec(data_f32))?;
-    write_encoding_on_ds(&ds, "array", "0.2.0")?;
-
-    let indices_i32: Vec<i32> = mat.indices.iter().map(|&x| x as i32).collect();
-    let ds = write_1d(&grp, "indices", Array1::from_vec(indices_i32))?;
-    write_encoding_on_ds(&ds, "array", "0.2.0")?;
-
-    let max_val = mat.indptr.iter().copied().max().unwrap_or(0);
-    if max_val > i32::MAX as u64 {
-        let v: Vec<i64> = mat.indptr.iter().map(|&x| x as i64).collect();
-        write_1d(&grp, "indptr", Array1::from_vec(v))?;
+    let indices: Vec<u32> = if nnz > 0 {
+        let ds = file.dataset(&format!("{group_path}/indices"))?;
+        match ds.dtype()?.to_descriptor()? {
+            TypeDescriptor::Integer(_) => ds
+                .read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?
+                .iter()
+                .map(|&x| x as u32)
+                .collect(),
+            other => return Err(ScxError::InvalidFormat(format!(
+                "unexpected indices dtype {other:?} at {group_path}/indices"
+            ))),
+        }
     } else {
-        let v: Vec<i32> = mat.indptr.iter().map(|&x| x as i32).collect();
-        write_1d(&grp, "indptr", Array1::from_vec(v))?;
-    }
+        Vec::new()
+    };
 
-    Ok(())
+    let data: TypedVec = if nnz > 0 {
+        let ds = file.dataset(&format!("{group_path}/data"))?;
+        match ds.dtype()?.to_descriptor()? {
+            TypeDescriptor::Float(FloatSize::U4) => TypedVec::F32(
+                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            TypeDescriptor::Float(_) => TypedVec::F64(
+                ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec()),
+            TypeDescriptor::Integer(_) => TypedVec::I32(
+                ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            _ => TypedVec::F32(
+                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
+        }
+    } else {
+        TypedVec::F32(Vec::new())
+    };
+
+    let csr_indptr: Vec<u64> = meta.indptr[row_start..=row_end]
+        .iter()
+        .map(|&p| p - meta.indptr[row_start])
+        .collect();
+
+    Ok(MatrixChunk {
+        row_offset: row_start,
+        nrows: chunk_rows,
+        data: SparseMatrixCSR {
+            shape: (chunk_rows, ncols),
+            indptr: csr_indptr,
+            indices,
+            data,
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,58 +1151,82 @@ impl DatasetReader for H5AdReader {
         }
     }
 
-    async fn layers(&mut self) -> Result<Layers> {
+    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
         let file = File::open(&self.path)?;
         let grp = match file.group("layers") {
-            Err(_) => return Ok(Layers::default()),
+            Err(_) => return Ok(Vec::new()),
             Ok(g)  => g,
         };
-        let mut map = HashMap::new();
+        let mut metas = Vec::new();
         for name in grp.member_names().unwrap_or_default() {
-            let path = format!("layers/{name}");
-            let result = if file.dataset(&path).is_ok() && file.group(&path).is_err() {
-                ad_read_dense_as_csr(&file, &path)
-            } else {
-                ad_read_full_csr(&file, &path)
-            };
-            match result {
-                Ok(m)  => { map.insert(name, m); }
+            let grp_path = format!("layers/{name}");
+            // Skip bare datasets (dense layers) — they need a different streaming path.
+            if file.dataset(&grp_path).is_ok() && file.group(&grp_path).is_err() {
+                tracing::warn!("skipping dense layer '{name}': dense layer streaming not yet supported");
+                continue;
+            }
+            match ad_read_sparse_meta(&file, &name, &grp_path) {
+                Ok(m)  => metas.push(m),
                 Err(e) => tracing::warn!("skipping layers['{name}']: {e}"),
             }
         }
-        Ok(Layers { map })
+        Ok(metas)
     }
 
-    async fn obsp(&mut self) -> Result<Obsp> {
+    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
         let file = File::open(&self.path)?;
         let grp = match file.group("obsp") {
-            Err(_) => return Ok(Obsp::default()),
+            Err(_) => return Ok(Vec::new()),
             Ok(g)  => g,
         };
-        let mut map = HashMap::new();
+        let mut metas = Vec::new();
         for name in grp.member_names().unwrap_or_default() {
-            match ad_read_full_csr(&file, &format!("obsp/{name}")) {
-                Ok(m)  => { map.insert(name, m); }
+            match ad_read_sparse_meta(&file, &name, &format!("obsp/{name}")) {
+                Ok(m)  => metas.push(m),
                 Err(e) => tracing::warn!("skipping obsp['{name}']: {e}"),
             }
         }
-        Ok(Obsp { map })
+        Ok(metas)
     }
 
-    async fn varp(&mut self) -> Result<Varp> {
-        let file = File::open(&self.path)?;
-        let grp = match file.group("varp") {
-            Err(_) => return Ok(Varp::default()),
-            Ok(g)  => g,
-        };
-        let mut map = HashMap::new();
-        for name in grp.member_names().unwrap_or_default() {
-            match ad_read_full_csr(&file, &format!("varp/{name}")) {
-                Ok(m)  => { map.insert(name, m); }
-                Err(e) => tracing::warn!("skipping varp['{name}']: {e}"),
+    fn layer_stream<'a>(
+        &'a self,
+        meta: &'a SparseMatrixMeta,
+        chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        let path    = self.path.clone();
+        let grp_path = format!("layers/{}", meta.name);
+        let n_rows  = meta.shape.0;
+        Box::pin(stream::unfold(0usize, move |row_start| {
+            let path     = path.clone();
+            let grp_path = grp_path.clone();
+            async move {
+                if row_start >= n_rows { return None; }
+                let row_end = (row_start + chunk_size).min(n_rows);
+                let chunk = ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                Some((chunk, row_end))
             }
-        }
-        Ok(Varp { map })
+        }))
+    }
+
+    fn obsp_stream<'a>(
+        &'a self,
+        meta: &'a SparseMatrixMeta,
+        chunk_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+        let path     = self.path.clone();
+        let grp_path = format!("obsp/{}", meta.name);
+        let n_rows   = meta.shape.0;
+        Box::pin(stream::unfold(0usize, move |row_start| {
+            let path     = path.clone();
+            let grp_path = grp_path.clone();
+            async move {
+                if row_start >= n_rows { return None; }
+                let row_end = (row_start + chunk_size).min(n_rows);
+                let chunk = ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                Some((chunk, row_end))
+            }
+        }))
     }
 
     async fn varm(&mut self) -> Result<Varm> {

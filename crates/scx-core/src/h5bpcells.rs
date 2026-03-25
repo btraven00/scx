@@ -90,9 +90,19 @@ fn read_strings(grp: &Group, name: &str) -> Result<Vec<String>> {
 }
 
 /// Read the scalar `"version"` attribute from the group.
+///
+/// BPCells R writes this as an H5S_SCALAR variable-length UTF-8 string.
+/// Other tools may write it as a 1-D array of length 1. Try both.
 pub fn read_version_attr(grp: &Group) -> Option<String> {
     let attr = grp.attr("version").ok()?;
-    // Try as VarLenUnicode first, then VarLenAscii
+    // Scalar (BPCells R / C++ native path)
+    if let Ok(s) = attr.read_scalar::<VarLenUnicode>() {
+        return Some(s.to_string());
+    }
+    if let Ok(s) = attr.read_scalar::<VarLenAscii>() {
+        return Some(s.to_string());
+    }
+    // 1-D array fallback
     if let Ok(arr) = attr.read_1d::<VarLenUnicode>() {
         return arr.into_iter().next().map(|s| s.to_string());
     }
