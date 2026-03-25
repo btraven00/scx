@@ -337,26 +337,36 @@ each array is independently mmap-able — no shared file offsets to coordinate.
 ```
 pbmc3k.scxd/
   meta.json                   # top-level manifest (see below)
+  obs_index.txt               # cell barcodes, one per line
+  var_index.txt               # gene names, one per line
+  uns.json                    # unstructured metadata (arbitrary JSON)
+  X/                          # primary count matrix (CSR)
+    data.npy                  # (nnz,)       f32/f64/i32/u32
+    indices.npy               # (nnz,)       u32
+    indptr.npy                # (n_obs+1,)   u64
+  obs/                        # per-cell metadata columns
+    n_genes.npy               # int column   → (n_obs,) i32
+    cell_type.npy             # categorical codes → (n_obs,) i32
+    cell_type_levels.txt      # one level per line
+    barcode.npy               # string column → (n_obs,) i32 (indices into …)
+    barcode_strings.txt       # one string per line
+  var/                        # per-gene metadata (same layout as obs/)
   obsm/
-    X_pca.npy                 # (n_obs, k) f32  — dense
-    X_umap.npy                # (n_obs, 2) f32  — dense
+    X_pca.npy                 # (n_obs, k)   f32  — dense
+    X_umap.npy                # (n_obs, 2)   f32  — dense
   varm/
-    PCs.npy                   # (n_vars, k) f32 — gene loadings
-  obsp/
-    connectivities/
-      data.npy                # (nnz,)     f32
-      indices.npy             # (nnz,)     i32
-      indptr.npy              # (n_obs+1,) i32
-  varp/                       # same layout as obsp
+    PCs.npy                   # (n_vars, k)  f32  — gene loadings
   layers/
-    counts/
+    counts/                   # same layout as X/
       data.npy
       indices.npy
       indptr.npy
-  X/                          # primary matrix (same layout as layers/*)
-    data.npy
-    indices.npy
-    indptr.npy
+  obsp/
+    connectivities/           # same layout as X/
+      data.npy
+      indices.npy
+      indptr.npy
+  varp/                       # same layout as obsp/
 ```
 
 ### `meta.json` schema
@@ -366,17 +376,45 @@ pbmc3k.scxd/
   "scxd_version": "0.1",
   "n_obs": 2700,
   "n_vars": 13714,
-  "obsm":  { "X_pca":  {"shape": [2700, 50], "dtype": "f32"},
-             "X_umap": {"shape": [2700, 2],  "dtype": "f32"} },
-  "varm":  { "PCs":    {"shape": [13714, 50], "dtype": "f32"} },
-  "obsp":  { "connectivities": {"shape": [2700, 2700], "nnz": 27000,
-                                 "format": "csr", "dtype": "f32"} },
-  "varp":  {},
-  "layers":{ "counts":         {"shape": [2700, 13714], "nnz": 2282976,
-                                 "format": "csr", "dtype": "f32"} },
-  "X":     {"shape": [2700, 13714], "nnz": 2282976, "format": "csr", "dtype": "f32"}
+  "x": {"shape": [2700, 13714], "nnz": 2282976, "dtype": "f32"},
+  "obs_index": {"n": 2700},
+  "var_index": {"n": 13714},
+  "obs": [
+    {"name": "n_genes",   "kind": "int",         "shape": [2700]},
+    {"name": "cell_type", "kind": "categorical",  "shape": [2700], "n_levels": 8},
+    {"name": "barcode",   "kind": "string",       "shape": [2700]}
+  ],
+  "var": [
+    {"name": "gene_name", "kind": "string", "shape": [13714]}
+  ],
+  "obsm": {
+    "X_pca":  {"shape": [2700, 50],  "dtype": "f64"},
+    "X_umap": {"shape": [2700, 2],   "dtype": "f64"}
+  },
+  "varm": {
+    "PCs": {"shape": [13714, 50], "dtype": "f64"}
+  },
+  "layers": {
+    "counts": {"shape": [2700, 13714], "nnz": 2282976, "dtype": "f32"}
+  },
+  "obsp": {
+    "connectivities": {"shape": [2700, 2700], "nnz": 27000, "dtype": "f32"}
+  },
+  "varp": {},
+  "uns": true
 }
 ```
+
+`obs` and `var` are **ordered arrays** (not objects) to preserve the column
+insertion order from the source file. The `kind` field encodes storage:
+
+| `kind`        | Files written                                    |
+|---------------|--------------------------------------------------|
+| `"int"`       | `{col}.npy` — `(n,)` i32                        |
+| `"float"`     | `{col}.npy` — `(n,)` f32                        |
+| `"bool"`      | `{col}.npy` — `(n,)` bool (1-byte)               |
+| `"categorical"` | `{col}.npy` (codes, i32) + `{col}_levels.txt` |
+| `"string"`    | `{col}.npy` (indices, i32) + `{col}_strings.txt` |
 
 ### `.npy` header
 
@@ -391,13 +429,14 @@ is a trivial sscanf-style scan.
 
 ### `.npy` dtype tags used by SCX
 
-| IR type | `.npy` descr |
-|---------|-------------|
-| `f32`   | `<f4`        |
-| `f64`   | `<f8`        |
-| `i32`   | `<i4`        |
-| `i64`   | `<i8`        |
-| `u32`   | `<u4`        |
+| IR type | `.npy` descr | Use                      |
+|---------|-------------|--------------------------|
+| `f32`   | `<f4`        | X data, obsm, varm       |
+| `f64`   | `<f8`        | obsm/varm (high-prec)    |
+| `i32`   | `<i4`        | X data (int counts), obs/var codes |
+| `u32`   | `<u4`        | X indices                |
+| `u64`   | `<u8`        | X indptr                 |
+| `bool`  | `\|b1`       | obs/var boolean columns  |
 
 All arrays are little-endian, C-contiguous (fortran_order: False).
 
@@ -436,46 +475,60 @@ R's mmap support for sparse matrices is limited (no standard mmap-backed
 `dgCMatrix`). When `mmap = TRUE` in R, dense arrays use `bigmemory::big.matrix`
 or a raw `mmap::mmap` descriptor; sparse arrays are always eagerly loaded.
 
-### Rust API sketch (`scx-core`)
+### Rust API (`scx-core`)
 
 ```rust
-pub struct ScxdWriter {
-    root: PathBuf,
+/// Controls which slots are written / read.
+pub struct SlotFilter {
+    pub only:    Option<Vec<String>>,  // None → all slots
+    pub exclude: Vec<String>,          // exclusions take priority
 }
 
-impl ScxdWriter {
-    pub fn create(path: impl AsRef<Path>) -> Result<Self>;
-    pub fn write_obsm(&self, key: &str, mat: &DenseMatrix) -> Result<()>;
-    pub fn write_varm(&self, key: &str, mat: &DenseMatrix) -> Result<()>;
-    pub fn write_obsp(&self, key: &str, mat: &SparseMatrixCSR) -> Result<()>;
-    pub fn write_varp(&self, key: &str, mat: &SparseMatrixCSR) -> Result<()>;
-    pub fn write_layer(&self, key: &str, mat: &SparseMatrixCSR) -> Result<()>;
-    pub fn write_x(&self, mat: &SparseMatrixCSR) -> Result<()>;
-    pub fn finalize(&self) -> Result<()>;   // writes meta.json
+impl SlotFilter {
+    pub fn all() -> Self;
+    pub fn from_only(slot: &str) -> Self;
+    // Slot names: "X", "obs", "var", "obsm", "varm", "layers", "obsp", "varp", "uns"
+    // Prefix matching: "obs" matches "obs" and "obs:cell_type"
 }
 
-pub struct ScxdReader {
-    root: PathBuf,
-    meta: ScxdMeta,
+/// Writes a full SingleCellDataset to a directory of .npy files + meta.json.
+pub struct NpyIrWriter;
+
+impl NpyIrWriter {
+    pub fn write(root: &Path, dataset: &SingleCellDataset, filter: &SlotFilter) -> Result<()>;
 }
 
-impl ScxdReader {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self>;
-    pub fn load_obsm(&self, key: &str, mode: LoadMode) -> Result<DenseMatrix>;
-    pub fn load_obsp(&self, key: &str, mode: LoadMode) -> Result<SparseMatrixCSR>;
-    // ... etc
+/// Reads a .scxd directory into a SingleCellDataset.
+/// Implements DatasetReader — x_stream() yields CSR chunks without re-reading disk.
+pub struct NpyIrReader { /* ... */ }
+
+impl NpyIrReader {
+    pub fn open(root: &Path, chunk_size: usize) -> Result<Self>;
+    pub fn into_dataset(self) -> SingleCellDataset;
 }
+
+impl DatasetReader for NpyIrReader { /* obs, var, obsm, x_stream, ... */ }
 ```
 
 ### CLI integration
 
 ```bash
-# Save a snapshot mid-pipeline (e.g. after obsm is computed but before writing H5AD)
-scx snapshot --input pbmc.h5seurat --output pbmc.scxd --slots obsm,obsp
+# Save a full snapshot
+scx snapshot --input pbmc.h5seurat --output pbmc.scxd
 
-# Load a snapshot and write to a target format
+# Save only selected slots
+scx snapshot --input pbmc.h5seurat --output pbmc.scxd --only X obsm
+
+# Save everything except unstructured metadata
+scx snapshot --input pbmc.h5seurat --output pbmc.scxd --exclude uns
+
+# Load a snapshot and write to H5AD
 scx convert --input pbmc.scxd --output pbmc.h5ad
 ```
+
+`--only` and `--exclude` accept slot names (`X`, `obs`, `var`, `obsm`, `varm`,
+`layers`, `obsp`, `varp`, `uns`) or prefixed column names (`obs:cell_type`).
+Exclusions take priority over inclusions.
 
 ### Why not alternatives
 

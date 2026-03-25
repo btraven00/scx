@@ -229,12 +229,119 @@ scx snapshot pbmc.h5seurat ir_dir/ --exclude layers,obsp
 
 ---
 
-## 0.0.8 — Seurat v5
+## 0.0.8 — Seurat v5 + BPCells reader
+
+### Seurat v5 HDF5 layout
 
 Seurat v5 restructured assay storage: layers live under
-`assays/RNA/layers/<name>` rather than `assays/RNA/<name>`. BPCells-backed
-matrices use a different on-disk format. Detect the version attribute on
-the assay group and route accordingly.
+`assays/RNA/layers/<name>` rather than `assays/RNA/<name>`. Detect the
+version attribute on the assay group and route `H5SeuratReader` accordingly.
+Lower priority — v5 files without BPCells backing can wait.
+
+### BPCells native reader (the interesting part)
+
+Seurat v5 adopted BPCells as its default backend for large count matrices,
+so most large v5 `.h5seurat` files in the wild have BPCells-backed X.
+A native Rust reader unlocks those files without launching R.
+
+#### References
+
+- **Format spec**: https://bnprks.github.io/BPCells/articles/web-only/bitpacking-format.html
+- **Reference bitpacking implementation** (plain C++, no SIMD):
+  https://github.com/GreenleafLab/BPCells_paper/blob/main/utils/bitpacking-reference-implementation.cpp
+- **BPCells repo**: https://github.com/bnprks/BPCells
+- **R/C++ glue** (`bitpacking_io.cpp`):
+  `r/src/bitpacking_io.cpp` — Rcpp wrappers that expose the read/write primitives to R; good entry point for understanding the API surface
+- **Core C++ reader** (`StoredMatrix.h`):
+  `r/src/bpcells-cpp/matrixIterators/StoredMatrix.h` — shows exactly which files are opened and how packed vs unpacked paths diverge
+- **Binary I/O** (`binaryfile.h`):
+  `r/src/bpcells-cpp/arrayIO/binaryfile.h` — 8-byte ASCII header format (`UINT32v1`, `UINT64v1`, `FLOATSv1`, `DOUBLEv1`) + little-endian body
+- **BP-128 SIMD** (`simd/bp128/`):
+  `r/src/bpcells-cpp/simd/bp128/` — the actual SIMD packing kernels; the reference impl above is the portable scalar equivalent
+
+#### On-disk layout (directory format, v2)
+
+```
+matrix_dir/
+  version          # text: "packed-uint-matrix-v2" etc.
+  storage_order    # text: "col" or "row"
+  shape            # UINT32v1 header + 2× u32: [n_rows, n_cols]
+  row_names        # text, one name per line
+  col_names        # text, one name per line
+  idxptr           # UINT64v1 header + (n_cols+1)× u64   [v1: u32]
+
+  # --- unpacked ---
+  val              # FLOATSv1/UINT32v1/DOUBLEv1 header + nnz values
+  index            # UINT32v1 header + nnz u32 row indices
+
+  # --- packed (uint only for val; index always packed) ---
+  val_data         # BP-128-FOR packed u32 values
+  val_idx          # u32 chunk offsets
+  val_idx_offsets  # u64 overflow offsets (v2)
+  index_data       # BP-128-D1Z packed row indices
+  index_idx        # u32 chunk offsets
+  index_idx_offsets # u64 overflow offsets (v2)
+  index_starts     # u32 per-chunk starting values (for D1 decode)
+```
+
+For float/double matrices, `val` is always stored uncompressed even in the
+packed variant — only integer `val` gets BP-128-FOR treatment.
+
+#### Bitpacking algorithms (summary)
+
+- **BP-128**: pack 128 u32s using B bits each (B = bits needed for max value).
+  Interleaved bit layout per Lemire & Boytsov fig 6. Stored as 4B u32 words.
+  `idx[i]` points to the start of chunk `i` in `data`.
+- **BP-128-FOR** (`val`): subtract 1 from each value before BP-128 (shifts
+  range to 0-based so 1-valued data uses 0 bits).
+- **BP-128-D1Z** (`index`): difference-encode consecutive values, then
+  zigzag-encode the deltas (handles non-monotone runs), then BP-128.
+  `starts[i]` = decoded value at index `128*i` (needed for independent chunk
+  decoding). Row indices within a column are sorted so deltas are small and
+  non-negative; zigzag rarely fires but handles edge cases.
+
+#### Implementation plan
+
+See `docs/bpcells-compat.md` for the detailed compatibility test suite plan.
+
+1. **Compatibility test suite** — R fixture generator + Rust unit tests for
+   each codec + integration tests against known matrices. No reader code yet.
+2. **Rust BP-128 decoder** — implement scalar (no SIMD) decode for the three
+   codec variants. Validate against test fixtures.
+3. **`BpcellsReader` struct** — reads the directory layout, dispatches
+   packed/unpacked, yields column chunks compatible with `DatasetReader`.
+4. **`H5SeuratReader` v5 routing** — detect `version` attribute on the assay
+   group; for BPCells-backed assays, hand off to `BpcellsReader`.
+5. **v5 write layout** (lower priority).
+
+#### TODO: BPCells benchmark fixture
+
+Generate a large BPCells-backed `.h5seurat` fixture (Seurat v5) for use in
+`scripts/benchmark_compare.sh --large`. This exercises the
+Rayon-parallelized `decode_d1z`/`decode_for` paths on a real dataset.
+
+**Recipe (R):**
+
+```r
+library(Seurat)
+library(BPCells)
+
+# Load existing large fixture (e.g. HLCA core h5ad) into Seurat
+adata <- anndataR::read_h5ad("tests/golden/hlca_core.h5ad", as = "InMemoryAnnData")
+seu   <- adata$as_Seurat()
+
+# Convert counts layer to BPCells on-disk backing
+seu[["RNA"]] <- as(seu[["RNA"]], "Assay5")
+seu[["RNA"]]$counts <- as.BPCells(seu[["RNA"]]$counts,
+                                   path = "tests/golden/hlca_bpcells_counts/")
+
+# Write to h5seurat — X will be stored as BPCells packed arrays
+SeuratDisk::SaveH5Seurat(seu, "tests/golden/hlca_core_bpcells.h5seurat")
+```
+
+Then add `hlca_core_bpcells.h5seurat` to the `--large` branch of
+`benchmark_compare.sh` alongside the existing HLCA fixture to directly
+compare BPCells decode speed (Rayon-parallel) vs plain HDF5 CSR streaming.
 
 ---
 

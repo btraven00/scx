@@ -13,13 +13,27 @@ use std::path::Path;
 use hdf5::File;
 use hdf5::types::VarLenUnicode;
 
-/// The detected on-disk format of an HDF5 file.
+/// The detected on-disk format of an HDF5 file or NPY directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     H5Ad,
     H5Seurat,
     /// SCX internal HDF5 schema (golden test fixtures).
     ScxH5,
+    /// NPY snapshot directory (contains `meta.json`).
+    NpyDir,
+}
+
+/// Sniff the format of a directory by checking for `meta.json`.
+///
+/// Returns `Some(Format::NpyDir)` if `path` is a directory containing
+/// `meta.json`, `None` otherwise.
+pub fn sniff_dir(path: &Path) -> Option<Format> {
+    if path.is_dir() && path.join("meta.json").exists() {
+        Some(Format::NpyDir)
+    } else {
+        None
+    }
 }
 
 /// Sniff the format of `path` by inspecting HDF5 structure.
