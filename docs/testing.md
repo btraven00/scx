@@ -12,6 +12,7 @@ Three layers of tests:
 3. **R testthat suite** (`pixi run -e test verify-r`) — loads SCX-produced files
    with `zellkonverter` into SCE objects and validates slot-by-slot. This is the
    direct compatibility oracle for the zellkonverter replacement goal.
+TODO: update - using anndataR
 
 All three run in the `pixi test` environment. The full gate is
 `pixi run -e test roundtrip`, which chains: fixtures → convert → pytest → testthat.

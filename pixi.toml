@@ -43,10 +43,10 @@ pytest   = "*"
 
 [feature.test.tasks]
 # --- fixture generation ---
-prepare-scx-h5       = { cmd = "Rscript scripts/prepare_test_data.R",      description = "Generate PBMC 3k SCX-H5 golden fixture" }
-prepare-h5seurat     = { cmd = "Rscript scripts/prepare_h5seurat_test.R",  description = "Generate PBMC 3k H5Seurat golden fixture", depends-on = ["prepare-scx-h5"] }
-prepare-h5ad-ref     = { cmd = "Rscript scripts/prepare_h5ad_reference.R", description = "Generate reference H5AD via anndataR (oracle)", depends-on = ["prepare-h5seurat"] }
-fixtures             = { description = "Generate all golden test fixtures", depends-on = ["prepare-h5ad-ref"] }
+prepare-scx-h5         = { cmd = "Rscript scripts/prepare_test_data.R",        description = "Generate PBMC 3k SCX-H5 golden fixture" }
+prepare-h5seurat       = { cmd = "Rscript scripts/prepare_h5seurat_test.R",    description = "Generate PBMC 3k H5Seurat golden fixture", depends-on = ["prepare-scx-h5"] }
+prepare-h5ad-ref       = { cmd = "Rscript scripts/prepare_h5ad_reference.R",   description = "Generate reference H5AD via anndataR (oracle)", depends-on = ["prepare-h5seurat"] }
+fixtures               = { description = "Generate all golden test fixtures", depends-on = ["prepare-h5ad-ref"] }
 
 # --- install scx binary into env ---
 install-scx = { cmd = "cargo build --release && cp target/release/scx $CONDA_PREFIX/bin/scx", description = "Build scx and install to pixi env bin/", depends-on = ["build-release"] }
@@ -67,3 +67,18 @@ roundtrip = { description = "Full round-trip: fixtures → convert → verify (P
 [environments]
 default = { features = [] }
 test    = { features = ["test"] }
+bpcells = { features = ["bpcells"] }
+
+# ---------------------------------------------------------------------------
+# bpcells feature — r-base 4.4 environment for BPCells fixture generation
+# Kept separate because r-bpcells on conda-forge is pinned to r-base 4.4
+# while the test environment requires r-base >=4.5 (bioconductor-anndatar).
+# ---------------------------------------------------------------------------
+[feature.bpcells.dependencies]
+r-base     = ">=4.4,<4.5"
+r-bpcells  = "*"
+r-matrix   = "*"
+r-jsonlite = "*"
+
+[feature.bpcells.tasks]
+prepare-bpcells = { cmd = "Rscript scripts/prepare_bpcells_fixtures.R", description = "Generate BPCells golden fixtures for compat tests" }
