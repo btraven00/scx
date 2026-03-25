@@ -1,0 +1,46 @@
+name: Conda Package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build (${{ matrix.target-platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target-platform: linux-64
+          - os: macos-13
+            target-platform: osx-64
+          - os: macos-latest
+            target-platform: osx-arm64
+
+    permissions:
+      id-token: write  # required for OIDC trusted publishing
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build conda package
+        uses: prefix-dev/rattler-build-action@v0.2.36
+        with:
+          recipe-path: conda.recipe/recipe.yaml
+          artifact-name: package-${{ matrix.target-platform }}
+          build-args: --target-platform ${{ matrix.target-platform }}
+
+      - name: Upload to prefix.dev
+        run: |
+          for pkg in $(find output -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
+            echo "Uploading ${pkg}"
+            rattler-build upload prefix \
+              -c almost-conductor \
+              "${pkg}"
+          done
+        env:
+          PREFIX_API_KEY: ${{ secrets.PREFIX_API_KEY }}
