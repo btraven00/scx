@@ -190,7 +190,7 @@ pub fn decode_d1z(
     // `starts[k]` is the running-prefix value before chunk k, so each chunk
     // is fully independent — perfect for parallel decode.
     if n_chunks >= RAYON_CHUNK_THRESHOLD {
-        let mut out = vec![0u32; count];
+        let out = vec![0u32; count];
         // Build (output_offset, take, ws, we, prev) descriptors up front.
         let descs: Vec<(usize, usize, usize, usize, u32)> = (0..n_chunks)
             .map(|k| {
@@ -246,7 +246,7 @@ pub fn decode_d1z(
 pub fn decode_for(data: &[u32], chunk_offsets: &[u32], count: usize) -> Vec<u32> {
     let n_chunks = chunk_offsets.len().saturating_sub(1);
     if n_chunks >= RAYON_CHUNK_THRESHOLD {
-        let mut out = vec![0u32; count];
+        let out = vec![0u32; count];
         let descs: Vec<(usize, usize, usize, usize)> = (0..n_chunks)
             .map(|k| {
                 let out_start = k * 128;

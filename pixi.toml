@@ -61,6 +61,7 @@ verify-r      = { cmd = "Rscript -e \"testthat::test_dir('tests/r', reporter = '
 # --- full round-trip gate ---
 roundtrip = { description = "Full round-trip: fixtures → convert → verify (Python + R oracles)", depends-on = ["fixtures", "convert-h5seurat-to-h5ad", "verify-python", "verify-r"] }
 
+
 # ---------------------------------------------------------------------------
 # Environments
 # ---------------------------------------------------------------------------
@@ -82,3 +83,5 @@ r-jsonlite = "*"
 
 [feature.bpcells.tasks]
 prepare-bpcells = { cmd = "Rscript scripts/prepare_bpcells_fixtures.R", description = "Generate BPCells golden fixtures for compat tests" }
+# Requires: bash scripts/download_large.sh (HLCA core h5ad, ~2 GB)
+prepare-bpcells-h5seurat = { cmd = "Rscript scripts/prepare_bpcells_h5seurat.R", description = "Generate BPCells-packed H5Seurat fixture from HLCA core (large benchmark)" }
