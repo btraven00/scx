@@ -24,6 +24,7 @@ done
 
 if [[ $LARGE -eq 1 ]]; then
   GOLDEN="tests/golden/hlca_core.h5ad"
+  GOLDEN_SEURAT="tests/golden/seurat_v5_bpcells.h5seurat"
   DATASET_LABEL="HLCA core (584k cells)"
   # fewer hyperfine runs — each takes ~minutes
   SCX_RUNS=3; SCX_WARMUP=1

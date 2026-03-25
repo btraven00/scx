@@ -9,15 +9,20 @@
 //!     `readVersion` reads it back.
 //!   - `matrixIterators/StoredMatrix.h`: same dataset names as directory format.
 
+use std::path::Path;
+
+use async_trait::async_trait;
 use hdf5::{File, Group};
 use hdf5::types::{VarLenAscii, VarLenUnicode};
 use ndarray::Array1;
 
 use crate::bpcells::{
-    decode_d1z, decode_for, BpcellsDatasetReader, StorageOrder, ValStore,
+    decode_d1z, decode_for, encode_d1z, encode_for, BpcellsDatasetReader, StorageOrder, ValStore,
 };
-use crate::dtype::DataType;
+use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
+use crate::ir::{Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
+use crate::stream::DatasetWriter;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -110,6 +115,438 @@ pub fn read_version_attr(grp: &Group) -> Option<String> {
         return arr.into_iter().next().map(|s| s.to_string());
     }
     None
+}
+
+/// Write a 1-D uint32 dataset into an HDF5 group, replacing any existing one.
+fn write_u32s(grp: &Group, name: &str, values: &[u32]) -> Result<()> {
+    if grp.link_exists(name) {
+        grp.unlink(name).map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+        })?;
+    }
+    grp.new_dataset_builder()
+        .with_data(values)
+        .create(name)
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
+    Ok(())
+}
+
+/// Write a 1-D uint64 dataset into an HDF5 group, replacing any existing one.
+fn write_u64s(grp: &Group, name: &str, values: &[u64]) -> Result<()> {
+    if grp.link_exists(name) {
+        grp.unlink(name).map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+        })?;
+    }
+    grp.new_dataset_builder()
+        .with_data(values)
+        .create(name)
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
+    Ok(())
+}
+
+/// Write a 1-D float32 dataset into an HDF5 group, replacing any existing one.
+fn write_f32s(grp: &Group, name: &str, values: &[f32]) -> Result<()> {
+    if grp.link_exists(name) {
+        grp.unlink(name).map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+        })?;
+    }
+    grp.new_dataset_builder()
+        .with_data(values)
+        .create(name)
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
+    Ok(())
+}
+
+/// Write a 1-D float64 dataset into an HDF5 group, replacing any existing one.
+fn write_f64s(grp: &Group, name: &str, values: &[f64]) -> Result<()> {
+    if grp.link_exists(name) {
+        grp.unlink(name).map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+        })?;
+    }
+    grp.new_dataset_builder()
+        .with_data(values)
+        .create(name)
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
+    Ok(())
+}
+
+/// Write a 1-D UTF-8 string dataset into an HDF5 group, replacing any existing one.
+fn write_strings(grp: &Group, name: &str, values: &[String]) -> Result<()> {
+    if grp.link_exists(name) {
+        grp.unlink(name).map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+        })?;
+    }
+    let vals: Vec<VarLenUnicode> = values
+        .iter()
+        .map(|s| {
+            <VarLenUnicode as std::str::FromStr>::from_str(s)
+                .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: invalid UTF-8 string for '{name}': {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    grp.new_dataset_builder()
+        .with_data(&vals)
+        .create(name)
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
+    Ok(())
+}
+
+/// Write the scalar `version` attribute on a BPCells HDF5 group.
+fn write_version_attr(grp: &Group, version: &str) -> Result<()> {
+    if grp.attr("version").is_ok() {
+        grp.attr("version")
+            .and_then(|a| a.write_scalar(
+                &<VarLenUnicode as std::str::FromStr>::from_str(version)
+                    .map_err(|e| hdf5::Error::Internal(format!("invalid version string: {e}")))?,
+            ))
+            .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: writing 'version' attr: {e}")))?;
+        return Ok(());
+    }
+
+    let v = <VarLenUnicode as std::str::FromStr>::from_str(version)
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: invalid version string: {e}")))?;
+    grp.new_attr::<VarLenUnicode>()
+        .shape(())
+        .create("version")
+        .and_then(|a| a.write_scalar(&v))
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating 'version' attr: {e}")))?;
+    Ok(())
+}
+
+/// Write a packed BPCells matrix into an HDF5 group.
+///
+/// `shape` is stored as `[nrow, ncol]` in BPCells convention.
+pub fn write_bpcells_h5(
+    file: &File,
+    group_path: &str,
+    storage_order: StorageOrder,
+    nrow: usize,
+    ncol: usize,
+    row_names: &[String],
+    col_names: &[String],
+    idxptr: &[u64],
+    index: &[u32],
+    values: &ValStore,
+) -> Result<()> {
+    let grp = match file.group(group_path) {
+        Ok(g) => g,
+        Err(_) => file.create_group(group_path).map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: creating group '{group_path}': {e}"))
+        })?,
+    };
+
+    let storage = match storage_order {
+        StorageOrder::Col => "col".to_string(),
+        StorageOrder::Row => "row".to_string(),
+    };
+    let shape = vec![nrow as u32, ncol as u32];
+    let storage_vec = vec![storage];
+
+    write_strings(&grp, "storage_order", &storage_vec)?;
+    write_u32s(&grp, "shape", &shape)?;
+    write_u64s(&grp, "idxptr", idxptr)?;
+    write_strings(&grp, "row_names", row_names)?;
+    write_strings(&grp, "col_names", col_names)?;
+
+    let (index_data, index_idx, index_starts) = encode_d1z(index);
+    write_u32s(&grp, "index_data", &index_data)?;
+    write_u32s(&grp, "index_idx", &index_idx)?;
+    write_u64s(&grp, "index_idx_offsets", &vec![0u64; index_starts.len()])?;
+    write_u32s(&grp, "index_starts", &index_starts)?;
+
+    match values {
+        ValStore::Uint32(v) => {
+            let (val_data, val_idx) = encode_for(v);
+            write_version_attr(&grp, "packed-uint-matrix-v2")?;
+            write_u32s(&grp, "val_data", &val_data)?;
+            write_u32s(&grp, "val_idx", &val_idx)?;
+            write_u64s(&grp, "val_idx_offsets", &vec![0u64; val_idx.len().saturating_sub(1)])?;
+        }
+        ValStore::Float32(v) => {
+            write_version_attr(&grp, "packed-float-matrix-v2")?;
+            write_f32s(&grp, "val", v)?;
+        }
+        ValStore::Float64(v) => {
+            write_version_attr(&grp, "packed-double-matrix-v2")?;
+            write_f64s(&grp, "val", v)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+enum TypedVal {
+    F32(f32),
+    F64(f64),
+    U32(u32),
+}
+
+impl TypedVal {
+    fn from_typed_vec_at(values: &TypedVec, idx: usize) -> Result<Self> {
+        match values {
+            TypedVec::F32(v) => Ok(Self::F32(v[idx])),
+            TypedVec::F64(v) => Ok(Self::F64(v[idx])),
+            TypedVec::U32(v) => Ok(Self::U32(v[idx])),
+            TypedVec::I32(_) => Err(ScxError::InvalidFormat(
+                "BPCells writer does not support I32 matrices".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BpcellsCscData {
+    idxptr: Vec<u64>,
+    index: Vec<u32>,
+    values: ValStore,
+}
+
+#[derive(Debug)]
+struct BpcellsCscAccumulator {
+    n_obs: usize,
+    entries: Vec<(u32, u32, TypedVal)>,
+}
+
+impl BpcellsCscAccumulator {
+    fn new(n_obs: usize, _n_vars: usize) -> Self {
+        Self {
+            n_obs,
+            entries: Vec::new(),
+        }
+    }
+
+    fn push_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        let csr = &chunk.data;
+        if csr.indices.len() != csr.data.len() {
+            return Err(ScxError::InvalidFormat(
+                "BPCells writer: CSR indices/data length mismatch".into(),
+            ));
+        }
+
+        for local_row in 0..chunk.nrows {
+            let global_row = chunk.row_offset + local_row;
+            let start = csr.indptr[local_row] as usize;
+            let end = csr.indptr[local_row + 1] as usize;
+            for ptr in start..end {
+                let col = csr.indices[ptr];
+                let val = TypedVal::from_typed_vec_at(&csr.data, ptr)?;
+                self.entries.push((col, global_row as u32, val));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn into_csc(mut self) -> Result<BpcellsCscData> {
+        self.entries
+            .sort_unstable_by_key(|(col, row, _)| (*col, *row));
+
+        let mut idxptr = vec![0u64; self.n_obs + 1];
+        let mut index = Vec::with_capacity(self.entries.len());
+
+        let first_kind = self.entries.first().map(|e| match e.2 {
+            TypedVal::F32(_) => DataType::F32,
+            TypedVal::F64(_) => DataType::F64,
+            TypedVal::U32(_) => DataType::U32,
+        });
+
+        match first_kind {
+            None => Ok(BpcellsCscData {
+                idxptr,
+                index,
+                values: ValStore::Uint32(Vec::new()),
+            }),
+            Some(DataType::F32) => {
+                let mut vals = Vec::with_capacity(self.entries.len());
+                for (col, row, v) in self.entries {
+                    idxptr[col as usize + 1] += 1;
+                    index.push(row);
+                    match v {
+                        TypedVal::F32(x) => vals.push(x),
+                        _ => {
+                            return Err(ScxError::InvalidFormat(
+                                "BPCells writer: mixed value types in accumulator".into(),
+                            ))
+                        }
+                    }
+                }
+                for i in 0..self.n_obs {
+                    idxptr[i + 1] += idxptr[i];
+                }
+                Ok(BpcellsCscData {
+                    idxptr,
+                    index,
+                    values: ValStore::Float32(vals),
+                })
+            }
+            Some(DataType::F64) => {
+                let mut vals = Vec::with_capacity(self.entries.len());
+                for (col, row, v) in self.entries {
+                    idxptr[col as usize + 1] += 1;
+                    index.push(row);
+                    match v {
+                        TypedVal::F64(x) => vals.push(x),
+                        _ => {
+                            return Err(ScxError::InvalidFormat(
+                                "BPCells writer: mixed value types in accumulator".into(),
+                            ))
+                        }
+                    }
+                }
+                for i in 0..self.n_obs {
+                    idxptr[i + 1] += idxptr[i];
+                }
+                Ok(BpcellsCscData {
+                    idxptr,
+                    index,
+                    values: ValStore::Float64(vals),
+                })
+            }
+            Some(DataType::U32) => {
+                let mut vals = Vec::with_capacity(self.entries.len());
+                for (col, row, v) in self.entries {
+                    idxptr[col as usize + 1] += 1;
+                    index.push(row);
+                    match v {
+                        TypedVal::U32(x) => vals.push(x),
+                        _ => {
+                            return Err(ScxError::InvalidFormat(
+                                "BPCells writer: mixed value types in accumulator".into(),
+                            ))
+                        }
+                    }
+                }
+                for i in 0..self.n_obs {
+                    idxptr[i + 1] += idxptr[i];
+                }
+                Ok(BpcellsCscData {
+                    idxptr,
+                    index,
+                    values: ValStore::Uint32(vals),
+                })
+            }
+            Some(DataType::I32) => Err(ScxError::InvalidFormat(
+                "BPCells writer does not support I32 matrices".into(),
+            )),
+        }
+    }
+}
+
+pub struct BpcellsH5Writer {
+    file: File,
+    assay: String,
+    layer: String,
+    n_obs: usize,
+    n_vars: usize,
+    obs_names: Vec<String>,
+    var_names: Vec<String>,
+    accumulator: BpcellsCscAccumulator,
+}
+
+impl BpcellsH5Writer {
+    pub fn create<P: AsRef<Path>>(
+        path: P,
+        n_obs: usize,
+        n_vars: usize,
+        _dtype: DataType,
+        assay: Option<&str>,
+        layer: Option<&str>,
+    ) -> Result<Self> {
+        let assay = assay.unwrap_or("RNA").to_string();
+        let layer = layer.unwrap_or("counts").to_string();
+        let file = File::create(path.as_ref())?;
+
+        if file.group("assays").is_err() {
+            file.create_group("assays")?;
+        }
+        if file.group(&format!("assays/{assay}")).is_err() {
+            file.create_group(&format!("assays/{assay}"))?;
+        }
+
+        Ok(Self {
+            file,
+            assay,
+            layer,
+            n_obs,
+            n_vars,
+            obs_names: Vec::new(),
+            var_names: Vec::new(),
+            accumulator: BpcellsCscAccumulator::new(n_obs, n_vars),
+        })
+    }
+}
+
+#[async_trait]
+impl DatasetWriter for BpcellsH5Writer {
+    async fn write_obs(&mut self, obs: &ObsTable) -> Result<()> {
+        self.obs_names = obs.index.clone();
+        Ok(())
+    }
+
+    async fn write_var(&mut self, var: &VarTable) -> Result<()> {
+        self.var_names = var.index.clone();
+        Ok(())
+    }
+
+    async fn write_obsm(&mut self, _obsm: &Embeddings) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_uns(&mut self, _uns: &UnsTable) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_varm(&mut self, _varm: &Varm) -> Result<()> {
+        Ok(())
+    }
+
+    async fn begin_sparse(&mut self, _group_prefix: &str, _name: &str, _meta: &SparseMatrixMeta) -> Result<()> {
+        Err(ScxError::InvalidFormat(
+            "BPCells writer does not yet support auxiliary sparse matrices".into(),
+        ))
+    }
+
+    async fn write_sparse_chunk(&mut self, _chunk: &MatrixChunk) -> Result<()> {
+        Err(ScxError::InvalidFormat(
+            "BPCells writer does not yet support auxiliary sparse matrices".into(),
+        ))
+    }
+
+    async fn end_sparse(&mut self) -> Result<()> {
+        Err(ScxError::InvalidFormat(
+            "BPCells writer does not yet support auxiliary sparse matrices".into(),
+        ))
+    }
+
+    async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        self.accumulator.push_chunk(chunk)
+    }
+
+    async fn finalize(&mut self) -> Result<()> {
+        let accumulator = std::mem::replace(
+            &mut self.accumulator,
+            BpcellsCscAccumulator::new(self.n_obs, self.n_vars),
+        );
+        let csc = accumulator.into_csc()?;
+        let group_path = format!("assays/{}/{}", self.assay, self.layer);
+
+        write_bpcells_h5(
+            &self.file,
+            &group_path,
+            StorageOrder::Col,
+            self.n_vars,
+            self.n_obs,
+            &self.var_names,
+            &self.obs_names,
+            &csc.idxptr,
+            &csc.index,
+            &csc.values,
+        )
+    }
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -233,4 +670,115 @@ pub fn open_bpcells_h5(
     Ok(BpcellsDatasetReader::from_parts(
         n_obs, n_vars, chunk_size, obs_names, var_names, idxptr, index, values, dtype,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bpcells::{bp128_pack, bp128_unpack};
+
+    #[test]
+    fn bp128_pack_roundtrip_all_bit_widths() {
+        for b in 0u8..=32 {
+            let mask = if b == 32 { u32::MAX } else if b == 0 { 0 } else { (1u32 << b) - 1 };
+            let mut vals = [0u32; 128];
+            for (i, v) in vals.iter_mut().enumerate() {
+                let base = ((i as u32).wrapping_mul(2654435761)).rotate_left((i % 31) as u32);
+                *v = base & mask;
+            }
+            let packed = bp128_pack(b, &vals);
+            let unpacked = bp128_unpack(b, &packed);
+            assert_eq!(unpacked, vals, "failed roundtrip for b={b}");
+        }
+    }
+
+    #[test]
+    fn encode_for_roundtrip_various_lengths() {
+        for len in [1usize, 127, 128, 129, 256, 10_000] {
+            let values: Vec<u32> = (0..len).map(|i| ((i as u32) % 97) + 1).collect();
+            let (data, idx) = encode_for(&values);
+            let decoded = decode_for(&data, &idx, values.len());
+            assert_eq!(decoded, values, "failed FOR roundtrip for len={len}");
+        }
+    }
+
+    #[test]
+    fn encode_d1z_roundtrip_various_lengths() {
+        for len in [1usize, 127, 128, 129, 256, 10_000] {
+            let mut cur = 0u32;
+            let values: Vec<u32> = (0..len)
+                .map(|i| {
+                    cur = cur.wrapping_add(((i % 5) as u32) + 1);
+                    cur
+                })
+                .collect();
+            let (data, idx, starts) = encode_d1z(&values);
+            let decoded = decode_d1z(&data, &idx, &starts, values.len());
+            assert_eq!(decoded, values, "failed D1Z roundtrip for len={len}");
+        }
+    }
+
+    #[test]
+    fn write_then_open_packed_uint_h5_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_bpcells_uint.h5");
+        let file = File::create(&path).unwrap();
+
+        let row_names = vec!["g1".to_string(), "g2".to_string(), "g3".to_string()];
+        let col_names = vec!["c1".to_string(), "c2".to_string()];
+        let idxptr = vec![0u64, 2, 4];
+        let index = vec![0u32, 2, 1, 2];
+        let values = ValStore::Uint32(vec![5u32, 7, 11, 13]);
+
+        write_bpcells_h5(
+            &file,
+            "matrix",
+            StorageOrder::Col,
+            3,
+            2,
+            &row_names,
+            &col_names,
+            &idxptr,
+            &index,
+            &values,
+        )
+        .unwrap();
+
+        let reopened = open_bpcells_h5(&file, "matrix", 2).unwrap();
+        assert_eq!(reopened.n_obs, 2);
+        assert_eq!(reopened.n_vars, 3);
+        assert_eq!(read_version_attr(&file.group("matrix").unwrap()).as_deref(), Some("packed-uint-matrix-v2"));
+    }
+
+    #[test]
+    fn write_then_open_packed_float_h5_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_bpcells_float.h5");
+        let file = File::create(&path).unwrap();
+
+        let row_names = vec!["g1".to_string(), "g2".to_string()];
+        let col_names = vec!["c1".to_string(), "c2".to_string(), "c3".to_string()];
+        let idxptr = vec![0u64, 1, 2, 3];
+        let index = vec![0u32, 1, 0];
+        let values = ValStore::Float32(vec![1.5f32, 2.5, 3.5]);
+
+        write_bpcells_h5(
+            &file,
+            "matrix",
+            StorageOrder::Col,
+            2,
+            3,
+            &row_names,
+            &col_names,
+            &idxptr,
+            &index,
+            &values,
+        )
+        .unwrap();
+
+        let reopened = open_bpcells_h5(&file, "matrix", 2).unwrap();
+        assert_eq!(reopened.n_obs, 3);
+        assert_eq!(reopened.n_vars, 2);
+        assert_eq!(read_version_attr(&file.group("matrix").unwrap()).as_deref(), Some("packed-float-matrix-v2"));
+    }
 }
