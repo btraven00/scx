@@ -299,42 +299,74 @@ impl DatasetWriter for H5AdWriter {
         let nnz = csr.indices.len();
 
         if nnz > 0 {
+            // Type conversion happens before the HDF5 lock is held, so
+            // parallelising it with Rayon is safe and doesn't conflict with
+            // the global HDF5 mutex.  LLVM additionally auto-vectorises the
+            // cast loops to AVX2/SSE4 within each Rayon thread.
+            const PAR_THRESHOLD: usize = 100_000;
+            use rayon::prelude::*;
+
             // --- Append data ---
             let data_ds = self.file.dataset("X/data")?;
             let old_len = data_ds.shape()[0];
             let new_len = old_len + nnz;
             data_ds.resize(new_len)?;
 
-            // Convert directly from source type to target type — avoids the
-            // intermediate f64 Vec that to_f64() would allocate.
             match (&csr.data, self.dtype) {
+                // Same-type: clone is a memcpy, already optimal.
                 (TypedVec::F32(v), DataType::F32) => {
                     data_ds.write_slice(&Array1::from_vec(v.clone()), s![old_len..new_len])?;
                 }
                 (TypedVec::F64(v), DataType::F64) => {
                     data_ds.write_slice(&Array1::from_vec(v.clone()), s![old_len..new_len])?;
                 }
+                // Cross-type direct paths — parallelize when large.
                 (TypedVec::F64(v), DataType::F32) => {
-                    let w: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+                    let w: Vec<f32> = if nnz >= PAR_THRESHOLD {
+                        v.par_iter().map(|&x| x as f32).collect()
+                    } else {
+                        v.iter().map(|&x| x as f32).collect()
+                    };
                     data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
                 (TypedVec::F32(v), DataType::F64) => {
-                    let w: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+                    let w: Vec<f64> = if nnz >= PAR_THRESHOLD {
+                        v.par_iter().map(|&x| x as f64).collect()
+                    } else {
+                        v.iter().map(|&x| x as f64).collect()
+                    };
                     data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
+                // Integer sources — go through f64 then cast.
                 (_, DataType::F32) => {
-                    let w: Vec<f32> = csr.data.to_f64().into_iter().map(|x| x as f32).collect();
+                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    let w: Vec<f32> = if nnz >= PAR_THRESHOLD {
+                        f.into_par_iter().map(|x| x as f32).collect()
+                    } else {
+                        f.into_iter().map(|x| x as f32).collect()
+                    };
                     data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
                 (_, DataType::F64) => {
-                    data_ds.write_slice(&Array1::from_vec(csr.data.to_f64()), s![old_len..new_len])?;
+                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    data_ds.write_slice(&Array1::from_vec(f), s![old_len..new_len])?;
                 }
                 (_, DataType::I32) => {
-                    let w: Vec<i32> = csr.data.to_f64().into_iter().map(|x| x as i32).collect();
+                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    let w: Vec<i32> = if nnz >= PAR_THRESHOLD {
+                        f.into_par_iter().map(|x| x as i32).collect()
+                    } else {
+                        f.into_iter().map(|x| x as i32).collect()
+                    };
                     data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
                 (_, DataType::U32) => {
-                    let w: Vec<u32> = csr.data.to_f64().into_iter().map(|x| x as u32).collect();
+                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    let w: Vec<u32> = if nnz >= PAR_THRESHOLD {
+                        f.into_par_iter().map(|x| x as u32).collect()
+                    } else {
+                        f.into_iter().map(|x| x as u32).collect()
+                    };
                     data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
             }
@@ -343,7 +375,11 @@ impl DatasetWriter for H5AdWriter {
             let idx_ds = self.file.dataset("X/indices")?;
             let old_idx_len = idx_ds.shape()[0];
             idx_ds.resize(new_len)?;
-            let gene_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
+            let gene_i32: Vec<i32> = if nnz >= PAR_THRESHOLD {
+                csr.indices.par_iter().map(|&x| x as i32).collect()
+            } else {
+                csr.indices.iter().map(|&x| x as i32).collect()
+            };
             idx_ds.write_slice(&Array1::from_vec(gene_i32), s![old_idx_len..new_len])?;
         }
 

@@ -6,6 +6,11 @@
 //! Format spec: https://bnprks.github.io/BPCells/articles/web-only/bitpacking-format.html
 
 use std::path::Path;
+use rayon::prelude::*;
+
+/// Minimum number of BP-128 chunks before switching to parallel decode.
+/// Below ~256 chunks (32 768 values) the rayon thread-pool overhead dominates.
+const RAYON_CHUNK_THRESHOLD: usize = 256;
 
 // ─── Zigzag codec ────────────────────────────────────────────────────────────
 
@@ -77,26 +82,54 @@ pub fn decode_d1z(
     count: usize,
 ) -> Vec<u32> {
     let n_chunks = chunk_offsets.len().saturating_sub(1);
-    let mut out = Vec::with_capacity(count);
-    let mut remaining = count;
-    for k in 0..n_chunks {
-        if remaining == 0 {
-            break;
+    // `starts[k]` is the running-prefix value before chunk k, so each chunk
+    // is fully independent — perfect for parallel decode.
+    if n_chunks >= RAYON_CHUNK_THRESHOLD {
+        let mut out = vec![0u32; count];
+        // Build (output_offset, take, ws, we, prev) descriptors up front.
+        let descs: Vec<(usize, usize, usize, usize, u32)> = (0..n_chunks)
+            .map(|k| {
+                let out_start = k * 128;
+                let take = (count.saturating_sub(out_start)).min(128);
+                (out_start, take, chunk_offsets[k] as usize, chunk_offsets[k + 1] as usize, starts[k])
+            })
+            .take_while(|(s, t, ..)| *s < count && *t > 0)
+            .collect();
+        // SAFETY: each descriptor maps to a non-overlapping slice of `out`.
+        descs.par_iter().for_each(|&(out_start, take, ws, we, prev_start)| {
+            let b = ((we - ws) / 4) as u8;
+            let raw = bp128_unpack(b, &data[ws..we]);
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(out.as_ptr().add(out_start) as *mut u32, take)
+            };
+            let mut prev = prev_start;
+            for i in 0..take {
+                let delta = zigzag_decode(raw[i]);
+                prev = (prev as i64 + delta as i64) as u32;
+                dst[i] = prev;
+            }
+        });
+        out
+    } else {
+        let mut out = Vec::with_capacity(count);
+        let mut remaining = count;
+        for k in 0..n_chunks {
+            if remaining == 0 { break; }
+            let ws = chunk_offsets[k] as usize;
+            let we = chunk_offsets[k + 1] as usize;
+            let b = ((we - ws) / 4) as u8;
+            let raw = bp128_unpack(b, &data[ws..we]);
+            let take = remaining.min(128);
+            let mut prev = starts[k];
+            for i in 0..take {
+                let delta = zigzag_decode(raw[i]);
+                prev = (prev as i64 + delta as i64) as u32;
+                out.push(prev);
+            }
+            remaining -= take;
         }
-        let ws = chunk_offsets[k] as usize;
-        let we = chunk_offsets[k + 1] as usize;
-        let b = ((we - ws) / 4) as u8;
-        let raw = bp128_unpack(b, &data[ws..we]);
-        let take = remaining.min(128);
-        let mut prev = starts[k];
-        for i in 0..take {
-            let delta = zigzag_decode(raw[i]);
-            prev = (prev as i64 + delta as i64) as u32;
-            out.push(prev);
-        }
-        remaining -= take;
+        out
     }
-    out
 }
 
 /// Decode `count` values from a **BP-128-FOR** stream (used for uint32 values).
@@ -107,23 +140,41 @@ pub fn decode_d1z(
 /// - `chunk_offsets`: word boundary per chunk (`val_idx` file, body only).
 pub fn decode_for(data: &[u32], chunk_offsets: &[u32], count: usize) -> Vec<u32> {
     let n_chunks = chunk_offsets.len().saturating_sub(1);
-    let mut out = Vec::with_capacity(count);
-    let mut remaining = count;
-    for k in 0..n_chunks {
-        if remaining == 0 {
-            break;
+    if n_chunks >= RAYON_CHUNK_THRESHOLD {
+        let mut out = vec![0u32; count];
+        let descs: Vec<(usize, usize, usize, usize)> = (0..n_chunks)
+            .map(|k| {
+                let out_start = k * 128;
+                let take = (count.saturating_sub(out_start)).min(128);
+                (out_start, take, chunk_offsets[k] as usize, chunk_offsets[k + 1] as usize)
+            })
+            .take_while(|(s, t, ..)| *s < count && *t > 0)
+            .collect();
+        // SAFETY: each descriptor maps to a non-overlapping slice of `out`.
+        descs.par_iter().for_each(|&(out_start, take, ws, we)| {
+            let b = ((we - ws) / 4) as u8;
+            let raw = bp128_unpack(b, &data[ws..we]);
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(out.as_ptr().add(out_start) as *mut u32, take)
+            };
+            for i in 0..take { dst[i] = raw[i].wrapping_add(1); }
+        });
+        out
+    } else {
+        let mut out = Vec::with_capacity(count);
+        let mut remaining = count;
+        for k in 0..n_chunks {
+            if remaining == 0 { break; }
+            let ws = chunk_offsets[k] as usize;
+            let we = chunk_offsets[k + 1] as usize;
+            let b = ((we - ws) / 4) as u8;
+            let raw = bp128_unpack(b, &data[ws..we]);
+            let take = remaining.min(128);
+            for i in 0..take { out.push(raw[i].wrapping_add(1)); }
+            remaining -= take;
         }
-        let ws = chunk_offsets[k] as usize;
-        let we = chunk_offsets[k + 1] as usize;
-        let b = ((we - ws) / 4) as u8;
-        let raw = bp128_unpack(b, &data[ws..we]);
-        let take = remaining.min(128);
-        for i in 0..take {
-            out.push(raw[i].wrapping_add(1));
-        }
-        remaining -= take;
+        out
     }
-    out
 }
 
 // ─── File I/O helpers ────────────────────────────────────────────────────────
