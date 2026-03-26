@@ -58,6 +58,10 @@ convert-h5seurat-to-h5ad = { cmd = "cargo run --release --bin scx -- convert tes
 verify-python = { cmd = "pytest tests/python/ -v", description = "Run pytest integration suite (anndata oracle)" }
 verify-r      = { cmd = "Rscript -e \"testthat::test_dir('tests/r', reporter = 'progress')\"", description = "Run testthat integration suite (anndataR oracle)" }
 
+# --- picklerick Python package ---
+install-picklerick-py = { cmd = "python -m ensurepip && python -m pip install -e python/picklerick", description = "Install the picklerick Python package in editable mode" }
+verify-picklerick-py  = { cmd = "python -m pytest python/picklerick/tests -q", description = "Run picklerick Python package tests" }
+
 # --- full round-trip gate ---
 roundtrip = { description = "Full round-trip: fixtures → convert → verify (Python + R oracles)", depends-on = ["fixtures", "convert-h5seurat-to-h5ad", "verify-python", "verify-r"] }
 
@@ -66,9 +70,28 @@ roundtrip = { description = "Full round-trip: fixtures → convert → verify (P
 # Environments
 # ---------------------------------------------------------------------------
 [environments]
-default = { features = [] }
-test    = { features = ["test"] }
-bpcells = { features = ["bpcells"] }
+default    = { features = [] }
+test       = { features = ["test"] }
+py313      = { features = ["py313"] }
+bpcells    = { features = ["bpcells"] }
+
+# ---------------------------------------------------------------------------
+# py313 feature — dedicated Python 3.13 env for PyO3 / maturin validation
+# Kept separate because the general test environment currently uses Python 3.14,
+# while the pinned PyO3 stack used by picklerick native bindings is validated
+# against Python 3.13.
+# ---------------------------------------------------------------------------
+[feature.py313.dependencies]
+python   = ">=3.13,<3.14"
+anndata  = ">=0.12.10,<0.13"
+h5py     = "*"
+numpy    = "*"
+scipy    = "*"
+pytest   = "*"
+
+[feature.py313.tasks]
+install-picklerick-py-native = { cmd = "python -m ensurepip && python -m pip install maturin && python -m maturin develop --manifest-path python/picklerick/rust/Cargo.toml", description = "Build and install the picklerick native PyO3 extension into the Python 3.13 env" }
+verify-picklerick-py-native  = { cmd = "python -m pytest python/picklerick/tests/test_native.py -q", description = "Run native-backend smoke tests for the picklerick Python package" }
 
 # ---------------------------------------------------------------------------
 # bpcells feature — r-base 4.4 environment for BPCells fixture generation

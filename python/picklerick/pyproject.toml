@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "picklerick"
+version = "0.0.10"
+description = "Thin Python wrapper over the SCX single-cell interoperability engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-only" }
+authors = [
+  { name = "SCX Authors", email = "placeholder@example.com" }
+]
+dependencies = [
+  "anndata>=0.10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+native = [
+  "maturin>=1.7,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/placeholder/scx"
+Repository = "https://github.com/placeholder/scx"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/picklerick"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/picklerick",
+  "tests",
+  "README.md",
+  "rust/Cargo.toml",
+  "rust/src",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
