@@ -19,6 +19,7 @@ Peak memory scales with `chunk_size`, not dataset size.
 | `crates/scx-core` | Rust core: readers, writers, IR, streaming traits |
 | `crates/scx-cli` | `scx` command-line tool |
 | `r/picklerick` | R package (extendr bindings) |
+| `python/picklerick` | Python package (hybrid bindings: CLI-backed with optional native PyO3 acceleration) |
 | `docs/` | Roadmap and design notes |
 
 ## Scope
@@ -76,9 +77,39 @@ cargo build --release -p scx-cli
 # R package (requires Cargo ≥ 1.70 and system HDF5)
 R CMD INSTALL r/picklerick
 
+# Python package
+pip install -e python/picklerick
+
 # Tests
 cargo test
 Rscript -e "testthat::test_dir('r/picklerick/tests/testthat')"
+python -m pytest python/picklerick/tests -q
+```
+
+## Pixi workflows
+
+For repo-local testing, pixi provides the most reliable workflows.
+
+### Python package (CLI-backed path)
+
+```bash
+pixi run -e test install-picklerick-py
+pixi run -e test verify-picklerick-py
+```
+
+### Python package (optional native PyO3 backend)
+
+```bash
+pixi run -e py313 install-picklerick-py-native
+pixi run -e py313 verify-picklerick-py-native
+```
+
+### Shared test fixtures
+
+If the golden fixtures are missing, generate them with:
+
+```bash
+pixi run -e test fixtures
 ```
 
 ## Formats
