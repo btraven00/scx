@@ -1,5 +1,9 @@
 # SCX Roadmap
 
+SCX is a lean, format-to-format interoperability engine for single-cell data,
+optimized for reproducible benchmarking of conversion correctness, throughput,
+and memory use.
+
 ## 0.0.1 (done)
 
 - `H5SeuratReader` — reads SeuratDisk `.h5seurat` files (Seurat v3/v4)
@@ -636,13 +640,19 @@ pk.write(adata, "pbmc.h5ad")
 pk.convert("pbmc.h5seurat", "pbmc.h5ad", chunk_size=5000)
 ```
 
+**Scope choice:** keep `0.0.10` intentionally simple and eager. Mirror the R
+API (`read_h5seurat`, `read_h5ad`, `read_dataset`, `write_h5seurat`,
+`write_h5ad`, `convert`) and return normal `anndata.AnnData` objects. Do not
+block this milestone on lazy loading, custom matrix backends, or experimental
+performance paths. Internally, the implementation can follow the same staged
+path as R: start with a thin CLI-backed wrapper, then optionally swap the
+implementation to pyo3/native calls behind the same public API.
+
 Publish to PyPI.
 
 ---
 
-## 0.1.0 — Streaming H5Seurat write + cloud formats
-
-### Truly streaming H5Seurat writer
+## 0.1.0 — Truly streaming H5Seurat write
 
 The 0.0.4 H5Seurat writer buffers O(nnz) in memory. For genuine atlas-scale
 (>1B nnz), implement a two-pass streaming approach:
@@ -654,30 +664,37 @@ The 0.0.4 H5Seurat writer buffers O(nnz) in memory. For genuine atlas-scale
 This keeps peak RSS at O(chunk_size) throughout. Only necessary for datasets
 where nnz > ~500M; the 0.0.4 writer handles everything smaller.
 
-### Zarr / MuData
+---
 
-AnnData 0.10+ supports a Zarr backend. MuData wraps multiple AnnData objects
-for multimodal experiments. Add `ZarrAdReader`/`ZarrAdWriter` so SCX can
-operate directly on cloud-hosted datasets without downloading.
+## 0.1.1 — Internal NPY snapshot path for benchmarking
 
-### Julia bindings
+**Goal:** keep an internal, low-overhead checkpoint format that helps isolate
+benchmark components and reduce measurement noise.
 
-```julia
-using Picklerick
-sce = read_dataset("pbmc.h5seurat")
-write_dataset(sce, "pbmc.h5ad")
-```
+The SCX `.npy` snapshot format is an **internal and exploratory** format. It is
+not a primary interoperability target and should not become a new user-facing
+product surface unless it proves clearly valuable beyond benchmarking and
+debugging.
 
-Target integration with [Muon.jl](https://github.com/scverse/Muon.jl).
+### Why keep it
 
-### Other potential formats
+- **Benchmark isolation** — separate read costs from write costs in controlled
+  experiments.
+- **Debugging** — inspect the IR without HDF5 tooling.
+- **Fixture generation** — build small targeted tests around the internal IR.
+- **Lower overhead experiments** — reduce format overhead when the goal is to
+  benchmark the conversion engine rather than an external container format.
 
-| Format | Ecosystem | Notes |
-|--------|-----------|-------|
-| TileDB-SOMA | CellxGene Census | Columnar, cloud-native; huge public dataset access |
-| MEX (10x) | Raw output | `matrix.mtx.gz` + `barcodes.tsv` + `features.tsv` |
-| H5 (10x CellRanger) | Raw output | `/matrix` group; simpler than H5Seurat |
-| AnnData Zarr | scverse cloud | Same IR, different I/O backend |
+### Product stance
+
+- Keep `.npy` snapshots as an internal research aid.
+- Do not treat snapshots as a new canonical exchange format.
+- Do not block bindings or core conversion milestones on snapshot-specific
+  reopen APIs.
+- Keep the main product story centered on H5Seurat ↔ H5AD interop.
+
+Future work here should be justified by benchmarking value, not by platform
+ambition.
 
 ---
 

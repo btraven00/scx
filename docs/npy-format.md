@@ -1,7 +1,12 @@
 # NPY Exchange Format (0.0.7)
 
-Raw-binary IR snapshots for benchmarking isolation, debugging, and as the
-foundation of a zero-copy R conversion path.
+Internal raw-binary IR snapshots for benchmarking isolation, debugging, and
+experimental low-overhead reopen paths.
+
+This format is an internal SCX substrate, not a primary end-user interchange
+format. Its purpose is to reduce overhead in benchmarking and debugging
+workflows by capturing the SCX intermediate representation in a simple,
+inspectable directory layout.
 
 ---
 
@@ -9,18 +14,17 @@ foundation of a zero-copy R conversion path.
 
 HDF5 format overhead — schema validation, chunk bookkeeping, compression — can
 dominate wall time for small-to-medium datasets and makes micro-benchmarking
-noisy.  More critically, the current R conversion path copies data three times:
+noisy.
 
-```
-H5Seurat file
-  → Rust heap (Vec<T> per CSR component)
-  → temp H5AD file
-  → anndataR parse → R dgCMatrix on GC heap
-```
+The NPY snapshot exists to support SCX's core research use case:
 
-A flat binary snapshot eliminates the intermediate file and reduces this to a
-single copy (OS page cache → R heap).  It also gives a standalone checkpoint
-you can inspect with `numpy.load()` from any language.
+- isolate conversion stages for lean benchmarking;
+- checkpoint the SCX intermediate representation for debugging;
+- reduce overhead when repeatedly exercising readers/writers during tests and
+  experiments.
+
+In other words, the snapshot is best understood as an **internal execution /
+benchmark substrate**, not as a new public-facing storage standard.
 
 **Use cases:**
 
@@ -31,8 +35,8 @@ you can inspect with `numpy.load()` from any language.
   HDF5 tooling.
 - **Test fixtures** — generate synthetic IRs from Rust, verify readers in
   Python/R without needing HDF5 files.
-- **R fast path** — mmap the snapshot arrays directly into R SEXP objects
-  (planned, see §mmap plan below).
+- **Exploratory low-overhead reopen path** — reopen snapshot arrays directly in
+  experimental bindings without paying full HDF5 parsing overhead.
 
 ---
 
@@ -40,7 +44,7 @@ you can inspect with `numpy.load()` from any language.
 
 `spec.md` §15 sketched a `.scxd` format using a nested directory structure
 (`X/data.npy`, `obsp/connectivities/data.npy`) and named the artifact
-`.scxd`.  The implementation uses a **flat layout** instead:
+`.scxd`. The implementation uses a **flat layout** instead:
 
 | spec.md vision | implemented |
 |---|---|
@@ -50,13 +54,14 @@ you can inspect with `numpy.load()` from any language.
 | `.scxd` extension required | any directory; `meta.json` presence is the signal |
 
 Rationale: the flat layout avoids creating one subdirectory per slot key, is
-simpler to iterate over, and keeps all files at one `readdir` depth.  The
-mmap semantics from the spec are unchanged — each file is independently
-mmap-able at offset 128.  The spec's `meta.json` per-array shape/dtype
-metadata is preserved.
+simpler to iterate over, and keeps all files at one `readdir` depth.
 
 The `.scxd` convention can still be used as a naming recommendation for
 snapshot directories (e.g. `pbmc3k.scxd/`) but is not enforced.
+
+For product purposes, this format should be treated as an SCX-internal artifact:
+useful for benchmarking, debugging, and experimental reopen paths, but not a
+format that SCX commits to promote as a primary user-facing interchange target.
 
 ---
 
@@ -288,11 +293,15 @@ H5AD.
 
 ---
 
-## Planned: mmap path in picklerick (Phase C)
+## Planned: exploratory mmap path in picklerick (Phase C)
 
 The current picklerick conversion path writes a temp H5AD then calls
-`anndataR::read_h5ad()`.  The NPY snapshot enables a direct path with one copy
-instead of three.
+`anndataR::read_h5ad()`. The NPY snapshot may enable a lower-overhead reopen
+path for exploratory benchmarking-oriented bindings work.
+
+This remains explicitly exploratory. It is not part of the core SCX product
+thesis, and it should not drive the public API surface ahead of the main
+interop engine.
 
 ### Copy count comparison
 
@@ -513,5 +522,7 @@ and be directly usable as R integer.  Could add dtype field per-array in
 per layer would be more faithful but complicate `meta.json`.
 
 **Python consumer.** A thin Python reader (20 lines using `numpy.load` /
-`np.memmap` + `json.load`) would complete the cross-language story.  Could
-live in `scripts/` or a future `picklerick-py`.
+`np.memmap` + `json.load`) is a good exploratory fit for benchmarking and
+debugging workflows. If added, it should be framed as a low-overhead reopen
+path over the internal snapshot substrate, not as evidence that NPY snapshots
+are becoming a primary public format.
