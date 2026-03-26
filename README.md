@@ -1,8 +1,16 @@
 # SCX — Single-Cell format conversion
 
-Converts between single-cell genomics formats (H5Seurat, H5AD) via a
-memory-bounded streaming pipeline written in Rust. Peak memory scales with `chunk_size`,
-not dataset size — suitable for atlas-scale data (10M–100M cells).
+SCX is a lean, format-to-format interoperability engine for single-cell data,
+optimized for reproducible benchmarking of conversion correctness, throughput,
+and memory use.
+
+Today the project focuses on a narrow core:
+
+- robust conversion between H5Seurat and H5AD
+- a memory-bounded streaming pipeline written in Rust
+- thin language bindings for benchmarking and interop workflows
+
+Peak memory scales with `chunk_size`, not dataset size.
 
 ## Components
 
@@ -12,6 +20,28 @@ not dataset size — suitable for atlas-scale data (10M–100M cells).
 | `crates/scx-cli` | `scx` command-line tool |
 | `r/picklerick` | R package (extendr bindings) |
 | `docs/` | Roadmap and design notes |
+
+## Scope
+
+SCX is an interop engine first, not a full analysis framework. The main product
+goal is lean, reproducible benchmarking of format conversion.
+
+### In scope
+
+- H5Seurat ↔ H5AD conversion
+- bounded-memory conversion with explicit `chunk_size`
+- correctness checks against reference fixtures
+- CLI and thin language bindings for R/Python
+- internal formats or checkpoints that reduce benchmarking overhead
+
+### Out of scope for the core project
+
+- replacing AnnData / Scanpy / Seurat / BPCells
+- becoming a general lazy matrix engine or data platform
+- broad cloud-native storage support
+- community-driven feature parity across every language binding
+- universal zero-copy guarantees
+- supporting every possible single-cell format
 
 ## Quick start
 
@@ -61,6 +91,17 @@ Rscript -e "testthat::test_dir('r/picklerick/tests/testthat')"
 
 Dense X/layers and nullable obs columns (anndata `IntNA`/`FloatNA`/`BoolNA`)
 are fully supported.
+
+## Internal benchmarking format
+
+SCX also has an internal `.npy` snapshot format used as an implementation and
+benchmarking aid. It is intentionally exploratory and should be understood as:
+
+- an internal checkpoint format for isolating read/write costs in benchmarks
+- a debugging substrate for inspecting the intermediate representation
+- a way to reduce overhead in benchmarking tasks without going through HDF5 each time
+
+It is not currently positioned as a primary public interchange format.
 
 ## License
 
