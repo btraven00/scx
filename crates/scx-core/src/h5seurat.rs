@@ -38,16 +38,19 @@ use crate::{
 ///     cell.embeddings               float64 (n_components, ncells) — stored column-major
 ///
 /// The sparse matrix is CSC (gene-major). We stream it as cell-major CSR chunks.
+enum XBackend {
+    DgCMatrix { indptr: Vec<u64>, dtype: DataType },
+    BpCells,
+}
+
 pub struct H5SeuratReader {
     path: PathBuf,
     assay: String,
     layer: String,
     n_obs: usize,
     n_vars: usize,
-    /// Full CSC column pointer array (n_obs+1 entries).
-    indptr: Vec<u64>,
     chunk_size: usize,
-    dtype: DataType,
+    x_backend: XBackend,
 }
 
 impl H5SeuratReader {
@@ -68,30 +71,50 @@ impl H5SeuratReader {
         let dims_path = format!("assays/{assay}/{layer}");
         let dims_grp  = file.group(&dims_path)?;
 
-        // dims attribute on the sparse group: [ngenes, ncells]
-        let dims_attr = dims_grp.attr("dims").map_err(|_| {
-            ScxError::InvalidFormat(format!("missing 'dims' attribute on {dims_path}"))
-        })?;
-        let dims: Vec<i32> = dims_attr.read_1d::<i32>()?.to_vec();
-        if dims.len() < 2 {
-            return Err(ScxError::InvalidFormat("dims must have 2 elements".into()));
-        }
-        let n_vars = dims[0] as usize;
-        let n_obs  = dims[1] as usize;
-
-        let indptr_ds_path = format!("{dims_path}/indptr");
-        let indptr = read_indptr_from(&file, &indptr_ds_path)?;
-        if indptr.len() != n_obs + 1 {
+        // Standard dgCMatrix groups carry a `dims` attribute [ngenes, ncells].
+        // BPCells-backed groups instead store a `shape` dataset [nrow, ncol],
+        // which for Seurat counts means [ngenes, ncells].
+        let (n_vars, n_obs) = if let Ok(dims_attr) = dims_grp.attr("dims") {
+            let dims: Vec<i32> = dims_attr.read_1d::<i32>()?.to_vec();
+            if dims.len() < 2 {
+                return Err(ScxError::InvalidFormat("dims must have 2 elements".into()));
+            }
+            (dims[0] as usize, dims[1] as usize)
+        } else if crate::h5bpcells::probe_bpcells_version(&file, &dims_path).is_some() {
+            let shape_ds = file.dataset(&format!("{dims_path}/shape")).map_err(|_| {
+                ScxError::InvalidFormat(format!(
+                    "missing 'shape' dataset on BPCells group {dims_path}"
+                ))
+            })?;
+            let shape: Vec<u32> = shape_ds.read_1d::<u32>()?.to_vec();
+            if shape.len() < 2 {
+                return Err(ScxError::InvalidFormat("shape must have 2 elements".into()));
+            }
+            (shape[0] as usize, shape[1] as usize)
+        } else {
             return Err(ScxError::InvalidFormat(format!(
-                "indptr length {} != n_obs+1 {}",
-                indptr.len(), n_obs + 1
+                "missing 'dims' attribute on {dims_path}"
             )));
-        }
+        };
 
-        let data_ds_path = format!("{dims_path}/data");
-        let dtype = detect_dtype(&file, &data_ds_path)?;
+        let x_backend = if crate::h5bpcells::probe_bpcells_version(&file, &dims_path).is_some() {
+            XBackend::BpCells
+        } else {
+            let indptr_ds_path = format!("{dims_path}/indptr");
+            let indptr = read_indptr_from(&file, &indptr_ds_path)?;
+            if indptr.len() != n_obs + 1 {
+                return Err(ScxError::InvalidFormat(format!(
+                    "indptr length {} != n_obs+1 {}",
+                    indptr.len(), n_obs + 1
+                )));
+            }
 
-        Ok(Self { path, assay, layer, n_obs, n_vars, indptr, chunk_size, dtype })
+            let data_ds_path = format!("{dims_path}/data");
+            let dtype = detect_dtype(&file, &data_ds_path)?;
+            XBackend::DgCMatrix { indptr, dtype }
+        };
+
+        Ok(Self { path, assay, layer, n_obs, n_vars, chunk_size, x_backend })
     }
 }
 
@@ -443,11 +466,65 @@ fn read_uns_sync(path: &Path) -> Result<UnsTable> {
 // Slot parity helpers
 // ---------------------------------------------------------------------------
 
-/// Read the shape and indptr for a single H5Seurat CSC sparse group.
-/// This is all that's needed to create a `SparseMatrixMeta`; data/indices
-/// are left on disk and streamed later.
+/// Classify an H5Seurat sparse group as either classic dgCMatrix storage or
+/// BPCells-backed storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SparseGroupKind {
+    DgCMatrix,
+    BpCells,
+}
+
+fn detect_sparse_group_kind(file: &File, group_path: &str) -> Option<SparseGroupKind> {
+    if file.group(group_path).is_err() {
+        return None;
+    }
+    if crate::h5bpcells::probe_bpcells_version(file, group_path).is_some() {
+        return Some(SparseGroupKind::BpCells);
+    }
+    if file.dataset(&format!("{group_path}/indptr")).is_ok() {
+        return Some(SparseGroupKind::DgCMatrix);
+    }
+    None
+}
+
+/// Read the shape and indptr for a single H5Seurat sparse group.
+/// Supports both classic dgCMatrix groups (`dims` + `indptr`) and
+/// BPCells-backed groups (`shape` + `idxptr` with `version` attr).
 fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
+
+    if matches!(detect_sparse_group_kind(file, group_path), Some(SparseGroupKind::BpCells)) {
+        let shape_ds = file.dataset(&format!("{group_path}/shape"))?;
+        let shape: Vec<u32> = shape_ds.read_1d::<u32>()?.to_vec();
+        if shape.len() < 2 {
+            return Err(ScxError::InvalidFormat(format!(
+                "BPCells layer/group '{group_path}' has shape with < 2 elements"
+            )));
+        }
+        let nrows = shape[1] as usize;
+        let ncols = shape[0] as usize;
+        let idxptr_ds = file.dataset(&format!("{group_path}/idxptr"))?;
+        let indptr: Vec<u64> = match idxptr_ds.dtype()?.to_descriptor()? {
+            TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
+                if idxptr_ds.dtype()?.size() == 8 {
+                    idxptr_ds.read_1d::<u64>()?.to_vec()
+                } else {
+                    idxptr_ds.read_1d::<u32>()?.iter().map(|&x| x as u64).collect()
+                }
+            }
+            other => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "unexpected BPCells idxptr type at {group_path}: {:?}", other
+                )))
+            }
+        };
+        return Ok(SparseMatrixMeta {
+            name: name.to_string(),
+            shape: (nrows, ncols),
+            indptr,
+        });
+    }
+
     let dims_attr = grp.attr("dims")?;
     let dims: Vec<i32> = dims_attr.read_1d::<i32>()?.to_vec();
     // H5Seurat dims attr is [n_rows, n_cols] where columns = CSC dimension
@@ -522,7 +599,9 @@ fn read_layer_metas_sync(path: &Path, assay: &str, primary_layer: &str) -> Resul
     for name in assay_grp.member_names().unwrap_or_default() {
         if name == primary_layer { continue; }
         let grp_path = format!("assays/{assay}/{name}");
-        if file.dataset(&format!("{grp_path}/indptr")).is_err() { continue; }
+
+        if detect_sparse_group_kind(&file, &grp_path).is_none() { continue; }
+
         match seurat_read_sparse_meta(&file, &name, &grp_path) {
             Ok(m)  => metas.push(m),
             Err(e) => tracing::warn!("skipping assay layer '{name}': {e}"),
@@ -540,6 +619,7 @@ fn read_obsp_metas_sync(path: &Path) -> Result<Vec<SparseMatrixMeta>> {
     let mut metas = Vec::new();
     for name in grp.member_names().unwrap_or_default() {
         let grp_path = format!("graphs/{name}");
+        if detect_sparse_group_kind(&file, &grp_path).is_none() { continue; }
         match seurat_read_sparse_meta(&file, &name, &grp_path) {
             Ok(m)  => metas.push(m),
             Err(e) => tracing::warn!("skipping graph '{name}': {e}"),
@@ -603,26 +683,9 @@ pub fn open_h5seurat<P: AsRef<Path>>(
     assay: Option<&str>,
     layer: Option<&str>,
 ) -> Result<Box<dyn crate::stream::DatasetReader + Send>> {
-    use crate::h5bpcells::{open_bpcells_h5, probe_bpcells_version};
-
     let path = path.as_ref();
     let assay = assay.unwrap_or("RNA");
     let layer = layer.unwrap_or("counts");
-    let file = File::open(path)?;
-
-    // Walk candidate paths; first one that exists and is BPCells wins.
-    for grp_path in candidate_group_paths(assay, layer) {
-        if file.group(&grp_path).is_ok() {
-            if probe_bpcells_version(&file, &grp_path).is_some() {
-                let reader = open_bpcells_h5(&file, &grp_path, chunk_size)?;
-                return Ok(Box::new(reader));
-            }
-            // Found the group but it's dgCMatrix — stop searching.
-            break;
-        }
-    }
-
-    // Standard dgCMatrix path.
     Ok(Box::new(H5SeuratReader::open(path, chunk_size, Some(assay), Some(layer))?))
 }
 
@@ -637,7 +700,10 @@ impl DatasetReader for H5SeuratReader {
     }
 
     fn dtype(&self) -> DataType {
-        self.dtype
+        match &self.x_backend {
+            XBackend::DgCMatrix { dtype, .. } => *dtype,
+            XBackend::BpCells => DataType::F64,
+        }
     }
 
     async fn obs(&mut self) -> Result<ObsTable> {
@@ -677,16 +743,50 @@ impl DatasetReader for H5SeuratReader {
         let assay     = self.assay.clone();
         let grp_path  = format!("assays/{}/{}", assay, meta.name);
         let n_rows    = meta.shape.0;
-        Box::pin(stream::unfold(0usize, move |row_start| {
-            let path     = path.clone();
-            let grp_path = grp_path.clone();
-            async move {
-                if row_start >= n_rows { return None; }
-                let row_end = (row_start + chunk_size).min(n_rows);
-                let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
-                Some((chunk, row_end))
+
+        let is_bpcells = {
+            let file = File::open(&path);
+            match file {
+                Ok(file) => matches!(detect_sparse_group_kind(&file, &grp_path), Some(SparseGroupKind::BpCells)),
+                Err(_) => false,
             }
-        }))
+        };
+
+        if is_bpcells {
+            let bp_reader = {
+                let file = match File::open(&path) {
+                    Ok(file) => file,
+                    Err(e) => {
+                        return Box::pin(stream::once(async move { Err(ScxError::from(e)) }));
+                    }
+                };
+                match crate::h5bpcells::open_bpcells_h5(&file, &grp_path, chunk_size) {
+                    Ok(reader) => reader,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                }
+            };
+
+            Box::pin(stream::unfold(0usize, move |row_start| {
+                let reader = bp_reader.clone();
+                async move {
+                    if row_start >= n_rows { return None; }
+                    let row_end = (row_start + chunk_size).min(n_rows);
+                    let chunk = reader.read_chunk(row_start, row_end);
+                    Some((chunk, row_end))
+                }
+            }))
+        } else {
+            Box::pin(stream::unfold(0usize, move |row_start| {
+                let path     = path.clone();
+                let grp_path = grp_path.clone();
+                async move {
+                    if row_start >= n_rows { return None; }
+                    let row_end = (row_start + chunk_size).min(n_rows);
+                    let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                    Some((chunk, row_end))
+                }
+            }))
+        }
     }
 
     fn obsp_stream<'a>(
@@ -697,43 +797,108 @@ impl DatasetReader for H5SeuratReader {
         let path     = self.path.clone();
         let grp_path = format!("graphs/{}", meta.name);
         let n_rows   = meta.shape.0;
-        Box::pin(stream::unfold(0usize, move |row_start| {
-            let path     = path.clone();
-            let grp_path = grp_path.clone();
-            async move {
-                if row_start >= n_rows { return None; }
-                let row_end = (row_start + chunk_size).min(n_rows);
-                let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
-                Some((chunk, row_end))
+
+        let is_bpcells = {
+            let file = File::open(&path);
+            match file {
+                Ok(file) => matches!(detect_sparse_group_kind(&file, &grp_path), Some(SparseGroupKind::BpCells)),
+                Err(_) => false,
             }
-        }))
+        };
+
+        if is_bpcells {
+            let bp_reader = {
+                let file = match File::open(&path) {
+                    Ok(file) => file,
+                    Err(e) => {
+                        return Box::pin(stream::once(async move { Err(ScxError::from(e)) }));
+                    }
+                };
+                match crate::h5bpcells::open_bpcells_h5(&file, &grp_path, chunk_size) {
+                    Ok(reader) => reader,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                }
+            };
+
+            Box::pin(stream::unfold(0usize, move |row_start| {
+                let reader = bp_reader.clone();
+                async move {
+                    if row_start >= n_rows { return None; }
+                    let row_end = (row_start + chunk_size).min(n_rows);
+                    let chunk = reader.read_chunk(row_start, row_end);
+                    Some((chunk, row_end))
+                }
+            }))
+        } else {
+            Box::pin(stream::unfold(0usize, move |row_start| {
+                let path     = path.clone();
+                let grp_path = grp_path.clone();
+                async move {
+                    if row_start >= n_rows { return None; }
+                    let row_end = (row_start + chunk_size).min(n_rows);
+                    let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                    Some((chunk, row_end))
+                }
+            }))
+        }
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
-        let path       = self.path.clone();
-        let assay      = self.assay.clone();
-        let layer      = self.layer.clone();
-        let n_obs      = self.n_obs;
-        let n_vars     = self.n_vars;
-        let chunk_size = self.chunk_size;
-        let indptr     = self.indptr.clone();
-        let dtype      = self.dtype;
+        match &self.x_backend {
+            XBackend::DgCMatrix { indptr, dtype } => {
+                let path       = self.path.clone();
+                let assay      = self.assay.clone();
+                let layer      = self.layer.clone();
+                let n_obs      = self.n_obs;
+                let n_vars     = self.n_vars;
+                let chunk_size = self.chunk_size;
+                let indptr     = indptr.clone();
+                let dtype      = *dtype;
 
-        Box::pin(stream::unfold(0usize, move |cell_start| {
-            let path   = path.clone();
-            let assay  = assay.clone();
-            let layer  = layer.clone();
-            let indptr = indptr.clone();
-            async move {
-                if cell_start >= n_obs { return None; }
-                let cell_end = (cell_start + chunk_size).min(n_obs);
-                let chunk = read_chunk_sync(
-                    &path, &assay, &layer, &indptr,
-                    cell_start, cell_end, n_vars, dtype,
-                );
-                Some((chunk, cell_end))
+                Box::pin(stream::unfold(0usize, move |cell_start| {
+                    let path   = path.clone();
+                    let assay  = assay.clone();
+                    let layer  = layer.clone();
+                    let indptr = indptr.clone();
+                    async move {
+                        if cell_start >= n_obs { return None; }
+                        let cell_end = (cell_start + chunk_size).min(n_obs);
+                        let chunk = read_chunk_sync(
+                            &path, &assay, &layer, &indptr,
+                            cell_start, cell_end, n_vars, dtype,
+                        );
+                        Some((chunk, cell_end))
+                    }
+                }))
             }
-        }))
+            XBackend::BpCells => {
+                let path       = self.path.clone();
+                let assay      = self.assay.clone();
+                let layer      = self.layer.clone();
+                let n_obs      = self.n_obs;
+                let chunk_size = self.chunk_size;
+
+                let bp_reader = {
+                    let file = File::open(&path).expect("failed to open H5Seurat file for BPCells backend");
+                    let grp_path = candidate_group_paths(&assay, &layer)
+                        .into_iter()
+                        .find(|p| file.group(p).is_ok())
+                        .expect("missing assay/layer group for BPCells backend");
+                    crate::h5bpcells::open_bpcells_h5(&file, &grp_path, chunk_size)
+                        .expect("failed to open BPCells matrix backend")
+                };
+
+                Box::pin(stream::unfold(0usize, move |cell_start| {
+                    let reader = bp_reader.clone();
+                    async move {
+                        if cell_start >= n_obs { return None; }
+                        let cell_end = (cell_start + chunk_size).min(n_obs);
+                        let chunk = reader.read_chunk(cell_start, cell_end);
+                        Some((chunk, cell_end))
+                    }
+                }))
+            }
+        }
     }
 }
 
@@ -1192,6 +1357,37 @@ mod tests {
 
     fn golden_exists() -> bool {
         std::path::Path::new(GOLDEN).exists()
+    }
+
+    #[test]
+    fn test_detect_sparse_group_kind_bpcells_layer() {
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let path = tmp.path();
+
+        let file = File::create(path).unwrap();
+        file.create_group("assays").unwrap();
+        file.create_group("assays/RNA").unwrap();
+        let grp = file.create_group("assays/RNA/data").unwrap();
+
+        let version = VarLenUnicode::from_str("packed-uint-matrix-v2").unwrap_or_default();
+        let attr = grp.new_attr::<VarLenUnicode>().shape(()).create("version").unwrap();
+        attr.write_scalar(&version).unwrap();
+
+        let shape = Array1::from_vec(vec![4u32, 3u32]);
+        grp.new_dataset::<u32>().shape(shape.len()).create("shape").unwrap()
+            .write(&shape).unwrap();
+
+        let idxptr = Array1::from_vec(vec![0u64, 1, 3, 4, 4]);
+        grp.new_dataset::<u64>().shape(idxptr.len()).create("idxptr").unwrap()
+            .write(&idxptr).unwrap();
+
+        drop(file);
+
+        let file = File::open(path).unwrap();
+        assert_eq!(
+            detect_sparse_group_kind(&file, "assays/RNA/data"),
+            Some(SparseGroupKind::BpCells)
+        );
     }
 
     #[tokio::test]

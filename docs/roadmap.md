@@ -229,7 +229,9 @@ scx snapshot pbmc.h5seurat ir_dir/ --exclude layers,obsp
 
 ---
 
-## 0.0.8 — Seurat v5 + BPCells reader
+## 0.0.8 (done)
+
+**Seurat v5 + BPCells reader**
 
 ### Seurat v5 HDF5 layout
 
@@ -300,21 +302,23 @@ packed variant — only integer `val` gets BP-128-FOR treatment.
   decoding). Row indices within a column are sorted so deltas are small and
   non-negative; zigzag rarely fires but handles edge cases.
 
-#### Implementation plan
-
-See `docs/bpcells-compat.md` for the detailed compatibility test suite plan.
+#### What was delivered
 
 1. **Compatibility test suite** — R fixture generator + Rust unit tests for
-   each codec + integration tests against known matrices. No reader code yet.
-2. **Rust BP-128 decoder** — implement scalar (no SIMD) decode for the three
-   codec variants. Validate against test fixtures.
-3. **`BpcellsReader` struct** — reads the directory layout, dispatches
-   packed/unpacked, yields column chunks compatible with `DatasetReader`.
-4. **`H5SeuratReader` v5 routing** — detect `version` attribute on the assay
-   group; for BPCells-backed assays, hand off to `BpcellsReader`.
-5. **v5 write layout** (lower priority).
+   each codec + integration tests against known matrices.
+2. **Rust BP-128 decoder** — scalar (no SIMD) decode for all three codec
+   variants (`packed-uint`, `packed-float`, `packed-double`), Rayon-parallelised
+   above 256-chunk threshold. Validated against fixtures.
+3. **`BpcellsDirReader` / `BpcellsDatasetReader`** — directory + HDF5 backends;
+   both implement `DatasetReader` and yield streaming CSR chunks.
+4. **`H5SeuratReader` v5 routing** via `open_h5seurat` — probes candidate group
+   paths (`assays/{assay}/{layer}` then `assays/{assay}/layers/{layer}`);
+   dispatches to `BpcellsDatasetReader` when `version` attribute is present.
+5. **Scalar version attribute fix** — BPCells R writes `version` as
+   `H5S_SCALAR` (not a 1-D array); `read_version_attr` now tries scalar reads
+   first, falling back to `read_1d` for other writers.
 
-#### TODO: BPCells benchmark fixture
+#### BPCells benchmark fixture
 
 Generate a large BPCells-backed `.h5seurat` fixture (Seurat v5) for use in
 `scripts/benchmark_compare.sh --large`. This exercises the
@@ -345,7 +349,281 @@ compare BPCells decode speed (Rayon-parallel) vs plain HDF5 CSR streaming.
 
 ---
 
-## 0.0.9 — Python bindings (`picklerick-py`, pyo3)
+## 0.0.9 (done) — BPCells write (full format bidirectionality)
+
+**Goal: scx can produce BPCells-packed `.h5seurat` files, completing the hub.**
+
+Today scx reads BPCells but always writes dgCMatrix. With a writer, every
+conversion becomes possible in both directions:
+
+```
+h5ad          ──→  BPCells h5seurat   (scanpy ecosystem → Seurat v5 native)
+h5seurat (dgCMatrix) ──→  BPCells h5seurat   (upgrade v3/v4 files in-place)
+npy snapshot  ──→  BPCells h5seurat   (benchmark / debugging round-trips)
+BPCells h5seurat ──→  h5ad            (already works; read side complete)
+```
+
+No existing tool does this without loading the full matrix into R. scx's
+streaming reader means it can process atlas-scale inputs with bounded RSS.
+
+---
+
+### Why BPCells write requires an O(nnz) buffer
+
+The existing `H5SeuratWriter` streams without buffering because CSR(cells ×
+genes) and CSC(genes × cells) share the same byte layout — the writer just
+appends incoming row chunks directly to the `data` / `indices` HDF5 datasets.
+
+BPCells breaks this: each gene-column is encoded independently by BP-128, so
+the encoder needs **all entries for gene `j`** before it can pack column `j`.
+Incoming chunks arrive cell-by-cell (rows), so entries for any given gene are
+scattered across all chunks.
+
+**Unavoidable consequence**: the write path must accumulate O(nnz) triples
+`(gene_idx, cell_idx, value)` in RAM, sort by `(gene_idx, cell_idx)`, then
+encode column-by-column.
+
+For practical scRNA-seq datasets:
+
+| Dataset | Cells | Genes | Density | nnz (u32+u32+f32) |
+|---------|-------|-------|---------|-------------------|
+| PBMC 3k | 2 700 | 32k | ~5 % | ~4 MB |
+| HLCA core | 584k | 60k | ~3 % | ~3.2 GB |
+| 10M cells (future) | 10M | 60k | ~3 % | ~54 GB |
+
+For HLCA-scale a workstation with 16–32 GB RAM handles this comfortably.
+The 0.1.0 streaming writer (two-pass approach, see below) removes this limit.
+
+---
+
+### Codec additions — `crates/scx-core/src/bpcells.rs`
+
+#### `bits_needed(max_val: u32) -> u8`
+
+```rust
+fn bits_needed(max_val: u32) -> u8 {
+    if max_val == 0 { 0 } else { (32 - max_val.leading_zeros()) as u8 }
+}
+```
+
+Used by both encoders to choose the minimum bit-width `b` per 128-chunk.
+
+#### `bp128_pack(b: u8, values: &[u32; 128]) -> Vec<u32>`
+
+Inverse of `bp128_unpack`. Interleaved lane layout must match exactly:
+- 4 SIMD lanes; lane `l` holds positions `l, l+4, l+8, …, l+124`.
+- `out[word * 4 + lane] |= bit-field extracted from values[lane + 4*j]`.
+- Returns `4*b` words (empty vec when `b == 0`).
+
+Round-trip identity: `bp128_unpack(b, &bp128_pack(b, v)) == v` for all valid `b`.
+
+#### `encode_for(values: &[u32]) -> (Vec<u32>, Vec<u32>)`
+
+Returns `(val_data, val_idx)`.
+
+Per 128-chunk:
+1. Shift: `shifted[i] = values[i].wrapping_sub(1)` (FOR offset; inverse of the `+1` in decode).
+2. `b = bits_needed(shifted.iter().max())`.
+3. Pack with `bp128_pack(b, &buf)`, append words to `val_data`.
+4. Append new word offset to `val_idx`.
+
+Edge: last chunk may have fewer than 128 values — pad `buf` with zeros up to
+128 before packing (zeros decode as `0 + 1 = 1`... **wrong**). Instead: pad
+with the last valid shifted value so that padding decodes back to the same
+value — but the caller truncates output to `count`, so padding is never
+observable. Zero-padding is safe.
+
+#### `encode_d1z(values: &[u32]) -> (Vec<u32>, Vec<u32>, Vec<u32>)`
+
+Returns `(index_data, index_idx, index_starts)`.
+
+Per 128-chunk:
+1. Record `starts[k] = prev` (the cumulative prefix before this chunk).
+2. For each value: `delta = value as i64 - prev as i64` (cast to i32);
+   `zz = zigzag_encode(delta as i32)`; `prev = value`.
+3. `b = bits_needed(zz_buf.iter().max())`.
+4. Pack, append to `index_data`, update `index_idx`.
+
+Row indices within a column are sorted (BPCells invariant), so deltas are
+non-negative and zigzag rarely fires — typical `b` is 1–4 bits.
+
+---
+
+### CSR → CSC accumulation
+
+```
+BpcellsCscAccumulator {
+    n_obs: usize,
+    n_vars: usize,
+    entries: Vec<(u32 col, u32 row, TypedVal)>,  // gene_idx, cell_idx, value
+}
+```
+
+- `push_chunk(&MatrixChunk)`: iterate `(row_offset + row, gene_idx, val)` per
+  non-zero; push each as `(gene_idx, row_offset + row, val)`.
+- `into_csc(self) -> CscMatrix`: `sort_unstable_by_key(|(col, row, _)| (col, row))`;
+  build `idxptr` (length `n_vars + 1`), extract sorted `row_indices` and
+  `values`.
+
+`TypedVal` is a thin enum `{ F32(f32), F64(f64), U32(u32) }` so the sort
+key is always `(col, row)` regardless of value type — avoids monomorphising
+the sort.
+
+Memory peak: `n_entries * (4 + 4 + 4) = nnz * 12 bytes` for f32 data. For
+HLCA: ~38 GB worst-case; typical scRNA-seq at 5 % density: ~2.8 GB. Acceptable
+on any compute node; document the constraint.
+
+---
+
+### HDF5 write — `crates/scx-core/src/h5bpcells.rs`
+
+Implemented. `write_bpcells_h5(...)` now writes BPCells-packed HDF5 groups for:
+- primary `X` at `assays/{assay}/{layer}`
+- assay layers at `assays/{assay}/{name}`
+- observation graphs at `graphs/{name}`
+
+It writes the expected BPCells datasets / attrs:
+- `version`
+- `storage_order`
+- `shape`
+- `idxptr`
+- `row_names`
+- `col_names`
+- `index_data` / `index_idx` / `index_idx_offsets` / `index_starts`
+- `val_data` / `val_idx` / `val_idx_offsets` for `u32`
+- `val` for `f32` / `f64`
+
+Datasets written (all at `{group_path}/…`):
+
+| Dataset | Type | Notes |
+|---------|------|-------|
+| `version` attr | string | `"packed-uint-matrix-v2"` / `"packed-float-matrix-v2"` / `"packed-double-matrix-v2"` |
+| `storage_order` | string\[1\] | `["col"]` |
+| `shape` | u32\[2\] | `[n_vars, n_obs]` |
+| `idxptr` | u64\[n\_obs+1\] | column (cell) pointers |
+| `row_names` | str\[n\_vars\] | gene names |
+| `col_names` | str\[n\_obs\] | cell barcodes |
+| `index_data` | u32\[\] | D1Z-packed row indices |
+| `index_idx` | u32\[n\_chunks+1\] | word offsets into `index_data` |
+| `index_idx_offsets` | u64\[n\_chunks\] | all zeros (v2 overflow; not needed for <2³² words) |
+| `index_starts` | u32\[n\_chunks\] | per-chunk prefix values for D1Z |
+| For U32: `val_data` / `val_idx` / `val_idx_offsets` | — | FOR-packed values |
+| For F32: `val` | f32\[\] | uncompressed floats (BPCells spec) |
+| For F64: `val` | f64\[\] | uncompressed doubles |
+
+Note: float/double matrices pack only indices (D1Z), not values — that is the
+BPCells spec. Only integer counts get FOR packing on values.
+
+---
+
+### `BpcellsH5Writer` — `crates/scx-core/src/h5bpcells.rs`
+
+Implemented.
+
+`BpcellsH5Writer` now supports:
+- `write_obs`
+- `write_var`
+- `write_obsm`
+- `write_uns`
+- `write_varm`
+- `write_x_chunk`
+- `begin_sparse("layers", ...)`
+- `begin_sparse("obsp", ...)`
+- `write_sparse_chunk`
+- `end_sparse`
+- `finalize`
+
+Behavior:
+- `X` is accumulated as CSR row chunks, converted to CSC, then written as BPCells.
+- `layers` are accumulated and written as BPCells assay groups.
+- `obsp` matrices are accumulated and written as BPCells graph groups.
+- `obs`, `var`, `obsm`, `varm`, and `uns` are preserved in Seurat-compatible HDF5 layout.
+- `open_h5seurat()` / `H5SeuratReader` were refactored so BPCells is now treated as an internal X/layer/graph backend rather than a separate top-level container reader.
+
+---
+
+### CLI — `crates/scx-cli/src/main.rs`
+
+Implemented.
+
+BPCells is now the default when writing `.h5seurat`, with `--dgcmatrix` as an
+explicit opt-out for legacy Seurat targets:
+
+```
+scx convert input.h5ad        output.h5seurat
+scx convert input.h5seurat    output.h5seurat
+scx convert input.h5ad        output.h5seurat --dgcmatrix
+```
+
+Routing now uses `BpcellsH5Writer` by default for `.h5seurat` output and falls
+back to `H5SeuratWriter` only when `--dgcmatrix` is set.
+
+---
+
+### Two-pass streaming (future — 0.1.0)
+
+For datasets where O(nnz) RAM is impractical, a two-pass approach works when
+the source is re-readable (h5ad, npy):
+
+1. **Pass 1**: stream through source, count `nnz_per_gene[j]` → compute
+   `idxptr`. Allocate output arrays of size `total_nnz`.
+2. **Pass 2**: stream again; for each `(cell, gene, val)` entry, write into
+   the pre-allocated position `idxptr[gene]++` (scatter write). After pass 2,
+   each gene's entries are in the right position but not sorted within the
+   column — however, since we process rows in cell order, entries within each
+   gene column ARE sorted by cell index (row index). Sort is unnecessary.
+
+This keeps peak RSS at O(total_nnz) but avoids the intermediate `entries` Vec
+and the sort, cutting memory by ~3× and eliminating the sort cost. Implement
+in 0.1.0 as part of the streaming writer refactor.
+
+---
+
+### Files to modify / create
+
+| File | Change |
+|------|--------|
+| `crates/scx-core/src/bpcells.rs` | Add `bits_needed`, `bp128_pack`, `encode_for`, `encode_d1z` |
+| `crates/scx-core/src/h5bpcells.rs` | Add `BpcellsCscAccumulator`, `write_bpcells_h5`, `BpcellsH5Writer` |
+| `crates/scx-core/src/lib.rs` | Re-export new public types |
+| `crates/scx-cli/src/main.rs` | Add `--dgcmatrix` opt-out flag; default h5seurat output to `BpcellsH5Writer` |
+
+No new crate dependencies — `hdf5`, `rayon`, `ndarray` already present.
+
+---
+
+### Verification
+
+Completed with:
+1. **Codec round-trips**
+   - `encode_for(v)` ↔ `decode_for(...)`
+   - `encode_d1z(v)` ↔ `decode_d1z(...)`
+   - `bp128_pack(b, v)` ↔ `bp128_unpack(b, ...)`
+   - covered for boundary and large lengths
+
+2. **Writer / reader round-trips**
+   - BPCells HDF5 group write → reopen
+   - BPCells-backed H5Seurat reopen through `H5SeuratReader`
+   - verified preservation of:
+     - `X`
+     - `obs`
+     - `var`
+     - `obsm`
+     - `varm`
+     - `uns`
+     - `layers`
+     - `obsp`
+
+3. **CLI integration**
+   - `h5ad -> h5seurat` BPCells conversion
+   - `h5seurat -> h5seurat` BPCells re-encode
+   - output verified readable through `scx inspect`
+
+Remaining future work is performance-oriented (`0.1.0` two-pass streaming), not format-completeness for the current in-memory buffered writer.
+
+---
+
+## 0.0.10 — Python bindings (`picklerick-py`, pyo3)
 
 **Goal: AnnData drop-in. Return a real `anndata.AnnData` object so it slots into
 existing scanpy workflows with no API changes.**

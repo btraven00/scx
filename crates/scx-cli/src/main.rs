@@ -52,9 +52,9 @@ enum Cli {
         #[arg(long, default_value = "counts")]
         layer: String,
 
-        /// Write `.h5seurat` output using BPCells-packed storage
+        /// Write legacy `.h5seurat` output using dgCMatrix storage instead of BPCells
         #[arg(long)]
-        bpcells: bool,
+        dgcmatrix: bool,
     },
 
     /// Inspect a single-cell file
@@ -171,7 +171,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
 
-        Cli::Convert { input, output, chunk_size, dtype, assay, layer, bpcells } => {
+        Cli::Convert { input, output, chunk_size, dtype, assay, layer, dgcmatrix } => {
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
                 "f64" => DataType::F64,
@@ -197,22 +197,22 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, bpcells).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
                     let mut reader = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, bpcells).await?;
+                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
                     let mut reader = H5AdReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, bpcells).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::ScxH5) | None => {
                     tracing::info!(path = %input, "detected format: SCX H5 (internal)");
                     let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, bpcells).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
                 }
             }
         }
@@ -391,7 +391,7 @@ async fn convert_with_reader(
     out_assay: &str,
     out_layer: &str,
     chunk_size: usize,
-    use_bpcells: bool,
+    use_dgcmatrix: bool,
 ) -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
@@ -403,7 +403,8 @@ async fn convert_with_reader(
         n_obs, n_vars,
         dtype = %out_dtype,
         format = if is_h5seurat { "h5seurat" } else { "h5ad" },
-        bpcells = use_bpcells && is_h5seurat,
+        bpcells = is_h5seurat && !use_dgcmatrix,
+        dgcmatrix = use_dgcmatrix && is_h5seurat,
         "starting conversion"
     );
 
@@ -425,10 +426,10 @@ async fn convert_with_reader(
     );
 
     let mut writer: Box<dyn DatasetWriter> = if is_h5seurat {
-        if use_bpcells {
-            Box::new(BpcellsH5Writer::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(out_layer))?)
-        } else {
+        if use_dgcmatrix {
             Box::new(H5SeuratWriter::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(out_layer))?)
+        } else {
+            Box::new(BpcellsH5Writer::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(out_layer))?)
         }
     } else {
         Box::new(H5AdWriter::create(output, n_obs, n_vars, out_dtype)?)
@@ -440,37 +441,26 @@ async fn convert_with_reader(
     writer.write_uns(&uns).await?;
     writer.write_varm(&varm).await?;
 
-    // Minimal BPCells opt-in currently supports only the primary X matrix.
-    if !(is_h5seurat && use_bpcells) {
-        // Stream each layer — one at a time, never holding more than chunk_size rows.
-        for meta in &layer_metas {
-            tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming layer");
-            writer.begin_sparse("layers", &meta.name, meta).await?;
-            let mut stream = reader.layer_stream(meta, chunk_size);
-            while let Some(chunk) = stream.next().await {
-                writer.write_sparse_chunk(&chunk?).await?;
-            }
-            writer.end_sparse().await?;
+    // Stream each layer — one at a time, never holding more than chunk_size rows.
+    for meta in &layer_metas {
+        tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming layer");
+        writer.begin_sparse("layers", &meta.name, meta).await?;
+        let mut stream = reader.layer_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            writer.write_sparse_chunk(&chunk?).await?;
         }
+        writer.end_sparse().await?;
+    }
 
-        // Stream each obsp matrix.
-        for meta in &obsp_metas {
-            tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming obsp");
-            writer.begin_sparse("obsp", &meta.name, meta).await?;
-            let mut stream = reader.obsp_stream(meta, chunk_size);
-            while let Some(chunk) = stream.next().await {
-                writer.write_sparse_chunk(&chunk?).await?;
-            }
-            writer.end_sparse().await?;
+    // Stream each obsp matrix.
+    for meta in &obsp_metas {
+        tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming obsp");
+        writer.begin_sparse("obsp", &meta.name, meta).await?;
+        let mut stream = reader.obsp_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            writer.write_sparse_chunk(&chunk?).await?;
         }
-    } else if !layer_metas.is_empty() || !obsp_metas.is_empty() || !obsm.map.is_empty() || !varm.map.is_empty() || uns.raw != serde_json::Value::Null {
-        tracing::warn!(
-            layers = layer_metas.len(),
-            obsp = obsp_metas.len(),
-            obsm = obsm.map.len(),
-            varm = varm.map.len(),
-            "BPCells opt-in currently writes only X, obs, and var; skipping additional slots"
-        );
+        writer.end_sparse().await?;
     }
 
     let t_x = std::time::Instant::now();
