@@ -10,6 +10,7 @@
 //!   - `matrixIterators/StoredMatrix.h`: same dataset names as directory format.
 
 use std::path::Path;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use hdf5::{File, Group};
@@ -23,6 +24,7 @@ use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::ir::{Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
 use crate::stream::DatasetWriter;
+use ndarray::Array2;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -130,10 +132,8 @@ fn seurat_write_strings_local(grp: &Group, name: &str, strings: &[String]) -> Re
                 .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: invalid UTF-8 string for '{name}': {e}")))
         })
         .collect::<Result<Vec<_>>>()?;
-    grp.new_dataset_builder()
-        .with_data(&vals)
-        .create(name)
-        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
+    let ds = grp.new_dataset::<VarLenUnicode>().shape(vals.len()).create(name)?;
+    ds.write(&Array1::from_vec(vals))?;
     Ok(())
 }
 
@@ -181,9 +181,119 @@ fn seurat_write_meta_cols_local(grp: &Group, columns: &[Column]) -> Result<()> {
             .create("logicals")?;
         attr.write(&Array1::from_vec(logical_names))?;
     }
+
+    let colnames: Vec<VarLenUnicode> = columns
+        .iter()
+        .map(|c| <VarLenUnicode as std::str::FromStr>::from_str(&c.name).unwrap_or_default())
+        .collect();
+    let col_attr = grp.new_attr::<VarLenUnicode>()
+        .shape(colnames.len())
+        .create("colnames")?;
+    col_attr.write(&Array1::from_vec(colnames))?;
+
+    if grp.name() == "/meta.data" {
+        let class_vals = vec![VarLenUnicode::from_str("data.frame").unwrap_or_default()];
+        let class_attr = grp.new_attr::<VarLenUnicode>()
+            .shape(class_vals.len())
+            .create("_class")?;
+        class_attr.write(&Array1::from_vec(class_vals))?;
+    }
+
     for col in columns {
         seurat_write_col_local(grp, &col.name, &col.data)?;
     }
+    Ok(())
+}
+
+fn seurat_write_json_value_local(parent: &Group, name: &str, value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::Null => Ok(()),
+        serde_json::Value::Bool(b) => {
+            let ds = parent.new_dataset::<i32>().shape(()).create(name)?;
+            ds.write_scalar(&(*b as i32))?;
+            Ok(())
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                let ds = parent.new_dataset::<i64>().shape(()).create(name)?;
+                ds.write_scalar(&i)?;
+            } else if let Some(u) = n.as_u64() {
+                let ds = parent.new_dataset::<u64>().shape(()).create(name)?;
+                ds.write_scalar(&u)?;
+            } else if let Some(f) = n.as_f64() {
+                let ds = parent.new_dataset::<f64>().shape(()).create(name)?;
+                ds.write_scalar(&f)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::String(s) => {
+            let ds = parent.new_dataset::<VarLenUnicode>().shape(1).create(name)?;
+            let vals = vec![VarLenUnicode::from_str(s).unwrap_or_default()];
+            ds.write(&Array1::from_vec(vals))?;
+            Ok(())
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                let ds = parent.new_dataset::<f64>().shape(0).create(name)?;
+                ds.write(&Array1::from_vec(Vec::<f64>::new()))?;
+                return Ok(());
+            }
+
+            if arr.iter().all(|v| matches!(v, serde_json::Value::Number(_))) {
+                let vals: Vec<f64> = arr.iter()
+                    .map(|v| v.as_f64().unwrap_or(0.0))
+                    .collect();
+                let ds = parent.new_dataset::<f64>().shape(vals.len()).create(name)?;
+                ds.write(&Array1::from_vec(vals))?;
+                return Ok(());
+            }
+
+            if arr.iter().all(|v| matches!(v, serde_json::Value::String(_))) {
+                let vals: Vec<VarLenUnicode> = arr.iter()
+                    .map(|v| VarLenUnicode::from_str(v.as_str().unwrap_or_default()).unwrap_or_default())
+                    .collect();
+                let ds = parent.new_dataset::<VarLenUnicode>().shape(vals.len()).create(name)?;
+                ds.write(&Array1::from_vec(vals))?;
+                return Ok(());
+            }
+
+            let grp = parent.create_group(name)?;
+            for (i, elem) in arr.iter().enumerate() {
+                seurat_write_json_value_local(&grp, &i.to_string(), elem)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            let grp = parent.create_group(name)?;
+            for (k, v) in map {
+                seurat_write_json_value_local(&grp, k, v)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn seurat_write_uns_local(file: &File, uns: &UnsTable) -> Result<()> {
+    if uns.raw.is_null() {
+        return Ok(());
+    }
+
+    let misc = match file.group("misc") {
+        Ok(g) => g,
+        Err(_) => file.create_group("misc")?,
+    };
+
+    match &uns.raw {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                seurat_write_json_value_local(&misc, k, v)?;
+            }
+        }
+        other => {
+            seurat_write_json_value_local(&misc, "value", other)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -506,6 +616,13 @@ impl BpcellsCscAccumulator {
     }
 }
 
+struct PendingSparseMatrix {
+    group_prefix: String,
+    name: String,
+    shape: (usize, usize),
+    accumulator: BpcellsCscAccumulator,
+}
+
 pub struct BpcellsH5Writer {
     file: File,
     assay: String,
@@ -514,7 +631,11 @@ pub struct BpcellsH5Writer {
     n_vars: usize,
     obs: Option<ObsTable>,
     var: Option<VarTable>,
+    obsm: Option<Embeddings>,
+    uns: Option<UnsTable>,
+    varm: Option<Varm>,
     accumulator: BpcellsCscAccumulator,
+    sparse_state: Option<PendingSparseMatrix>,
 }
 
 impl BpcellsH5Writer {
@@ -545,7 +666,11 @@ impl BpcellsH5Writer {
             n_vars,
             obs: None,
             var: None,
+            obsm: None,
+            uns: None,
+            varm: None,
             accumulator: BpcellsCscAccumulator::new(n_vars),
+            sparse_state: None,
         })
     }
 }
@@ -562,34 +687,97 @@ impl DatasetWriter for BpcellsH5Writer {
         Ok(())
     }
 
-    async fn write_obsm(&mut self, _obsm: &Embeddings) -> Result<()> {
+    async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
+        self.obsm = Some(obsm.clone());
         Ok(())
     }
 
-    async fn write_uns(&mut self, _uns: &UnsTable) -> Result<()> {
+    async fn write_uns(&mut self, uns: &UnsTable) -> Result<()> {
+        self.uns = Some(uns.clone());
         Ok(())
     }
 
-    async fn write_varm(&mut self, _varm: &Varm) -> Result<()> {
+    async fn write_varm(&mut self, varm: &Varm) -> Result<()> {
+        self.varm = Some(varm.clone());
         Ok(())
     }
 
-    async fn begin_sparse(&mut self, _group_prefix: &str, _name: &str, _meta: &SparseMatrixMeta) -> Result<()> {
-        Err(ScxError::InvalidFormat(
-            "BPCells writer does not yet support auxiliary sparse matrices".into(),
-        ))
+    async fn begin_sparse(&mut self, group_prefix: &str, name: &str, meta: &SparseMatrixMeta) -> Result<()> {
+        if self.sparse_state.is_some() {
+            return Err(ScxError::InvalidFormat(
+                "BPCells writer: begin_sparse called while another sparse matrix is open".into(),
+            ));
+        }
+        if group_prefix != "layers" && group_prefix != "obsp" {
+            return Err(ScxError::InvalidFormat(
+                "BPCells writer does not yet support auxiliary sparse matrices outside assay layers and obsp".into(),
+            ));
+        }
+
+        self.sparse_state = Some(PendingSparseMatrix {
+            group_prefix: group_prefix.to_string(),
+            name: name.to_string(),
+            shape: meta.shape,
+            accumulator: BpcellsCscAccumulator::new(meta.shape.1),
+        });
+        Ok(())
     }
 
-    async fn write_sparse_chunk(&mut self, _chunk: &MatrixChunk) -> Result<()> {
-        Err(ScxError::InvalidFormat(
-            "BPCells writer does not yet support auxiliary sparse matrices".into(),
-        ))
+    async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        let state = self.sparse_state.as_mut().ok_or_else(|| {
+            ScxError::InvalidFormat("BPCells writer: write_sparse_chunk called without begin_sparse".into())
+        })?;
+        state.accumulator.push_chunk(chunk)
     }
 
     async fn end_sparse(&mut self) -> Result<()> {
-        Err(ScxError::InvalidFormat(
-            "BPCells writer does not yet support auxiliary sparse matrices".into(),
-        ))
+        let state = self.sparse_state.take().ok_or_else(|| {
+            ScxError::InvalidFormat("BPCells writer: end_sparse called without begin_sparse".into())
+        })?;
+
+        let csc = state.accumulator.into_csc()?;
+        let obs = self.obs.as_ref().ok_or_else(|| {
+            ScxError::InvalidFormat("BPCells writer end_sparse called before write_obs".into())
+        })?;
+        let var = self.var.as_ref().ok_or_else(|| {
+            ScxError::InvalidFormat("BPCells writer end_sparse called before write_var".into())
+        })?;
+
+        let (group_path, nrow, ncol, row_names, col_names) = match state.group_prefix.as_str() {
+            "layers" => (
+                format!("assays/{}/{}", self.assay, state.name),
+                state.shape.1,
+                state.shape.0,
+                var.index.clone(),
+                obs.index.clone(),
+            ),
+            "obsp" => (
+                format!("graphs/{}", state.name),
+                state.shape.1,
+                state.shape.0,
+                obs.index.clone(),
+                obs.index.clone(),
+            ),
+            other => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "BPCells writer: unsupported sparse group prefix '{other}'"
+                )))
+            }
+        };
+
+        write_bpcells_h5(
+            &self.file,
+            &group_path,
+            StorageOrder::Col,
+            nrow,
+            ncol,
+            &row_names,
+            &col_names,
+            &csc.idxptr,
+            &csc.index,
+            &csc.values,
+        )?;
+        Ok(())
     }
 
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
@@ -629,6 +817,98 @@ impl DatasetWriter for BpcellsH5Writer {
             seurat_write_meta_cols_local(&mf_grp, &var.columns)?;
         }
 
+        let reds_grp = if self.obsm.as_ref().map(|x| !x.map.is_empty()).unwrap_or(false)
+            || self.varm.as_ref().map(|x| !x.map.is_empty()).unwrap_or(false)
+        {
+            Some(match self.file.group("reductions") {
+                Ok(g) => g,
+                Err(_) => self.file.create_group("reductions")?,
+            })
+        } else {
+            None
+        };
+
+        if let (Some(reds_grp), Some(obsm)) = (&reds_grp, &self.obsm) {
+            for (key, mat) in &obsm.map {
+                let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
+                let red_grp = match reds_grp.group(red_name) {
+                    Ok(g) => g,
+                    Err(_) => reds_grp.create_group(red_name)?,
+                };
+
+                let (n_obs, n_comps) = mat.shape;
+                let arr_t = Array2::from_shape_vec((n_obs, n_comps), mat.data.clone())
+                    .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+                let ds = red_grp
+                    .new_dataset::<f64>()
+                    .shape((n_obs, n_comps))
+                    .create("cell.embeddings")?;
+                ds.write(&arr_t)?;
+
+                let key = if red_name.eq_ignore_ascii_case("pca") {
+                    "PC_"
+                } else if red_name.eq_ignore_ascii_case("umap") {
+                    "UMAP_"
+                } else {
+                    ""
+                };
+                let assay_attr = vec![VarLenUnicode::from_str(&self.assay).unwrap_or_default()];
+                let key_attr = vec![VarLenUnicode::from_str(key).unwrap_or_default()];
+                let attr = red_grp.new_attr::<VarLenUnicode>()
+                    .shape(assay_attr.len())
+                    .create("active.assay")?;
+                attr.write(&Array1::from_vec(assay_attr))?;
+                let attr = red_grp.new_attr::<VarLenUnicode>()
+                    .shape(key_attr.len())
+                    .create("key")?;
+                attr.write(&Array1::from_vec(key_attr))?;
+            }
+        }
+
+        if let (Some(reds_grp), Some(varm)) = (&reds_grp, &self.varm) {
+            for (key, mat) in &varm.map {
+                let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
+                let red_grp = match reds_grp.group(red_name) {
+                    Ok(g) => g,
+                    Err(_) => reds_grp.create_group(red_name)?,
+                };
+
+                let (n_vars, k) = mat.shape;
+                let mut buf = vec![0.0f64; n_vars * k];
+                for i in 0..n_vars {
+                    for j in 0..k {
+                        buf[j * n_vars + i] = mat.data[i * k + j];
+                    }
+                }
+                let arr_t = Array2::from_shape_vec((k, n_vars), buf)
+                    .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+                let ds = red_grp
+                    .new_dataset::<f64>()
+                    .shape((k, n_vars))
+                    .create("feature.loadings")?;
+                ds.write(&arr_t)?;
+
+                if red_grp.attr("active.assay").is_err() {
+                    let assay_attr = vec![VarLenUnicode::from_str(&self.assay).unwrap_or_default()];
+                    let attr = red_grp.new_attr::<VarLenUnicode>()
+                        .shape(assay_attr.len())
+                        .create("active.assay")?;
+                    attr.write(&Array1::from_vec(assay_attr))?;
+                }
+                if red_grp.attr("key").is_err() {
+                    let key_attr = vec![VarLenUnicode::from_str("").unwrap_or_default()];
+                    let attr = red_grp.new_attr::<VarLenUnicode>()
+                        .shape(key_attr.len())
+                        .create("key")?;
+                    attr.write(&Array1::from_vec(key_attr))?;
+                }
+            }
+        }
+
+        if let Some(uns) = &self.uns {
+            seurat_write_uns_local(&self.file, uns)?;
+        }
+
         write_bpcells_h5(
             &self.file,
             &group_path,
@@ -640,7 +920,9 @@ impl DatasetWriter for BpcellsH5Writer {
             &csc.idxptr,
             &csc.index,
             &csc.values,
-        )
+        )?;
+        self.file.flush()?;
+        Ok(())
     }
 }
 
@@ -875,5 +1157,184 @@ mod tests {
         assert_eq!(reopened.n_obs, 3);
         assert_eq!(reopened.n_vars, 2);
         assert_eq!(read_version_attr(&file.group("matrix").unwrap()).as_deref(), Some("packed-float-matrix-v2"));
+    }
+
+    #[tokio::test]
+    async fn bpcells_writer_preserves_obsm_varm_uns_layers_and_obsp_for_h5seurat_reader() {
+        use crate::dtype::TypedVec;
+        use crate::h5seurat::H5SeuratReader;
+        use crate::ir::{DenseMatrix, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm};
+        use crate::stream::{DatasetReader, DatasetWriter};
+        use futures::StreamExt;
+
+        let n_obs = 3usize;
+        let n_vars = 4usize;
+
+        let obs = ObsTable {
+            index: vec!["c0".into(), "c1".into(), "c2".into()],
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: vec!["g0".into(), "g1".into(), "g2".into(), "g3".into()],
+            columns: vec![],
+        };
+
+        let mut obsm = crate::ir::Embeddings::default();
+        obsm.map.insert(
+            "X_pca".into(),
+            DenseMatrix {
+                shape: (n_obs, 2),
+                data: vec![
+                    1.0, 2.0,
+                    3.0, 4.0,
+                    5.0, 6.0,
+                ],
+            },
+        );
+
+        let mut varm = Varm::default();
+        let varm_mat = DenseMatrix {
+            shape: (n_vars, 2),
+            data: vec![
+                10.0, 11.0,
+                12.0, 13.0,
+                14.0, 15.0,
+                16.0, 17.0,
+            ],
+        };
+        varm.map.insert("X_pca".into(), varm_mat.clone());
+
+        let uns = UnsTable {
+            raw: serde_json::json!({
+                "weights": [0.1, 0.2, 0.3],
+                "title": "bp test",
+                "nested": {
+                    "alpha": 7,
+                    "beta": [1.0, 2.0]
+                }
+            }),
+        };
+
+        let x_chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr: vec![0, 2, 3, 5],
+                indices: vec![0, 2, 1, 0, 3],
+                data: TypedVec::U32(vec![1, 2, 3, 4, 5]),
+            },
+        };
+
+        let layer_chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr: vec![0, 1, 3, 4],
+                indices: vec![1, 0, 2, 3],
+                data: TypedVec::U32(vec![9, 8, 7, 6]),
+            },
+        };
+        let layer_meta = SparseMatrixMeta {
+            name: "data".into(),
+            shape: (n_obs, n_vars),
+            indptr: layer_chunk.data.indptr.clone(),
+        };
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_obsm(&obsm).await.unwrap();
+        writer.write_uns(&uns).await.unwrap();
+        writer.write_varm(&varm).await.unwrap();
+        let obsp_chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_obs),
+                indptr: vec![0, 1, 2, 3],
+                indices: vec![1, 2, 0],
+                data: TypedVec::U32(vec![21, 22, 23]),
+            },
+        };
+        let obsp_meta = SparseMatrixMeta {
+            name: "knn".into(),
+            shape: (n_obs, n_obs),
+            indptr: obsp_chunk.data.indptr.clone(),
+        };
+
+        writer.begin_sparse("layers", "data", &layer_meta).await.unwrap();
+        writer.write_sparse_chunk(&layer_chunk).await.unwrap();
+        writer.end_sparse().await.unwrap();
+        writer.begin_sparse("obsp", "knn", &obsp_meta).await.unwrap();
+        writer.write_sparse_chunk(&obsp_chunk).await.unwrap();
+        writer.end_sparse().await.unwrap();
+        writer.write_x_chunk(&x_chunk).await.unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        let mut reader = H5SeuratReader::open(&path, 2, None, None).unwrap();
+
+        let rt_obsm = reader.obsm().await.unwrap();
+        assert!(rt_obsm.map.contains_key("X_pca"), "obsm['X_pca'] missing");
+        let rt_pca = &rt_obsm.map["X_pca"];
+        assert_eq!(rt_pca.shape, (n_obs, 2));
+        for (a, b) in rt_pca.data.iter().zip(obsm.map["X_pca"].data.iter()) {
+            assert!((a - b).abs() < 1e-10, "obsm data mismatch: {a} vs {b}");
+        }
+
+        let rt_varm = reader.varm().await.unwrap();
+        assert!(rt_varm.map.contains_key("X_pca"), "varm['X_pca'] missing");
+        let rt_loadings = &rt_varm.map["X_pca"];
+        assert_eq!(rt_loadings.shape, varm_mat.shape);
+        for (a, b) in rt_loadings.data.iter().zip(varm_mat.data.iter()) {
+            assert!((a - b).abs() < 1e-10, "varm data mismatch: {a} vs {b}");
+        }
+
+        let rt_uns = reader.uns().await.unwrap();
+        assert!(rt_uns.raw.is_object(), "uns.raw should be a JSON object");
+        assert_eq!(rt_uns.raw["weights"], serde_json::json!([0.1, 0.2, 0.3]));
+        assert_eq!(rt_uns.raw["title"], serde_json::json!("bp test"));
+        assert_eq!(rt_uns.raw["nested"]["alpha"], serde_json::json!(7));
+        assert_eq!(rt_uns.raw["nested"]["beta"], serde_json::json!([1.0, 2.0]));
+
+        let layer_metas = reader.layer_metas().await.unwrap();
+        let lm = layer_metas.iter().find(|m| m.name == "data").expect("layers['data'] missing");
+        assert_eq!(lm.shape, layer_meta.shape);
+
+        let seen_nnz = {
+            let mut stream = reader.layer_stream(lm, 10);
+            let mut seen_nnz = 0usize;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.unwrap();
+                seen_nnz += chunk.data.indices.len();
+                match chunk.data.data {
+                    TypedVec::U32(_) => {}
+                    other => panic!("unexpected layer dtype: {:?}", other),
+                }
+            }
+            seen_nnz
+        };
+        assert!(seen_nnz > 0, "layer stream should yield non-empty chunks");
+
+        let obsp_metas = reader.obsp_metas().await.unwrap();
+        let om = obsp_metas.iter().find(|m| m.name == "knn").expect("obsp['knn'] missing");
+        assert_eq!(om.shape, obsp_meta.shape);
+
+        let mut stream = reader.obsp_stream(om, 10);
+        let mut seen_nnz = 0usize;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            seen_nnz += chunk.data.indices.len();
+            match chunk.data.data {
+                TypedVec::U32(_) => {}
+                other => panic!("unexpected obsp dtype: {:?}", other),
+            }
+        }
+        assert!(seen_nnz > 0, "obsp stream should yield non-empty chunks");
     }
 }

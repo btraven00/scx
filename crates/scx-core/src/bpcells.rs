@@ -498,6 +498,7 @@ use crate::stream::DatasetReader;
 ///   Shape `[n_vars, n_obs]` → `n_obs = ncol`, `n_vars = nrow`.
 /// - CSR (`storage_order = "row"`): outer dim = obs, inner dim = vars.
 ///   Shape `[n_obs, n_vars]` → `n_obs = nrow`, `n_vars = ncol`.
+#[derive(Clone)]
 pub struct BpcellsDatasetReader {
     pub n_obs: usize,
     pub n_vars: usize,
@@ -562,6 +563,47 @@ impl BpcellsDatasetReader {
             dtype,
         })
     }
+
+    /// Read a single obs-major chunk directly from decoded BPCells storage.
+    ///
+    /// This is the low-level helper used by backend adapters that want direct
+    /// chunk access without going through `x_stream()`.
+    pub fn read_chunk(&self, obs_start: usize, obs_end: usize) -> Result<MatrixChunk> {
+        if obs_start > obs_end || obs_end > self.n_obs {
+            return Err(crate::error::ScxError::InvalidFormat(format!(
+                "BPCells chunk out of bounds: {obs_start}..{obs_end} for n_obs={}",
+                self.n_obs
+            )));
+        }
+
+        let n_chunk = obs_end - obs_start;
+        let nnz_start = self.idxptr[obs_start] as usize;
+        let nnz_end   = self.idxptr[obs_end]   as usize;
+
+        let indptr: Vec<u64> = self.idxptr[obs_start..=obs_end]
+            .iter()
+            .map(|&p| p - self.idxptr[obs_start])
+            .collect();
+
+        let indices: Vec<u32> = self.index[nnz_start..nnz_end].to_vec();
+
+        let data = match self.values.as_ref() {
+            ValStore::Uint32(vs) => TypedVec::U32(vs[nnz_start..nnz_end].to_vec()),
+            ValStore::Float32(vs) => TypedVec::F32(vs[nnz_start..nnz_end].to_vec()),
+            ValStore::Float64(vs) => TypedVec::F64(vs[nnz_start..nnz_end].to_vec()),
+        };
+
+        Ok(MatrixChunk {
+            row_offset: obs_start,
+            nrows: n_chunk,
+            data: SparseMatrixCSR {
+                shape: (n_chunk, self.n_vars),
+                indptr,
+                indices,
+                data,
+            },
+        })
+    }
 }
 
 #[async_trait]
@@ -606,48 +648,36 @@ impl DatasetReader for BpcellsDatasetReader {
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
-        let n_obs      = self.n_obs;
-        let n_vars     = self.n_vars;
+        let n_obs = self.n_obs;
         let chunk_size = self.chunk_size;
-        let idxptr     = Arc::clone(&self.idxptr);
-        let index      = Arc::clone(&self.index);
-        let values     = Arc::clone(&self.values);
+        let reader = Self {
+            n_obs: self.n_obs,
+            n_vars: self.n_vars,
+            chunk_size: self.chunk_size,
+            obs_names: self.obs_names.clone(),
+            var_names: self.var_names.clone(),
+            idxptr: Arc::clone(&self.idxptr),
+            index: Arc::clone(&self.index),
+            values: Arc::clone(&self.values),
+            dtype: self.dtype,
+        };
 
         Box::pin(stream::unfold(0usize, move |obs_start| {
-            let idxptr = Arc::clone(&idxptr);
-            let index  = Arc::clone(&index);
-            let values = Arc::clone(&values);
+            let reader = Self {
+                n_obs: reader.n_obs,
+                n_vars: reader.n_vars,
+                chunk_size: reader.chunk_size,
+                obs_names: reader.obs_names.clone(),
+                var_names: reader.var_names.clone(),
+                idxptr: Arc::clone(&reader.idxptr),
+                index: Arc::clone(&reader.index),
+                values: Arc::clone(&reader.values),
+                dtype: reader.dtype,
+            };
             async move {
                 if obs_start >= n_obs { return None; }
-                let obs_end  = (obs_start + chunk_size).min(n_obs);
-                let n_chunk  = obs_end - obs_start;
-                let nnz_start = idxptr[obs_start] as usize;
-                let nnz_end   = idxptr[obs_end]   as usize;
-
-                // Normalised CSR indptr for this chunk.
-                let indptr: Vec<u64> = idxptr[obs_start..=obs_end]
-                    .iter()
-                    .map(|&p| p - idxptr[obs_start])
-                    .collect();
-
-                let indices: Vec<u32> = index[nnz_start..nnz_end].to_vec();
-
-                let data = match values.as_ref() {
-                    ValStore::Uint32(vs) => TypedVec::U32(vs[nnz_start..nnz_end].to_vec()),
-                    ValStore::Float32(vs) => TypedVec::F32(vs[nnz_start..nnz_end].to_vec()),
-                    ValStore::Float64(vs) => TypedVec::F64(vs[nnz_start..nnz_end].to_vec()),
-                };
-
-                let chunk = Ok(MatrixChunk {
-                    row_offset: obs_start,
-                    nrows: n_chunk,
-                    data: SparseMatrixCSR {
-                        shape: (n_chunk, n_vars),
-                        indptr,
-                        indices,
-                        data,
-                    },
-                });
+                let obs_end = (obs_start + chunk_size).min(n_obs);
+                let chunk = reader.read_chunk(obs_start, obs_end);
                 Some((chunk, obs_end))
             }
         }))
