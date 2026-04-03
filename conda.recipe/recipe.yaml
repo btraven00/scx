@@ -12,6 +12,7 @@ source:
 build:
   number: 0
   script:
+    - export HDF5_DIR=$PREFIX
     - cargo build --release --bin scx
     - mkdir -p $PREFIX/bin
     - cp target/release/scx $PREFIX/bin/scx
@@ -21,9 +22,9 @@ requirements:
     - ${{ compiler('rust') }}
     - pkg-config
   host:
-    - hdf5
+    - hdf5 1.*
   run:
-    - hdf5
+    - hdf5 1.*
 
 tests:
   - script:
