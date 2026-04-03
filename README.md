@@ -1,16 +1,16 @@
 # SCX — Single-Cell format conversion
 
-SCX is a lean, format-to-format interoperability engine for single-cell data,
-optimized for reproducible benchmarking of conversion correctness, throughput,
+SCX is a lean interoperability engine for single-cell format conversion,
+designed to support reproducible benchmarking of correctness, throughput,
 and memory use.
 
-Today the project focuses on a narrow core:
+The project currently focuses on a narrow core:
 
-- robust conversion between H5Seurat and H5AD
-- a memory-bounded streaming pipeline written in Rust
-- thin language bindings for benchmarking and interop workflows
+- conversion between H5Seurat and H5AD, with attention to correctness and bounded memory use
+- a Rust streaming pipeline intended to keep memory use bounded by `chunk_size`
+- thin language bindings for interop workflows and benchmarking support
 
-Peak memory scales with `chunk_size`, not dataset size.
+Peak memory is intended to scale primarily with `chunk_size` rather than total dataset size.
 
 ## Components
 
@@ -24,8 +24,8 @@ Peak memory scales with `chunk_size`, not dataset size.
 
 ## Scope
 
-SCX is an interop engine first, not a full analysis framework. The main product
-goal is lean, reproducible benchmarking of format conversion.
+SCX is an interop library, not a full analysis framework. The main goal
+is reproducible benchmarking of format conversion.
 
 ### In scope
 
@@ -35,14 +35,12 @@ goal is lean, reproducible benchmarking of format conversion.
 - CLI and thin language bindings for R/Python
 - internal formats or checkpoints that reduce benchmarking overhead
 
-### Out of scope for the core project
+### Out of scope
 
 - replacing AnnData / Scanpy / Seurat / BPCells
-- becoming a general lazy matrix engine or data platform
 - broad cloud-native storage support
-- community-driven feature parity across every language binding
-- universal zero-copy guarantees
-- supporting every possible single-cell format
+- feature parity across language bindings
+- supporting every single-cell format
 
 ## Quick start
 
@@ -66,7 +64,7 @@ seu <- read_seurat("pbmc.h5seurat")       # → Seurat object (requires Seurat �
 sce <- read_sce("pbmc.h5seurat")          # → SingleCellExperiment
 ```
 
-See [`r/picklerick/docs/usage.md`](r/picklerick/docs/usage.md) for full R API.
+See [`r/picklerick/docs/usage.md`](r/picklerick/docs/usage.md) for the full R API.
 
 ## Build
 
@@ -121,12 +119,12 @@ pixi run -e test fixtures
 | SCX internal `.h5` | yes | — |
 
 Dense X/layers and nullable obs columns (anndata `IntNA`/`FloatNA`/`BoolNA`)
-are fully supported.
+are supported.
 
 ## Internal benchmarking format
 
 SCX also has an internal `.npy` snapshot format used as an implementation and
-benchmarking aid. It is intentionally exploratory and should be understood as:
+benchmarking aid. It is intended as an internal, exploratory mechanism and should be understood as:
 
 - an internal checkpoint format for isolating read/write costs in benchmarks
 - a debugging substrate for inspecting the intermediate representation
