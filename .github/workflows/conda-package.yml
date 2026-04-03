@@ -2,8 +2,6 @@ name: Conda Package
 
 on:
   push:
-    tags:
-      - "v*"
 
 env:
   RATTLER_BUILD_VERSION: "0.31.1"
@@ -74,7 +72,15 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Upload to prefix.dev
+      - name: Upload to prefix.dev (edge)
+        run: |
+          for pkg in $(find artifacts/ -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
+            echo "Uploading ${pkg}"
+            rattler-build upload prefix -c edge "${pkg}"
+          done
+
+      - name: Upload to prefix.dev (stable, tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           for pkg in $(find artifacts/ -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
             echo "Uploading ${pkg}"
