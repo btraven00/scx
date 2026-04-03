@@ -13,26 +13,24 @@ build:
   number: 0
   script:
     - export HDF5_DIR=$PREFIX
-    - cargo build --release --bin scx
-    - mkdir -p $PREFIX/bin
-    - cp target/release/scx $PREFIX/bin/scx
+    - cargo install --path crates/scx-cli --root $PREFIX --locked
 
 requirements:
   build:
     - ${{ compiler('rust') }}
     - pkg-config
   host:
-    - hdf5 1.*
+    - hdf5 1.12.*
   run:
-    - hdf5 1.*
+    - hdf5 1.12.*
 
 tests:
   - script:
       - scx --help
 
 about:
-  homepage: https://github.com/your-username/scx
-  license: MIT
+  homepage: https://github.com/btraven00/scx
+  license: GPL-3.0-only
   license_file: LICENSE
   summary: "Single-cell streaming interop engine"
   description: |
