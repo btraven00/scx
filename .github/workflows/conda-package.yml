@@ -16,7 +16,7 @@ jobs:
         platform:
           - os: ubuntu-latest
             target: linux-64
-          - os: macos-13
+          - os: macos-13-large
             target: osx-64
           - os: macos-latest
             target: osx-arm64
@@ -51,6 +51,7 @@ jobs:
   publish:
     name: Publish to prefix.dev
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
