@@ -487,14 +487,17 @@ struct BpcellsCscData {
 
 #[derive(Debug)]
 struct BpcellsCscAccumulator {
-    n_vars: usize,
+    /// Number of outer-dimension elements (= n_obs for X/layers, = n_obs for obsp).
+    /// This is the length of the idxptr array minus 1.
+    n_outer: usize,
+    /// (obs_idx, var_idx, val) — sorted by (obs, var) to produce obs-indexed CSC.
     entries: Vec<(u32, u32, TypedVal)>,
 }
 
 impl BpcellsCscAccumulator {
-    fn new(n_vars: usize) -> Self {
+    fn new(n_outer: usize) -> Self {
         Self {
-            n_vars,
+            n_outer,
             entries: Vec::new(),
         }
     }
@@ -514,7 +517,8 @@ impl BpcellsCscAccumulator {
             for ptr in start..end {
                 let col = csr.indices[ptr];
                 let val = TypedVal::from_typed_vec_at(&csr.data, ptr)?;
-                self.entries.push((col, global_row as u32, val));
+                // outer = obs (cell), inner = var (gene) — matches BPCells CSC convention
+                self.entries.push((global_row as u32, col, val));
             }
         }
 
@@ -522,10 +526,11 @@ impl BpcellsCscAccumulator {
     }
 
     fn into_csc(mut self) -> Result<BpcellsCscData> {
+        // Sort by (obs, var) so entries are grouped by obs — producing obs-indexed CSC.
         self.entries
-            .sort_unstable_by_key(|(col, row, _)| (*col, *row));
+            .sort_unstable_by_key(|(obs, var, _)| (*obs, *var));
 
-        let mut idxptr = vec![0u64; self.n_vars + 1];
+        let mut idxptr = vec![0u64; self.n_outer + 1];
         let mut index = Vec::with_capacity(self.entries.len());
 
         let first_kind = self.entries.first().map(|e| match e.2 {
@@ -542,9 +547,9 @@ impl BpcellsCscAccumulator {
             }),
             Some(DataType::F32) => {
                 let mut vals = Vec::with_capacity(self.entries.len());
-                for (col, row, v) in self.entries {
-                    idxptr[col as usize + 1] += 1;
-                    index.push(row);
+                for (obs, var, v) in self.entries {
+                    idxptr[obs as usize + 1] += 1;
+                    index.push(var);
                     match v {
                         TypedVal::F32(x) => vals.push(x),
                         _ => {
@@ -554,7 +559,7 @@ impl BpcellsCscAccumulator {
                         }
                     }
                 }
-                for i in 0..self.n_vars {
+                for i in 0..self.n_outer {
                     idxptr[i + 1] += idxptr[i];
                 }
                 Ok(BpcellsCscData {
@@ -565,9 +570,9 @@ impl BpcellsCscAccumulator {
             }
             Some(DataType::F64) => {
                 let mut vals = Vec::with_capacity(self.entries.len());
-                for (col, row, v) in self.entries {
-                    idxptr[col as usize + 1] += 1;
-                    index.push(row);
+                for (obs, var, v) in self.entries {
+                    idxptr[obs as usize + 1] += 1;
+                    index.push(var);
                     match v {
                         TypedVal::F64(x) => vals.push(x),
                         _ => {
@@ -577,7 +582,7 @@ impl BpcellsCscAccumulator {
                         }
                     }
                 }
-                for i in 0..self.n_vars {
+                for i in 0..self.n_outer {
                     idxptr[i + 1] += idxptr[i];
                 }
                 Ok(BpcellsCscData {
@@ -588,9 +593,9 @@ impl BpcellsCscAccumulator {
             }
             Some(DataType::U32) => {
                 let mut vals = Vec::with_capacity(self.entries.len());
-                for (col, row, v) in self.entries {
-                    idxptr[col as usize + 1] += 1;
-                    index.push(row);
+                for (obs, var, v) in self.entries {
+                    idxptr[obs as usize + 1] += 1;
+                    index.push(var);
                     match v {
                         TypedVal::U32(x) => vals.push(x),
                         _ => {
@@ -600,7 +605,7 @@ impl BpcellsCscAccumulator {
                         }
                     }
                 }
-                for i in 0..self.n_vars {
+                for i in 0..self.n_outer {
                     idxptr[i + 1] += idxptr[i];
                 }
                 Ok(BpcellsCscData {
@@ -669,7 +674,7 @@ impl BpcellsH5Writer {
             obsm: None,
             uns: None,
             varm: None,
-            accumulator: BpcellsCscAccumulator::new(n_vars),
+            accumulator: BpcellsCscAccumulator::new(n_obs),
             sparse_state: None,
         })
     }
@@ -718,7 +723,7 @@ impl DatasetWriter for BpcellsH5Writer {
             group_prefix: group_prefix.to_string(),
             name: name.to_string(),
             shape: meta.shape,
-            accumulator: BpcellsCscAccumulator::new(meta.shape.1),
+            accumulator: BpcellsCscAccumulator::new(meta.shape.0),
         });
         Ok(())
     }
@@ -787,7 +792,7 @@ impl DatasetWriter for BpcellsH5Writer {
     async fn finalize(&mut self) -> Result<()> {
         let accumulator = std::mem::replace(
             &mut self.accumulator,
-            BpcellsCscAccumulator::new(self.n_vars),
+            BpcellsCscAccumulator::new(self.n_obs),
         );
         let csc = accumulator.into_csc()?;
         let group_path = format!("assays/{}/{}", self.assay, self.layer);
@@ -1336,5 +1341,256 @@ mod tests {
             }
         }
         assert!(seen_nnz > 0, "obsp stream should yield non-empty chunks");
+    }
+
+    /// Write a known 3×4 CSR matrix via BpcellsH5Writer, read it back via
+    /// H5SeuratReader, and assert the streamed values are bit-exact.
+    ///
+    /// Matrix (obs × vars, row-major):
+    ///   row 0: [1, 0, 2, 0]
+    ///   row 1: [0, 3, 0, 0]
+    ///   row 2: [4, 0, 0, 5]
+    #[tokio::test]
+    async fn bpcells_writer_x_stream_exact_values() {
+        use crate::dtype::TypedVec;
+        use crate::h5seurat::H5SeuratReader;
+        use crate::ir::{MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
+        use crate::stream::{DatasetReader, DatasetWriter};
+        use futures::StreamExt;
+
+        let n_obs  = 3usize;
+        let n_vars = 4usize;
+
+        let obs = ObsTable {
+            index: vec!["c0".into(), "c1".into(), "c2".into()],
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: vec!["g0".into(), "g1".into(), "g2".into(), "g3".into()],
+            columns: vec![],
+        };
+
+        // CSR: row 0→(col0=1,col2=2), row1→(col1=3), row2→(col0=4,col3=5)
+        let chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr: vec![0, 2, 3, 5],
+                indices: vec![0, 2, 1, 0, 3],
+                data: TypedVec::U32(vec![1, 2, 3, 4, 5]),
+            },
+        };
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_x_chunk(&chunk).await.unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        // Expected dense [obs × vars], row-major
+        let expected: Vec<f64> = vec![
+            1.0, 0.0, 2.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            4.0, 0.0, 0.0, 5.0,
+        ];
+
+        let mut reader = H5SeuratReader::open(&path, 1000, None, None).unwrap();
+        let (rt_n_obs, rt_n_vars) = reader.shape();
+        assert_eq!(rt_n_obs,  n_obs,  "n_obs mismatch");
+        assert_eq!(rt_n_vars, n_vars, "n_vars mismatch");
+
+        let mut dense = vec![0.0f64; n_obs * n_vars];
+        let mut stream = reader.x_stream();
+        while let Some(c) = stream.next().await {
+            let c = c.unwrap();
+            let csr = &c.data;
+            for row in 0..c.nrows {
+                let obs_i = c.row_offset + row;
+                for k in csr.indptr[row] as usize..csr.indptr[row + 1] as usize {
+                    let var_i = csr.indices[k] as usize;
+                    dense[obs_i * n_vars + var_i] = match &csr.data {
+                        TypedVec::U32(v)  => v[k] as f64,
+                        TypedVec::F32(v)  => v[k] as f64,
+                        TypedVec::F64(v)  => v[k],
+                        TypedVec::I32(v)  => v[k] as f64,
+                    };
+                }
+            }
+        }
+        assert_eq!(dense, expected, "X stream values do not match written data");
+    }
+
+    /// Write obs/var with non-trivial metadata columns and verify every column
+    /// survives the BpcellsH5Writer → H5SeuratReader round-trip.
+    #[tokio::test]
+    async fn bpcells_writer_obs_var_metadata_roundtrip() {
+        use crate::h5seurat::H5SeuratReader;
+        use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
+        use crate::stream::{DatasetReader, DatasetWriter};
+        use crate::dtype::TypedVec;
+
+        let n_obs  = 3usize;
+        let n_vars = 2usize;
+
+        let obs = ObsTable {
+            index: vec!["cell_A".into(), "cell_B".into(), "cell_C".into()],
+            columns: vec![
+                Column { name: "n_counts".into(), data: ColumnData::Float(vec![100.0, 200.0, 300.0]) },
+                Column { name: "is_doublet".into(), data: ColumnData::Bool(vec![false, true, false]) },
+                Column { name: "cell_type".into(), data: ColumnData::Categorical {
+                    codes: vec![0, 1, 0],
+                    levels: vec!["T cell".into(), "B cell".into()],
+                }},
+            ],
+        };
+        let var = VarTable {
+            index: vec!["GeneA".into(), "GeneB".into()],
+            columns: vec![
+                Column { name: "highly_variable".into(), data: ColumnData::Bool(vec![true, false]) },
+            ],
+        };
+
+        let chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr: vec![0, 1, 2, 2],
+                indices: vec![0, 1],
+                data: TypedVec::U32(vec![5, 7]),
+            },
+        };
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_x_chunk(&chunk).await.unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        let mut reader = H5SeuratReader::open(&path, 1000, None, None).unwrap();
+
+        // Cell names
+        let rt_obs = reader.obs().await.unwrap();
+        assert_eq!(rt_obs.index, obs.index, "cell names mismatch");
+
+        // n_counts float column
+        let nc = rt_obs.columns.iter().find(|c| c.name == "n_counts")
+            .expect("n_counts column missing");
+        if let ColumnData::Float(vals) = &nc.data {
+            assert_eq!(vals.len(), n_obs);
+            for (a, b) in vals.iter().zip([100.0f64, 200.0, 300.0].iter()) {
+                assert!((a - b).abs() < 1e-10, "n_counts mismatch: {a} vs {b}");
+            }
+        } else {
+            panic!("n_counts wrong type: {:?}", nc.data);
+        }
+
+        // is_doublet bool column
+        let id = rt_obs.columns.iter().find(|c| c.name == "is_doublet")
+            .expect("is_doublet column missing");
+        if let ColumnData::Bool(vals) = &id.data {
+            assert_eq!(vals, &[false, true, false], "is_doublet mismatch");
+        } else {
+            panic!("is_doublet wrong type: {:?}", id.data);
+        }
+
+        // cell_type categorical column
+        let ct = rt_obs.columns.iter().find(|c| c.name == "cell_type")
+            .expect("cell_type column missing");
+        if let ColumnData::Categorical { codes, levels } = &ct.data {
+            assert_eq!(codes, &[0u32, 1, 0], "cell_type codes mismatch");
+            assert_eq!(levels, &["T cell", "B cell"], "cell_type levels mismatch");
+        } else {
+            panic!("cell_type wrong type: {:?}", ct.data);
+        }
+
+        // Gene names
+        let rt_var = reader.var().await.unwrap();
+        assert_eq!(rt_var.index, var.index, "gene names mismatch");
+    }
+
+    /// Cell and gene names written by BpcellsH5Writer must appear in the
+    /// correct HDF5 locations expected by Seurat v5:
+    ///   /cell.names          — root-level cell barcodes
+    ///   /assays/RNA/features — gene feature names
+    #[tokio::test]
+    async fn bpcells_writer_cell_gene_names_in_seurat_locations() {
+        use crate::ir::{MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
+        use crate::stream::DatasetWriter;
+        use crate::dtype::TypedVec;
+        use hdf5::types::VarLenUnicode;
+
+        let n_obs  = 2usize;
+        let n_vars = 3usize;
+
+        let obs = ObsTable {
+            index: vec!["ACGT-1".into(), "TGCA-2".into()],
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: vec!["CD3D".into(), "CD3E".into(), "GAPDH".into()],
+            columns: vec![],
+        };
+
+        let chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr: vec![0, 1, 1],
+                indices: vec![0],
+                data: TypedVec::U32(vec![3]),
+            },
+        };
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_x_chunk(&chunk).await.unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        // Verify directly in the HDF5 file — same checks Seurat v5 would perform
+        let file = hdf5::File::open(&path).unwrap();
+
+        let cell_names: Vec<VarLenUnicode> = file.dataset("cell.names")
+            .expect("/cell.names missing")
+            .read_1d::<VarLenUnicode>()
+            .unwrap()
+            .to_vec();
+        let cell_strs: Vec<&str> = cell_names.iter().map(|s| s.as_str()).collect();
+        assert_eq!(cell_strs, ["ACGT-1", "TGCA-2"], "/cell.names content mismatch");
+
+        let features: Vec<VarLenUnicode> = file.dataset("assays/RNA/features")
+            .expect("/assays/RNA/features missing")
+            .read_1d::<VarLenUnicode>()
+            .unwrap()
+            .to_vec();
+        let feat_strs: Vec<&str> = features.iter().map(|s| s.as_str()).collect();
+        assert_eq!(feat_strs, ["CD3D", "CD3E", "GAPDH"], "/assays/RNA/features content mismatch");
+
+        // BPCells version attribute must be set so Seurat v5 routes to BPCells backend
+        let counts_grp = file.group("assays/RNA/counts")
+            .expect("/assays/RNA/counts group missing");
+        let version_attr = counts_grp.attr("version")
+            .expect("version attribute missing on /assays/RNA/counts");
+        let version: VarLenUnicode = version_attr.read_scalar().unwrap();
+        assert!(
+            version.as_str().starts_with("packed-"),
+            "version attr should be a packed-* BPCells type, got: {}",
+            version.as_str()
+        );
     }
 }
