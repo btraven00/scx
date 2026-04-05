@@ -8,7 +8,8 @@ package:
 
 source:
   git: https://github.com/btraven00/scx
-  tag: v${{ version }}
+  # tag: v${{ version }}
+  branch: main
 
 build:
   number: 1
