@@ -16,7 +16,7 @@ jobs:
         platform:
           - os: ubuntu-latest
             target: linux-64
-          - os: macos-13-large
+          - os: macos-13
             target: osx-64
           - os: macos-latest
             target: osx-arm64
