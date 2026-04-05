@@ -20,6 +20,8 @@ jobs:
             target: osx-64
           - os: macos-latest
             target: osx-arm64
+          - os: windows-latest
+            target: win-64
 
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +37,7 @@ jobs:
           pixi global install rattler-build==${{ env.RATTLER_BUILD_VERSION }}
 
       - name: Build conda package
+        shell: bash
         run: |
           rattler-build build --recipe conda.recipe/recipe.yaml \
             --output-dir output \
