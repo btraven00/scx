@@ -7,10 +7,11 @@ package:
   version: ${{ version }}
 
 source:
-  path: ..
+  git: https://github.com/btraven00/scx
+  tag: v${{ version }}
 
 build:
-  number: 0
+  number: 1
   script:
     - if: unix
       then:
