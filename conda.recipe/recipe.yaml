@@ -12,13 +12,20 @@ source:
 build:
   number: 0
   script:
-    - export HDF5_DIR=$PREFIX
-    - cargo install --path crates/scx-cli --root $PREFIX --locked
+    - if: unix
+      then:
+        - export HDF5_DIR="$PREFIX"
+        - cargo install --path crates/scx-cli --root "$PREFIX" --locked
+    - if: win
+      then:
+        - set "HDF5_DIR=%LIBRARY_PREFIX%"
+        - cargo install --path crates/scx-cli --root "%PREFIX%" --locked
 
 requirements:
   build:
     - ${{ compiler('rust') }}
-    - pkg-config
+    - if: unix
+      then: pkg-config
   host:
     - hdf5 1.12.*
   run:
