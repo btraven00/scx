@@ -652,21 +652,26 @@ impl BpcellsH5Writer {
         assay: Option<&str>,
         layer: Option<&str>,
         project: Option<&str>,
+        seuratdisk_compat: bool,
     ) -> Result<Self> {
         let assay   = assay.unwrap_or("RNA").to_string();
         let layer   = layer.unwrap_or("counts").to_string();
         let project = project.unwrap_or("SeuratProject");
         let file = File::create(path.as_ref())?;
 
-        // Root-level attributes required by SeuratDisk::LoadH5Seurat.
-        let root = file.group("/")?;
-        for (name, value) in [
-            ("version",      "3.1.5.9900"),
-            ("active.assay", assay.as_str()),
-            ("project",      project),
-        ] {
-            let v = VarLenUnicode::from_str(value).unwrap_or_default();
-            root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+        if seuratdisk_compat {
+            let root = file.group("/")?;
+            for (name, value) in [
+                ("version",      "3.1.5.9900"),
+                ("active.assay", assay.as_str()),
+                ("project",      project),
+            ] {
+                let v = VarLenUnicode::from_str(value).unwrap_or_default();
+                root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+            }
+            for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
+                file.create_group(grp)?;
+            }
         }
 
         if file.group("assays").is_err() {
@@ -677,11 +682,9 @@ impl BpcellsH5Writer {
         } else {
             file.group(&format!("assays/{assay}"))?
         };
-        let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
-        assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
-        // All top-level groups required by SeuratDisk::LoadH5Seurat, even when empty.
-        for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
-            file.create_group(grp)?;
+        if seuratdisk_compat {
+            let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
+            assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
         }
 
         Ok(Self {
@@ -1266,7 +1269,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None).unwrap();
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&obsm).await.unwrap();
@@ -1401,7 +1404,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None).unwrap();
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_x_chunk(&chunk).await.unwrap();
@@ -1485,7 +1488,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None).unwrap();
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_x_chunk(&chunk).await.unwrap();
@@ -1571,7 +1574,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None).unwrap();
+        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_x_chunk(&chunk).await.unwrap();

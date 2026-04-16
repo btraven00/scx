@@ -966,6 +966,7 @@ impl H5SeuratWriter {
         assay: Option<&str>,
         layer: Option<&str>,
         project: Option<&str>,
+        seuratdisk_compat: bool,
     ) -> Result<Self> {
         let assay   = assay.unwrap_or("RNA").to_string();
         let layer   = layer.unwrap_or("counts").to_string();
@@ -973,27 +974,29 @@ impl H5SeuratWriter {
 
         let file = File::create(path.as_ref())?;
 
-        // Root-level attributes required by SeuratDisk::LoadH5Seurat.
-        let root = file.group("/")?;
-        for (name, value) in [
-            ("version",      "3.1.5.9900"),
-            ("active.assay", assay.as_str()),
-            ("project",      project),
-        ] {
-            let v = VarLenUnicode::from_str(value).unwrap_or_default();
-            root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+        if seuratdisk_compat {
+            // Root-level attributes and empty groups required by SeuratDisk::LoadH5Seurat.
+            let root = file.group("/")?;
+            for (name, value) in [
+                ("version",      "3.1.5.9900"),
+                ("active.assay", assay.as_str()),
+                ("project",      project),
+            ] {
+                let v = VarLenUnicode::from_str(value).unwrap_or_default();
+                root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+            }
+            for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
+                file.create_group(grp)?;
+            }
         }
 
-        // Pre-create the group hierarchy needed before the resizable datasets.
         file.create_group("assays")?;
         let assay_grp = file.create_group(&format!("assays/{assay}"))?;
-        let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
-        assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
-        file.create_group(&format!("assays/{assay}/{layer}"))?;
-        // All top-level groups required by SeuratDisk::LoadH5Seurat, even when empty.
-        for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
-            file.create_group(grp)?;
+        if seuratdisk_compat {
+            let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
+            assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
         }
+        file.create_group(&format!("assays/{assay}/{layer}"))?;
 
         // Resizable datasets for streaming x-chunk writes.
         let data_path    = format!("assays/{assay}/{layer}/data");
@@ -1493,7 +1496,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&obsm).await.unwrap();
@@ -1564,7 +1567,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, Some("data"), None).unwrap();
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, Some("data"), None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1608,7 +1611,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&path, 1, 1, DataType::F32, None, None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&path, 1, 1, DataType::F32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1706,7 +1709,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1788,7 +1791,7 @@ mod tests {
         let tmp = NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, src.dtype(), None, None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, src.dtype(), None, None, None, false).unwrap();
         writer.write_obs(&src_obs).await.unwrap();
         writer.write_var(&src_var).await.unwrap();
         writer.write_obsm(&src_obsm).await.unwrap();
