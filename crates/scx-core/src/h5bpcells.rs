@@ -398,6 +398,11 @@ fn write_version_attr(grp: &Group, version: &str) -> Result<()> {
 
 /// Write a packed BPCells matrix into an HDF5 group.
 ///
+/// BPCells groups columns into "runs" of 128. Each run's nonzeros are encoded
+/// independently so chunk boundaries always align with run boundaries.
+/// `index_idx_offsets[r]` and `val_idx_offsets[r]` mark where run r's slice
+/// begins within the concatenated `index_idx` / `val_idx` arrays.
+///
 /// `shape` is stored as `[nrow, ncol]` in BPCells convention.
 pub fn write_bpcells_h5(
     file: &File,
@@ -422,28 +427,70 @@ pub fn write_bpcells_h5(
         StorageOrder::Col => "col".to_string(),
         StorageOrder::Row => "row".to_string(),
     };
-    let shape = vec![nrow as u32, ncol as u32];
-    let storage_vec = vec![storage];
-
-    write_strings(&grp, "storage_order", &storage_vec)?;
-    write_u32s(&grp, "shape", &shape)?;
+    write_strings(&grp, "storage_order", &[storage])?;
+    write_u32s(&grp, "shape", &[nrow as u32, ncol as u32])?;
     write_u64s(&grp, "idxptr", idxptr)?;
     write_strings(&grp, "row_names", row_names)?;
     write_strings(&grp, "col_names", col_names)?;
 
-    let (index_data, index_idx, index_starts) = encode_d1z(index);
-    write_u32s(&grp, "index_data", &index_data)?;
-    write_u32s(&grp, "index_idx", &index_idx)?;
-    write_u64s(&grp, "index_idx_offsets", &vec![0u64; index_starts.len()])?;
-    write_u32s(&grp, "index_starts", &index_starts)?;
+    let n_runs = ncol.div_ceil(128);
+
+    // Encode indices and values per-run so chunk boundaries align with run
+    // boundaries. This is required by BPCells: runs must be independently
+    // decodable.
+    let mut all_index_data:  Vec<u32> = Vec::new();
+    let mut all_index_idx:   Vec<u32> = Vec::new();
+    let mut all_index_starts: Vec<u32> = Vec::new();
+    let mut index_idx_offsets: Vec<u64> = Vec::with_capacity(n_runs + 1);
+    index_idx_offsets.push(0);
+
+    // For Uint32 values only (floats have no compression index).
+    let mut all_val_data: Vec<u32> = Vec::new();
+    let mut all_val_idx:  Vec<u32> = Vec::new();
+    let mut val_idx_offsets: Vec<u64> = Vec::with_capacity(n_runs + 1);
+    val_idx_offsets.push(0);
+
+    for r in 0..n_runs {
+        let col_start = r * 128;
+        let col_end   = ((r + 1) * 128).min(ncol);
+        let nnz_start = idxptr[col_start] as usize;
+        let nnz_end   = idxptr[col_end]   as usize;
+
+        // Encode this run's row indices.
+        let (run_idx_data, mut run_idx_idx, run_idx_starts) =
+            encode_d1z(&index[nnz_start..nnz_end]);
+
+        // Adjust run-local idx offsets to be global (offset by data written so far).
+        let idx_data_offset = all_index_data.len() as u32;
+        for v in &mut run_idx_idx { *v += idx_data_offset; }
+
+        all_index_data.extend_from_slice(&run_idx_data);
+        all_index_idx.extend_from_slice(&run_idx_idx);  // includes per-run sentinel
+        all_index_starts.extend_from_slice(&run_idx_starts);
+        index_idx_offsets.push(all_index_idx.len() as u64);
+
+        // Encode this run's values (Uint32 only; floats written flat later).
+        if let ValStore::Uint32(v) = values {
+            let (run_val_data, mut run_val_idx) = encode_for(&v[nnz_start..nnz_end]);
+            let val_data_offset = all_val_data.len() as u32;
+            for vv in &mut run_val_idx { *vv += val_data_offset; }
+            all_val_data.extend_from_slice(&run_val_data);
+            all_val_idx.extend_from_slice(&run_val_idx);
+            val_idx_offsets.push(all_val_idx.len() as u64);
+        }
+    }
+
+    write_u32s(&grp, "index_data",        &all_index_data)?;
+    write_u32s(&grp, "index_idx",         &all_index_idx)?;
+    write_u64s(&grp, "index_idx_offsets", &index_idx_offsets)?;
+    write_u32s(&grp, "index_starts",      &all_index_starts)?;
 
     match values {
-        ValStore::Uint32(v) => {
-            let (val_data, val_idx) = encode_for(v);
+        ValStore::Uint32(_) => {
             write_version_attr(&grp, "packed-uint-matrix-v2")?;
-            write_u32s(&grp, "val_data", &val_data)?;
-            write_u32s(&grp, "val_idx", &val_idx)?;
-            write_u64s(&grp, "val_idx_offsets", &vec![0u64; val_idx.len().saturating_sub(1)])?;
+            write_u32s(&grp, "val_data",        &all_val_data)?;
+            write_u32s(&grp, "val_idx",         &all_val_idx)?;
+            write_u64s(&grp, "val_idx_offsets", &val_idx_offsets)?;
         }
         ValStore::Float32(v) => {
             write_version_attr(&grp, "packed-float-matrix-v2")?;
