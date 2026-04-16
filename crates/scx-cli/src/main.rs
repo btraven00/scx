@@ -62,6 +62,10 @@ enum Cli {
         /// normalised and goes into the "data" slot; otherwise X goes into "counts".
         #[arg(long, default_value = "auto")]
         x_slot: String,
+
+        /// Seurat project name written into the H5Seurat root (H5Seurat output only)
+        #[arg(long, default_value = "SeuratProject")]
+        project: String,
     },
 
     /// Inspect a single-cell file
@@ -178,7 +182,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
 
-        Cli::Convert { input, output, chunk_size, dtype, assay, layer, dgcmatrix, x_slot } => {
+        Cli::Convert { input, output, chunk_size, dtype, assay, layer, dgcmatrix, x_slot, project } => {
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
                 "f64" => DataType::F64,
@@ -204,22 +208,22 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
                     let mut reader = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
                     let mut reader = H5AdReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::ScxH5) | None => {
                     tracing::info!(path = %input, "detected format: SCX H5 (internal)");
                     let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix).await?;
                 }
             }
         }
@@ -398,6 +402,7 @@ async fn convert_with_reader(
     out_assay: &str,
     out_layer: &str,
     x_slot: &str,
+    project: &str,
     chunk_size: usize,
     use_dgcmatrix: bool,
 ) -> anyhow::Result<()> {
@@ -458,9 +463,9 @@ async fn convert_with_reader(
 
     let mut writer: Box<dyn DatasetWriter> = if is_h5seurat {
         if use_dgcmatrix {
-            Box::new(H5SeuratWriter::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot))?)
+            Box::new(H5SeuratWriter::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot), Some(project))?)
         } else {
-            Box::new(BpcellsH5Writer::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot))?)
+            Box::new(BpcellsH5Writer::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot), Some(project))?)
         }
     } else {
         Box::new(H5AdWriter::create(output, n_obs, n_vars, out_dtype)?)
