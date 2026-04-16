@@ -647,11 +647,34 @@ fn ad_read_dense_chunk(
     n_vars: usize,
     dtype: DataType,
 ) -> Result<MatrixChunk> {
-    let file  = File::open(path)?;
-    let ds    = file.dataset("X")?;
-    let nrows = row_end - row_start;
+    let file = File::open(path)?;
+    ad_read_dense_chunk_with_dtype(&file, "X", row_start, row_end, n_vars, dtype)
+}
 
-    // Read the slice as f64 regardless of stored dtype; cast after.
+/// Read a row slice of an arbitrary dense 2-D dataset path and convert to a sparse CSR chunk.
+/// The stored dtype is detected from the dataset itself.
+fn ad_read_dense_chunk_at(
+    path: &Path,
+    ds_path: &str,
+    row_start: usize,
+    row_end: usize,
+    n_vars: usize,
+) -> Result<MatrixChunk> {
+    let file  = File::open(path)?;
+    let dtype = ad_detect_dtype(&file, ds_path)?;
+    ad_read_dense_chunk_with_dtype(&file, ds_path, row_start, row_end, n_vars, dtype)
+}
+
+fn ad_read_dense_chunk_with_dtype(
+    file: &File,
+    ds_path: &str,
+    row_start: usize,
+    row_end: usize,
+    n_vars: usize,
+    dtype: DataType,
+) -> Result<MatrixChunk> {
+    let ds    = file.dataset(ds_path)?;
+    let nrows = row_end - row_start;
     let slice = ds.read_slice::<f64, _, _>(s![row_start..row_end, ..])?;
     let csr = dense_array2_to_csr(slice.view(), nrows, n_vars, dtype);
     Ok(MatrixChunk { row_offset: row_start, nrows, data: csr })
@@ -1205,16 +1228,22 @@ impl DatasetReader for H5AdReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        let path    = self.path.clone();
+        let path     = self.path.clone();
         let grp_path = format!("layers/{}", meta.name);
-        let n_rows  = meta.shape.0;
+        let n_rows   = meta.shape.0;
+        let n_cols   = meta.shape.1;
+        let is_dense = meta.indptr.is_empty();
         Box::pin(stream::unfold(0usize, move |row_start| {
             let path     = path.clone();
             let grp_path = grp_path.clone();
             async move {
                 if row_start >= n_rows { return None; }
                 let row_end = (row_start + chunk_size).min(n_rows);
-                let chunk = ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                let chunk = if is_dense {
+                    ad_read_dense_chunk_at(&path, &grp_path, row_start, row_end, n_cols)
+                } else {
+                    ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
+                };
                 Some((chunk, row_end))
             }
         }))
@@ -1316,8 +1345,23 @@ mod tests {
     // Golden fixture produced by zellkonverter (via scripts/prepare_h5ad_reference.R)
     const GOLDEN_REF: &str = "../../tests/golden/pbmc3k_reference.h5ad";
     const GOLDEN: &str = "../../tests/golden/pbmc3k.h5";
+    // Committed subset fixture (generate with scripts/prepare_norman_subset.py)
+    const NORMAN_SUBSET: &str = "../../tests/fixtures/norman_subset.h5ad";
 
     fn ref_exists() -> bool { std::path::Path::new(GOLDEN_REF).exists() }
+
+    /// Return the path to the Norman H5AD to test against.
+    /// Prefers the full file via `NORMAN_H5AD` env var (dev/CI with large data),
+    /// falls back to the committed 500×200 subset.
+    fn norman_path() -> Option<std::path::PathBuf> {
+        if let Ok(p) = std::env::var("NORMAN_H5AD") {
+            let pb = std::path::PathBuf::from(&p);
+            if pb.exists() { return Some(pb); }
+            eprintln!("NORMAN_H5AD={p} not found, falling back to subset");
+        }
+        let pb = std::path::PathBuf::from(NORMAN_SUBSET);
+        if pb.exists() { Some(pb) } else { None }
+    }
 
     // --- H5AdReader tests (against zellkonverter reference) ---
 
@@ -1528,5 +1572,163 @@ mod tests {
         assert_eq!(umap.shape(), &[n_obs, 2]);
 
         tracing::info!("roundtrip OK: {} cells × {} genes", n_obs, n_vars);
+    }
+
+    /// Regression: layer stored as dense 2-D dataset must not panic when streamed.
+    /// Previously, layer_stream() always called ad_read_sparse_chunk(), which indexed
+    /// into an empty indptr and panicked with "index out of bounds: the len is 0".
+    #[tokio::test]
+    async fn test_dense_layer_stream_no_panic() {
+        use hdf5::File as H5File;
+        use ndarray::Array2;
+
+        let tmp  = NamedTempFile::with_suffix(".h5ad").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let n_obs: usize = 5;
+        let n_vars: usize = 4;
+
+        let vlu = |s: &str| VarLenUnicode::from_str(s).unwrap();
+
+        // Build a minimal H5AD with a dense "counts" layer.
+        {
+            let f = H5File::create(&path).unwrap();
+            let root = f.group("/").unwrap();
+            root.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
+                .write_scalar(&vlu("anndata")).unwrap();
+            root.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
+                .write_scalar(&vlu("0.1.0")).unwrap();
+
+            // Minimal obs/var dataframes (just the index).
+            let obs_grp = f.create_group("obs").unwrap();
+            obs_grp.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
+                .write_scalar(&vlu("dataframe")).unwrap();
+            obs_grp.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
+                .write_scalar(&vlu("0.2.0")).unwrap();
+            obs_grp.new_attr::<VarLenUnicode>().create("_index").unwrap()
+                .write_scalar(&vlu("index")).unwrap();
+            let obs_idx: ndarray::Array1<VarLenUnicode> = (0..n_obs)
+                .map(|i| vlu(&format!("cell{i}")))
+                .collect();
+            obs_grp.new_dataset_builder().with_data(&obs_idx).create("index").unwrap();
+
+            let var_grp = f.create_group("var").unwrap();
+            var_grp.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
+                .write_scalar(&vlu("dataframe")).unwrap();
+            var_grp.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
+                .write_scalar(&vlu("0.2.0")).unwrap();
+            var_grp.new_attr::<VarLenUnicode>().create("_index").unwrap()
+                .write_scalar(&vlu("index")).unwrap();
+            let var_idx: ndarray::Array1<VarLenUnicode> = (0..n_vars)
+                .map(|i| vlu(&format!("gene{i}")))
+                .collect();
+            var_grp.new_dataset_builder().with_data(&var_idx).create("index").unwrap();
+
+            // Sparse X (required by H5AdReader::open).
+            let x_grp = f.create_group("X").unwrap();
+            x_grp.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
+                .write_scalar(&vlu("csr_matrix")).unwrap();
+            x_grp.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
+                .write_scalar(&vlu("0.1.0")).unwrap();
+            let shape = ndarray::array![n_obs as i64, n_vars as i64];
+            x_grp.new_attr_builder().with_data(&shape).create("shape").unwrap();
+            let indptr: ndarray::Array1<i32> = ndarray::Array1::zeros(n_obs + 1);
+            x_grp.new_dataset_builder().with_data(&indptr).create("indptr").unwrap();
+            let indices: ndarray::Array1<i32> = ndarray::Array1::zeros(0);
+            x_grp.new_dataset_builder().with_data(&indices).create("indices").unwrap();
+            let data: ndarray::Array1<f32> = ndarray::Array1::zeros(0);
+            x_grp.new_dataset_builder().with_data(&data).create("data").unwrap();
+
+            // Dense "counts" layer — shape (n_obs, n_vars), stored as f32.
+            let layers_grp = f.create_group("layers").unwrap();
+            let counts: Array2<f32> = Array2::from_elem((n_obs, n_vars), 1.0_f32);
+            layers_grp.new_dataset_builder().with_data(&counts).create("counts").unwrap();
+        }
+
+        let mut reader = H5AdReader::open(&path, 3).unwrap();
+        let metas = reader.layer_metas().await.unwrap();
+        assert_eq!(metas.len(), 1, "expected 1 layer meta");
+        assert_eq!(metas[0].name, "counts");
+        assert!(metas[0].indptr.is_empty(), "dense layer must have empty indptr");
+
+        // Stream and collect all chunks — must not panic.
+        let mut total_rows = 0usize;
+        let mut total_nnz  = 0usize;
+        let mut stream = reader.layer_stream(&metas[0], 3);
+        while let Some(res) = stream.next().await {
+            let chunk = res.unwrap();
+            total_rows += chunk.nrows;
+            total_nnz  += chunk.data.indptr.last().copied().unwrap_or(0) as usize;
+        }
+        assert_eq!(total_rows, n_obs);
+        assert_eq!(total_nnz, n_obs * n_vars, "all values are 1.0 so every entry is non-zero");
+    }
+
+    // --- Norman perturbation tests ---
+    //
+    // Run against the committed 500×200 subset by default.
+    // Point NORMAN_H5AD=/path/to/norman_perturbation.h5ad to test the full file.
+    // Generate the subset with:
+    //   NORMAN_H5AD=... pixi run -e test prepare-norman-subset
+
+    #[tokio::test]
+    async fn test_norman_shape() {
+        let Some(path) = norman_path() else { return; };
+        let reader = H5AdReader::open(&path, 500).unwrap();
+        let (n_obs, n_vars) = reader.shape();
+        assert!(n_obs  > 0, "n_obs must be > 0");
+        assert!(n_vars > 0, "n_vars must be > 0");
+        eprintln!("norman shape: {n_obs} × {n_vars}");
+    }
+
+    #[tokio::test]
+    async fn test_norman_obs_has_perturbation_column() {
+        let Some(path) = norman_path() else { return; };
+        let mut reader = H5AdReader::open(&path, 500).unwrap();
+        let obs = reader.obs().await.unwrap();
+        // Norman obs must contain at least one perturbation-related column
+        let cols: Vec<&str> = obs.columns.iter().map(|c| c.name.as_str()).collect();
+        eprintln!("norman obs columns: {cols:?}");
+        assert!(!cols.is_empty(), "obs must have at least one column");
+    }
+
+    #[tokio::test]
+    async fn test_norman_dense_layer_stream_coverage() {
+        let Some(path) = norman_path() else { return; };
+        let (n_obs, n_vars) = H5AdReader::open(&path, 500).unwrap().shape();
+
+        let mut reader = H5AdReader::open(&path, 500).unwrap();
+        let metas = reader.layer_metas().await.unwrap();
+        assert!(!metas.is_empty(), "norman H5AD must have at least one layer");
+
+        // counts layer should be present and dense
+        let counts = metas.iter().find(|m| m.name == "counts")
+            .expect("expected a 'counts' layer");
+        assert!(counts.indptr.is_empty(), "counts layer should be dense (empty indptr)");
+        assert_eq!(counts.shape, (n_obs, n_vars));
+
+        // stream and verify total row coverage
+        let mut total_rows = 0usize;
+        let mut stream = reader.layer_stream(counts, 500);
+        while let Some(res) = stream.next().await {
+            let chunk = res.unwrap();
+            assert!(chunk.nrows > 0);
+            total_rows += chunk.nrows;
+        }
+        assert_eq!(total_rows, n_obs, "streamed rows must equal n_obs");
+    }
+
+    #[tokio::test]
+    async fn test_norman_x_stream_coverage() {
+        let Some(path) = norman_path() else { return; };
+        let (n_obs, _) = H5AdReader::open(&path, 500).unwrap().shape();
+
+        let mut reader = H5AdReader::open(&path, 500).unwrap();
+        let mut total_rows = 0usize;
+        let mut stream = reader.x_stream();
+        while let Some(res) = stream.next().await {
+            total_rows += res.unwrap().nrows;
+        }
+        assert_eq!(total_rows, n_obs);
     }
 }
