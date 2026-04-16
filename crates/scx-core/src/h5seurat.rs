@@ -988,9 +988,10 @@ impl H5SeuratWriter {
         file.create_group("assays")?;
         file.create_group(&format!("assays/{assay}"))?;
         file.create_group(&format!("assays/{assay}/{layer}"))?;
-        file.create_group("graphs")?;   // required by SeuratDisk even when empty
-        file.create_group("misc")?;
-        file.create_group("images")?;
+        // All top-level groups required by SeuratDisk::LoadH5Seurat, even when empty.
+        for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
+            file.create_group(grp)?;
+        }
 
         // Resizable datasets for streaming x-chunk writes.
         let data_path    = format!("assays/{assay}/{layer}/data");
