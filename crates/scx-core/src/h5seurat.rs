@@ -986,7 +986,9 @@ impl H5SeuratWriter {
 
         // Pre-create the group hierarchy needed before the resizable datasets.
         file.create_group("assays")?;
-        file.create_group(&format!("assays/{assay}"))?;
+        let assay_grp = file.create_group(&format!("assays/{assay}"))?;
+        let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
+        assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
         file.create_group(&format!("assays/{assay}/{layer}"))?;
         // All top-level groups required by SeuratDisk::LoadH5Seurat, even when empty.
         for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
@@ -1116,8 +1118,11 @@ impl DatasetWriter for H5SeuratWriter {
     }
 
     async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
-        // Always create the reductions group — SeuratDisk requires it even when empty.
-        let reds_grp = self.file.create_group("reductions")?;
+        // reductions is pre-created in create(); open or create defensively.
+        let reds_grp = match self.file.group("reductions") {
+            Ok(g)  => g,
+            Err(_) => self.file.create_group("reductions")?,
+        };
         if obsm.map.is_empty() {
             return Ok(());
         }
@@ -1615,7 +1620,7 @@ mod tests {
         // Inject misc/ with a scalar dataset and a numeric array
         {
             let file = File::open_rw(&path).unwrap();
-            let misc  = file.create_group("misc").unwrap();
+            let misc  = file.group("misc").or_else(|_| file.create_group("misc")).unwrap();
             let ds    = misc.new_dataset::<f64>().shape(3).create("weights").unwrap();
             ds.write(&Array1::from_vec(vec![0.1f64, 0.2, 0.3])).unwrap();
         }
