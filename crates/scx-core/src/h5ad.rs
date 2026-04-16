@@ -1160,10 +1160,21 @@ impl DatasetReader for H5AdReader {
         let mut metas = Vec::new();
         for name in grp.member_names().unwrap_or_default() {
             let grp_path = format!("layers/{name}");
-            // Skip bare datasets (dense layers) — they need a different streaming path.
-            if file.dataset(&grp_path).is_ok() && file.group(&grp_path).is_err() {
-                tracing::warn!("skipping dense layer '{name}': dense layer streaming not yet supported");
-                continue;
+            // Dense layer: read shape from dataset dimensions, indptr unused for inspect.
+            if let Ok(ds) = file.dataset(&grp_path) {
+                if file.group(&grp_path).is_err() {
+                    let shape = ds.shape();
+                    if shape.len() == 2 {
+                        metas.push(SparseMatrixMeta {
+                            name: name.clone(),
+                            shape: (shape[0], shape[1]),
+                            indptr: Vec::new(),
+                        });
+                    } else {
+                        tracing::warn!("skipping dense layer '{name}': unexpected rank {}", shape.len());
+                    }
+                    continue;
+                }
             }
             match ad_read_sparse_meta(&file, &name, &grp_path) {
                 Ok(m)  => metas.push(m),
