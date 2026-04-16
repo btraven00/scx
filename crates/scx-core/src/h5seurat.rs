@@ -965,15 +965,21 @@ impl H5SeuratWriter {
         dtype: DataType,
         assay: Option<&str>,
         layer: Option<&str>,
+        project: Option<&str>,
     ) -> Result<Self> {
-        let assay = assay.unwrap_or("RNA").to_string();
-        let layer = layer.unwrap_or("counts").to_string();
+        let assay   = assay.unwrap_or("RNA").to_string();
+        let layer   = layer.unwrap_or("counts").to_string();
+        let project = project.unwrap_or("SeuratProject");
 
         let file = File::create(path.as_ref())?;
 
         // Root-level attributes required by SeuratDisk::LoadH5Seurat.
         let root = file.group("/")?;
-        for (name, value) in [("version", "3.1.5.9900"), ("active.assay", assay.as_str())] {
+        for (name, value) in [
+            ("version",      "3.1.5.9900"),
+            ("active.assay", assay.as_str()),
+            ("project",      project),
+        ] {
             let v = VarLenUnicode::from_str(value).unwrap_or_default();
             root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
         }
@@ -1477,7 +1483,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, None, None).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&obsm).await.unwrap();
@@ -1548,7 +1554,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, Some("data")).unwrap();
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, Some("data"), None).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1592,7 +1598,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&path, 1, 1, DataType::F32, None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&path, 1, 1, DataType::F32, None, None, None).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1690,7 +1696,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None, None).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1772,7 +1778,7 @@ mod tests {
         let tmp = NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, src.dtype(), None, None).unwrap();
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, src.dtype(), None, None, None).unwrap();
         writer.write_obs(&src_obs).await.unwrap();
         writer.write_var(&src_var).await.unwrap();
         writer.write_obsm(&src_obsm).await.unwrap();
