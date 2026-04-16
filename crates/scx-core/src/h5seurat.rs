@@ -990,6 +990,7 @@ impl H5SeuratWriter {
         file.create_group(&format!("assays/{assay}/{layer}"))?;
         file.create_group("graphs")?;   // required by SeuratDisk even when empty
         file.create_group("misc")?;
+        file.create_group("images")?;
 
         // Resizable datasets for streaming x-chunk writes.
         let data_path    = format!("assays/{assay}/{layer}/data");

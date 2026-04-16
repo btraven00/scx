@@ -677,6 +677,7 @@ impl BpcellsH5Writer {
         }
         file.create_group("graphs")?;   // required by SeuratDisk even when empty
         file.create_group("misc")?;
+        file.create_group("images")?;
 
         Ok(Self {
             file,
