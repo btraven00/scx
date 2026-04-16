@@ -1,14 +1,14 @@
 context:
   name: scx
-  version: "0.0.1"
+  # SCX_VERSION is set by CI from `git describe`; fallback for local builds.
+  version: ${{ env.SCX_VERSION | default(value="0.0.0.dev0") }}
 
 package:
   name: ${{ name }}
   version: ${{ version }}
 
 source:
-  git: https://github.com/btraven00/scx
-  tag: v${{ version }}
+  path: ../
 
 build:
   number: 0

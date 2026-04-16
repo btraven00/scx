@@ -59,6 +59,8 @@ verify-python = { cmd = "pytest tests/python/ -v", description = "Run pytest int
 verify-r      = { cmd = "Rscript -e \"testthat::test_dir('tests/r', reporter = 'progress')\"", description = "Run testthat integration suite (anndataR oracle)" }
 
 # --- picklerick Python package ---
+prepare-norman-subset  = { cmd = "python scripts/prepare_norman_subset.py --input $NORMAN_H5AD --output tests/golden/norman_subset.h5ad", description = "Subsample full Norman H5AD → committed test fixture (requires NORMAN_H5AD env var)" }
+
 install-picklerick-py = { cmd = "python -m ensurepip && python -m pip install -e python/picklerick", description = "Install the picklerick Python package in editable mode" }
 verify-picklerick-py  = { cmd = "python -m pytest python/picklerick/tests -q", description = "Run picklerick Python package tests" }
 
