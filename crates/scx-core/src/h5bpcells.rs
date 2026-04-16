@@ -675,9 +675,10 @@ impl BpcellsH5Writer {
         if file.group(&format!("assays/{assay}")).is_err() {
             file.create_group(&format!("assays/{assay}"))?;
         }
-        file.create_group("graphs")?;   // required by SeuratDisk even when empty
-        file.create_group("misc")?;
-        file.create_group("images")?;
+        // All top-level groups required by SeuratDisk::LoadH5Seurat, even when empty.
+        for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
+            file.create_group(grp)?;
+        }
 
         Ok(Self {
             file,
