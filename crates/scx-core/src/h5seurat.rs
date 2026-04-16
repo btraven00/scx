@@ -1112,10 +1112,11 @@ impl DatasetWriter for H5SeuratWriter {
     }
 
     async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
+        // Always create the reductions group — SeuratDisk requires it even when empty.
+        let reds_grp = self.file.create_group("reductions")?;
         if obsm.map.is_empty() {
             return Ok(());
         }
-        let reds_grp = self.file.create_group("reductions")?;
         for (key, mat) in &obsm.map {
             let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
             let red_grp  = reds_grp.create_group(red_name)?;
