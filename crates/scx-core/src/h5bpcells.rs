@@ -835,16 +835,11 @@ impl DatasetWriter for BpcellsH5Writer {
             seurat_write_meta_cols_local(&mf_grp, &var.columns)?;
         }
 
-        let reds_grp = if self.obsm.as_ref().map(|x| !x.map.is_empty()).unwrap_or(false)
-            || self.varm.as_ref().map(|x| !x.map.is_empty()).unwrap_or(false)
-        {
-            Some(match self.file.group("reductions") {
-                Ok(g) => g,
-                Err(_) => self.file.create_group("reductions")?,
-            })
-        } else {
-            None
-        };
+        // Always create reductions — SeuratDisk requires it even when empty.
+        let reds_grp = Some(match self.file.group("reductions") {
+            Ok(g) => g,
+            Err(_) => self.file.create_group("reductions")?,
+        });
 
         if let (Some(reds_grp), Some(obsm)) = (&reds_grp, &self.obsm) {
             for (key, mat) in &obsm.map {
