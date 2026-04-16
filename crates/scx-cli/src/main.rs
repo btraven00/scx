@@ -55,6 +55,13 @@ enum Cli {
         /// Write legacy `.h5seurat` output using dgCMatrix storage instead of BPCells
         #[arg(long)]
         dgcmatrix: bool,
+
+        /// H5Seurat slot to write X into: counts, data, or auto (default).
+        ///
+        /// auto: if the source has a layer named "counts", X is assumed to be
+        /// normalised and goes into the "data" slot; otherwise X goes into "counts".
+        #[arg(long, default_value = "auto")]
+        x_slot: String,
     },
 
     /// Inspect a single-cell file
@@ -171,7 +178,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
 
-        Cli::Convert { input, output, chunk_size, dtype, assay, layer, dgcmatrix } => {
+        Cli::Convert { input, output, chunk_size, dtype, assay, layer, dgcmatrix, x_slot } => {
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
                 "f64" => DataType::F64,
@@ -197,22 +204,22 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
                     let mut reader = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
                     let mut reader = H5AdReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
                 }
                 Some(Format::ScxH5) | None => {
                     tracing::info!(path = %input, "detected format: SCX H5 (internal)");
                     let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, chunk_size, dgcmatrix).await?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, chunk_size, dgcmatrix).await?;
                 }
             }
         }
@@ -390,6 +397,7 @@ async fn convert_with_reader(
     out_dtype: DataType,
     out_assay: &str,
     out_layer: &str,
+    x_slot: &str,
     chunk_size: usize,
     use_dgcmatrix: bool,
 ) -> anyhow::Result<()> {
@@ -398,16 +406,6 @@ async fn convert_with_reader(
 
     let is_h5seurat = output.extension().and_then(|e| e.to_str()) == Some("h5seurat");
 
-    tracing::info!(
-        output = %output.display(),
-        n_obs, n_vars,
-        dtype = %out_dtype,
-        format = if is_h5seurat { "h5seurat" } else { "h5ad" },
-        bpcells = is_h5seurat && !use_dgcmatrix,
-        dgcmatrix = use_dgcmatrix && is_h5seurat,
-        "starting conversion"
-    );
-
     let obs          = reader.obs().await?;
     let var          = reader.var().await?;
     let obsm         = reader.obsm().await?;
@@ -415,6 +413,39 @@ async fn convert_with_reader(
     let varm         = reader.varm().await?;
     let layer_metas  = reader.layer_metas().await?;
     let obsp_metas   = reader.obsp_metas().await?;
+
+    // Resolve the effective X slot for H5Seurat output.
+    // auto: if source has a "counts" layer, X is assumed normalised → goes to "data".
+    // Explicit "counts" or "data" overrides the heuristic.
+    let effective_x_slot: &str = if is_h5seurat {
+        match x_slot {
+            "auto" => {
+                if layer_metas.iter().any(|m| m.name == "counts") {
+                    tracing::info!(
+                        "source has a 'counts' layer — writing X to 'data' slot, \
+                         'counts' layer to 'counts' slot (use --x-slot counts to override)"
+                    );
+                    "data"
+                } else {
+                    out_layer
+                }
+            }
+            other => other,
+        }
+    } else {
+        out_layer
+    };
+
+    tracing::info!(
+        output = %output.display(),
+        n_obs, n_vars,
+        dtype = %out_dtype,
+        format = if is_h5seurat { "h5seurat" } else { "h5ad" },
+        bpcells = is_h5seurat && !use_dgcmatrix,
+        dgcmatrix = use_dgcmatrix && is_h5seurat,
+        x_slot = effective_x_slot,
+        "starting conversion"
+    );
 
     tracing::info!(
         obs_cols   = obs.columns.len(),
@@ -427,9 +458,9 @@ async fn convert_with_reader(
 
     let mut writer: Box<dyn DatasetWriter> = if is_h5seurat {
         if use_dgcmatrix {
-            Box::new(H5SeuratWriter::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(out_layer))?)
+            Box::new(H5SeuratWriter::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot))?)
         } else {
-            Box::new(BpcellsH5Writer::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(out_layer))?)
+            Box::new(BpcellsH5Writer::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot))?)
         }
     } else {
         Box::new(H5AdWriter::create(output, n_obs, n_vars, out_dtype)?)
@@ -441,8 +472,16 @@ async fn convert_with_reader(
     writer.write_uns(&uns).await?;
     writer.write_varm(&varm).await?;
 
-    // Stream each layer — one at a time, never holding more than chunk_size rows.
+    // Stream each layer — skip any whose name would collide with the X slot.
     for meta in &layer_metas {
+        if is_h5seurat && meta.name == effective_x_slot {
+            tracing::warn!(
+                name = %meta.name,
+                "skipping layer '{}': same name as X slot — \
+                 use --x-slot to change slot assignment", meta.name
+            );
+            continue;
+        }
         tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming layer");
         writer.begin_sparse("layers", &meta.name, meta).await?;
         let mut stream = reader.layer_stream(meta, chunk_size);
