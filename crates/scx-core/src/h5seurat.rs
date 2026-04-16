@@ -1354,9 +1354,14 @@ mod tests {
     use futures::StreamExt;
 
     const GOLDEN: &str = "../../tests/golden/pbmc3k.h5seurat";
+    const NORMAN_FIXTURE: &str = "../../tests/fixtures/norman_subset.h5ad";
 
     fn golden_exists() -> bool {
         std::path::Path::new(GOLDEN).exists()
+    }
+
+    fn norman_exists() -> bool {
+        std::path::Path::new(NORMAN_FIXTURE).exists()
     }
 
     #[test]
@@ -1733,5 +1738,69 @@ mod tests {
         for (a, b) in rt_pca.data.iter().zip(varm_mat.data.iter()) {
             assert!((a - b).abs() < 1e-10, "varm data mismatch: {a} vs {b}");
         }
+    }
+
+    // --- Norman obs round-trip: H5AD → H5Seurat → read back ---
+
+    #[tokio::test]
+    async fn test_norman_obs_roundtrip() {
+        use crate::h5ad::H5AdReader;
+        use tempfile::NamedTempFile;
+
+        if !norman_exists() { return; }
+
+        // Read the Norman subset H5AD.
+        let fixture = std::path::Path::new(NORMAN_FIXTURE);
+        let mut src = H5AdReader::open(fixture, 500).unwrap();
+        let (n_obs, n_vars) = src.shape();
+        let src_obs  = src.obs().await.unwrap();
+        let src_var  = src.var().await.unwrap();
+        let src_obsm = src.obsm().await.unwrap();
+        let src_uns  = src.uns().await.unwrap();
+
+        let src_col_names: Vec<&str> = src_obs.columns.iter().map(|c| c.name.as_str()).collect();
+        eprintln!("source obs columns: {src_col_names:?}");
+
+        // Convert to H5Seurat.
+        let tmp = NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let out = tmp.path().to_path_buf();
+
+        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, src.dtype(), None, None).unwrap();
+        writer.write_obs(&src_obs).await.unwrap();
+        writer.write_var(&src_var).await.unwrap();
+        writer.write_obsm(&src_obsm).await.unwrap();
+        writer.write_uns(&src_uns).await.unwrap();
+        {
+            let mut stream = src.x_stream();
+            while let Some(chunk) = stream.next().await {
+                writer.write_x_chunk(&chunk.unwrap()).await.unwrap();
+            }
+        }
+        // Skip layers — the "counts" layer would collide with the X path in H5Seurat.
+        // Obs fidelity is what this test exercises.
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        // Read back via H5SeuratReader and check obs fidelity.
+        let mut rt = H5SeuratReader::open(&out, 500, None, None).unwrap();
+        assert_eq!(rt.shape(), (n_obs, n_vars), "shape mismatch after round-trip");
+
+        let rt_obs = rt.obs().await.unwrap();
+        assert_eq!(rt_obs.index.len(), n_obs, "obs index length mismatch");
+
+        // Every source column must survive the round-trip.
+        for src_col in &src_obs.columns {
+            let rt_col = rt_obs.columns.iter().find(|c| c.name == src_col.name)
+                .unwrap_or_else(|| panic!("obs column '{}' missing after round-trip", src_col.name));
+
+            // Dtype class must be preserved.
+            let src_kind = std::mem::discriminant(&src_col.data);
+            let rt_kind  = std::mem::discriminant(&rt_col.data);
+            assert_eq!(src_kind, rt_kind,
+                "obs column '{}' changed dtype after round-trip", src_col.name);
+        }
+
+        eprintln!("norman obs round-trip OK: {n_obs} cells, {} columns",
+                  rt_obs.columns.len());
     }
 }
