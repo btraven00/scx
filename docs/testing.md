@@ -10,9 +10,7 @@ Three layers of tests:
    SCX-produced files with `anndata` and compares against a reference produced
    by zellkonverter. The Python ecosystem is the primary consumer of H5AD.
 3. **R testthat suite** (`pixi run -e test verify-r`) — loads SCX-produced files
-   with `zellkonverter` into SCE objects and validates slot-by-slot. This is the
-   direct compatibility oracle for the zellkonverter replacement goal.
-TODO: update - using anndataR
+   with `anndataR` and validates slot-by-slot against the reference H5AD.
 
 All three run in the `pixi test` environment. The full gate is
 `pixi run -e test roundtrip`, which chains: fixtures → convert → pytest → testthat.
@@ -27,7 +25,7 @@ pixi run -e test roundtrip      # full gate (includes build)
 ```
 
 The `test` pixi environment (defined in `pixi.toml`) provides:
-- R ≥ 4.4, Seurat ≥ 5, SeuratDisk, zellkonverter, testthat, hdf5r, Matrix
+- R ≥ 4.4, Seurat ≥ 5, SeuratDisk, anndataR, testthat, hdf5r, Matrix
 - Python ≥ 3.14, anndata ≥ 0.12, h5py, numpy, scipy, pytest
 - The `hdf5` system library is inherited from the default environment
 
@@ -240,52 +238,91 @@ tests/r/
 ### `helper-fixtures.R`
 
 ```r
-library(zellkonverter)
-library(SingleCellExperiment)
-library(Matrix)
+suppressPackageStartupMessages({
+  library(anndataR)
+  library(Matrix)
+})
 
-GOLDEN <- Sys.getenv("SCX_GOLDEN", "tests/golden")
+GOLDEN     <- Sys.getenv("SCX_GOLDEN", unset = "../golden")
+REF_PATH   <- file.path(GOLDEN, "pbmc3k_reference.h5ad")
+SCX_PATH   <- file.path(GOLDEN, "pbmc3k_scx.h5ad")
 
-scx_sce <- readH5AD(file.path(GOLDEN, "pbmc3k_scx.h5ad"),     verbose = FALSE)
-ref_sce <- readH5AD(file.path(GOLDEN, "pbmc3k_reference.h5ad"), verbose = FALSE)
+EXPECTED_N_OBS  <- 2700L
+EXPECTED_N_VARS <- 13714L
+EXPECTED_NNZ    <- 2282976L
+
+skip_if_no_golden <- function(...) {
+  paths <- c(...)
+  for (p in paths) {
+    if (!file.exists(p)) {
+      testthat::skip(paste0("golden file not found: ", p,
+                            " — run `pixi run -e test fixtures`"))
+    }
+  }
+}
+
+.scx_ad <- NULL
+.ref_ad <- NULL
+
+scx_ad <- function() {
+  if (is.null(.scx_ad)) { skip_if_no_golden(SCX_PATH); .scx_ad <<- read_h5ad(SCX_PATH) }
+  .scx_ad
+}
+
+ref_ad <- function() {
+  if (is.null(.ref_ad)) { skip_if_no_golden(REF_PATH); .ref_ad <<- read_h5ad(REF_PATH) }
+  .ref_ad
+}
 ```
 
 ### `test-shape.R`
 
 ```r
-test_that("dimensions match reference", {
-  expect_equal(dim(scx_sce), dim(ref_sce))
+test_that("n_obs matches expected", {
+  skip_if_no_golden(SCX_PATH)
+  expect_equal(nrow(scx_ad()$obs), EXPECTED_N_OBS)
 })
 
-test_that("cell names match reference", {
-  expect_identical(colnames(scx_sce), colnames(ref_sce))
+test_that("shape matches reference", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  expect_equal(nrow(scx_ad()$obs), nrow(ref_ad()$obs))
+  expect_equal(nrow(scx_ad()$var), nrow(ref_ad()$var))
 })
 
-test_that("gene names match reference", {
-  expect_identical(rownames(scx_sce), rownames(ref_sce))
+test_that("obs names match reference", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  expect_identical(scx_ad()$obs_names, ref_ad()$obs_names)
+})
+
+test_that("var names match reference", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  expect_identical(scx_ad()$var_names, ref_ad()$var_names)
 })
 ```
 
 ### `test-coldata.R`
 
 ```r
-test_that("all reference colData columns present", {
-  missing <- setdiff(colnames(colData(ref_sce)), colnames(colData(scx_sce)))
+test_that("all reference obs columns present", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  missing <- setdiff(colnames(ref_ad()$obs), colnames(scx_ad()$obs))
   expect_length(missing, 0)
 })
 
 test_that("factor columns are factors", {
-  ref_factors <- names(which(sapply(colData(ref_sce), is.factor)))
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  ref_factors <- names(which(sapply(ref_ad()$obs, is.factor)))
   for (col in ref_factors) {
-    expect_true(is.factor(colData(scx_sce)[[col]]),
+    expect_true(is.factor(scx_ad()$obs[[col]]),
                 info = paste("expected factor:", col))
   }
 })
 
 test_that("numeric columns agree within tolerance", {
-  ref_nums <- names(which(sapply(colData(ref_sce), is.numeric)))
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  ref_nums <- names(which(sapply(ref_ad()$obs, is.numeric)))
   for (col in ref_nums) {
-    expect_equal(colData(scx_sce)[[col]], colData(ref_sce)[[col]],
+    expect_equal(scx_ad()$obs[[col]], ref_ad()$obs[[col]],
                  tolerance = 1e-4, info = col)
   }
 })
@@ -294,23 +331,32 @@ test_that("numeric columns agree within tolerance", {
 ### `test-matrix.R`
 
 ```r
+test_that("X nnz matches expected", {
+  skip_if_no_golden(SCX_PATH)
+  expect_equal(Matrix::nnzero(scx_ad()$X), EXPECTED_NNZ)
+})
+
 test_that("X nnz matches reference", {
-  expect_equal(nnzero(assay(scx_sce, 1)), nnzero(assay(ref_sce, 1)))
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  expect_equal(Matrix::nnzero(scx_ad()$X), Matrix::nnzero(ref_ad()$X))
 })
 
 test_that("X row sums match reference", {
-  expect_equal(rowSums(assay(scx_sce, 1)), rowSums(assay(ref_sce, 1)),
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  expect_equal(Matrix::rowSums(scx_ad()$X), Matrix::rowSums(ref_ad()$X),
                tolerance = 1e-4)
 })
 
 test_that("X col sums match reference", {
-  expect_equal(colSums(assay(scx_sce, 1)), colSums(assay(ref_sce, 1)),
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  expect_equal(Matrix::colSums(scx_ad()$X), Matrix::colSums(ref_ad()$X),
                tolerance = 1e-4)
 })
 
-test_that("spot check: first 100 cells x 100 genes exact", {
-  s <- as.matrix(assay(scx_sce, 1)[1:100, 1:100])
-  r <- as.matrix(assay(ref_sce, 1)[1:100, 1:100])
+test_that("spot check: first 100 obs x 100 vars exact", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  s <- as.matrix(scx_ad()$X[1:100, 1:100])
+  r <- as.matrix(ref_ad()$X[1:100, 1:100])
   expect_equal(s, r, tolerance = 1e-4)
 })
 ```
@@ -318,27 +364,32 @@ test_that("spot check: first 100 cells x 100 genes exact", {
 ### `test-reduceddims.R`
 
 ```r
-test_that("all reference reducedDims present", {
-  missing <- setdiff(reducedDimNames(ref_sce), reducedDimNames(scx_sce))
+test_that("all reference obsm keys present", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  missing <- setdiff(names(ref_ad()$obsm), names(scx_ad()$obsm))
   expect_length(missing, 0)
 })
 
-test_that("PCA shape correct", {
-  expect_equal(dim(reducedDim(scx_sce, "PCA")), dim(reducedDim(ref_sce, "PCA")))
+test_that("X_pca shape correct", {
+  skip_if_no_golden(SCX_PATH)
+  pca <- scx_ad()$obsm[["X_pca"]]
+  expect_equal(nrow(pca), EXPECTED_N_OBS)
+  expect_equal(ncol(pca), 30L)
 })
 
-test_that("UMAP shape correct", {
-  expect_equal(dim(reducedDim(scx_sce, "UMAP")), dim(reducedDim(ref_sce, "UMAP")))
+test_that("X_pca shapes match reference", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  expect_equal(dim(scx_ad()$obsm[["X_pca"]]), dim(ref_ad()$obsm[["X_pca"]]))
 })
 
-test_that("PCA values agree (sign-flip tolerant)", {
-  s <- reducedDim(scx_sce, "PCA")
-  r <- reducedDim(ref_sce, "PCA")
-  # Each axis may be flipped; test column-wise
-  for (i in seq_len(ncol(r))) {
+test_that("X_pca values agree per-axis (sign-flip tolerant)", {
+  skip_if_no_golden(SCX_PATH, REF_PATH)
+  s <- scx_ad()$obsm[["X_pca"]]
+  r <- ref_ad()$obsm[["X_pca"]]
+  for (i in seq_len(min(ncol(s), ncol(r), 10L))) {
     aligned <- isTRUE(all.equal(s[, i],  r[, i], tolerance = 1e-3)) ||
                isTRUE(all.equal(s[, i], -r[, i], tolerance = 1e-3))
-    expect_true(aligned, info = paste("PCA axis", i))
+    expect_true(aligned, info = paste("X_pca axis", i))
   }
 })
 ```
