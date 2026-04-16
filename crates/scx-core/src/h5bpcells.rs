@@ -672,9 +672,13 @@ impl BpcellsH5Writer {
         if file.group("assays").is_err() {
             file.create_group("assays")?;
         }
-        if file.group(&format!("assays/{assay}")).is_err() {
-            file.create_group(&format!("assays/{assay}"))?;
-        }
+        let assay_grp = if file.group(&format!("assays/{assay}")).is_err() {
+            file.create_group(&format!("assays/{assay}"))?
+        } else {
+            file.group(&format!("assays/{assay}"))?
+        };
+        let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
+        assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
         // All top-level groups required by SeuratDisk::LoadH5Seurat, even when empty.
         for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
             file.create_group(grp)?;
