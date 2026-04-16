@@ -971,6 +971,13 @@ impl H5SeuratWriter {
 
         let file = File::create(path.as_ref())?;
 
+        // Root-level attributes required by SeuratDisk::LoadH5Seurat.
+        let root = file.group("/")?;
+        for (name, value) in [("version", "3.1.5.9900"), ("active.assay", assay.as_str())] {
+            let v = VarLenUnicode::from_str(value).unwrap_or_default();
+            root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+        }
+
         // Pre-create the group hierarchy needed before the resizable datasets.
         file.create_group("assays")?;
         file.create_group(&format!("assays/{assay}"))?;

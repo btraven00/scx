@@ -656,6 +656,13 @@ impl BpcellsH5Writer {
         let layer = layer.unwrap_or("counts").to_string();
         let file = File::create(path.as_ref())?;
 
+        // Root-level attributes required by SeuratDisk::LoadH5Seurat.
+        let root = file.group("/")?;
+        for (name, value) in [("version", "3.1.5.9900"), ("active.assay", assay.as_str())] {
+            let v = VarLenUnicode::from_str(value).unwrap_or_default();
+            root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+        }
+
         if file.group("assays").is_err() {
             file.create_group("assays")?;
         }
