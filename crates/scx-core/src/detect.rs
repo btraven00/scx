@@ -22,18 +22,25 @@ pub enum Format {
     ScxH5,
     /// NPY snapshot directory (contains `meta.json`).
     NpyDir,
+    /// BPCells directory-format matrix (contains `version` + `storage_order`).
+    BPCells,
 }
 
-/// Sniff the format of a directory by checking for `meta.json`.
+/// Sniff the format of a directory.
 ///
-/// Returns `Some(Format::NpyDir)` if `path` is a directory containing
-/// `meta.json`, `None` otherwise.
+/// - `Format::NpyDir`  — directory contains `meta.json`
+/// - `Format::BPCells` — directory contains `version` + `storage_order`
 pub fn sniff_dir(path: &Path) -> Option<Format> {
-    if path.is_dir() && path.join("meta.json").exists() {
-        Some(Format::NpyDir)
-    } else {
-        None
+    if !path.is_dir() {
+        return None;
     }
+    if path.join("meta.json").exists() {
+        return Some(Format::NpyDir);
+    }
+    if path.join("version").exists() && path.join("storage_order").exists() {
+        return Some(Format::BPCells);
+    }
+    None
 }
 
 /// Sniff the format of `path` by inspecting HDF5 structure.

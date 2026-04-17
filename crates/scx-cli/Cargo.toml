@@ -11,6 +11,7 @@ path = "src/main.rs"
 scx-core = { path = "../scx-core" }
 anyhow = "1"
 serde_json = "1"
+serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

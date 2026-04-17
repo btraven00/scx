@@ -1,4 +1,5 @@
 pub mod bpcells;
+pub mod validate;
 pub mod detect;
 pub mod h5bpcells;
 pub mod dtype;
