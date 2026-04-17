@@ -229,16 +229,41 @@ async fn collect_info(
     let obsp_metas   = reader.obsp_metas().await?;
     let varm         = reader.varm().await?;
 
-    let obs_cols:   Vec<String> = obs.columns.iter().map(|c| c.name.clone()).collect();
-    let var_cols:   Vec<String> = var.columns.iter().map(|c| c.name.clone()).collect();
-    let obsm_keys:  Vec<String> = obsm.map.keys().cloned().collect();
-    let layer_keys: Vec<String> = layer_metas.iter().map(|m| m.name.clone()).collect();
-    let obsp_keys:  Vec<String> = obsp_metas.iter().map(|m| m.name.clone()).collect();
-    let varm_keys:  Vec<String> = varm.map.keys().cloned().collect();
-    let uns_keys:   Vec<String> = uns.raw
+    let obs_cols:  Vec<String> = obs.columns.iter().map(|c| c.name.clone()).collect();
+    let var_cols:  Vec<String> = var.columns.iter().map(|c| c.name.clone()).collect();
+    let obsm_keys: Vec<String> = obsm.map.keys().cloned().collect();
+    let varm_keys: Vec<String> = varm.map.keys().cloned().collect();
+    let uns_keys:  Vec<String> = uns.raw
         .as_object()
         .map(|obj| obj.keys().cloned().collect())
         .unwrap_or_default();
+
+    // per-layer and per-obsp nnz stats (free from indptr, no matrix streaming)
+    // Returned as parallel named vectors — R-idiomatic, avoids nested list issues.
+    fn sparse_stats(metas: &[scx_core::ir::SparseMatrixMeta]) -> Robj {
+        let mut names: Vec<String>  = Vec::new();
+        let mut nnz_vec: Vec<i32>   = Vec::new();
+        let mut q1_vec:  Vec<i32>   = Vec::new();
+        let mut med_vec: Vec<i32>   = Vec::new();
+        let mut q3_vec:  Vec<i32>   = Vec::new();
+        let mut max_vec: Vec<i32>   = Vec::new();
+        for m in metas {
+            let mut per_row: Vec<u64> = m.indptr.windows(2).map(|w| w[1] - w[0]).collect();
+            per_row.sort_unstable();
+            let n = per_row.len();
+            let q = |p: f64| if n == 0 { 0i32 } else { per_row[(p * (n - 1) as f64).round() as usize] as i32 };
+            names.push(m.name.clone());
+            nnz_vec.push(m.indptr.last().copied().unwrap_or(0) as i32);
+            q1_vec.push(q(0.25));
+            med_vec.push(q(0.5));
+            q3_vec.push(q(0.75));
+            max_vec.push(per_row.last().copied().unwrap_or(0) as i32);
+        }
+        list!(name = names, nnz = nnz_vec, nnz_q1 = q1_vec,
+              nnz_med = med_vec, nnz_q3 = q3_vec, nnz_max = max_vec).into_robj()
+    }
+    let layer_list = sparse_stats(&layer_metas);
+    let obsp_list  = sparse_stats(&obsp_metas);
 
     Ok(list!(
         format    = format_name,
@@ -247,9 +272,9 @@ async fn collect_info(
         obs_cols  = obs_cols,
         var_cols  = var_cols,
         obsm_keys = obsm_keys,
-        layers    = layer_keys,
+        layers    = layer_list,
         uns_keys  = uns_keys,
-        obsp_keys = obsp_keys,
+        obsp      = obsp_list,
         varm_keys = varm_keys
     ).into_robj())
 }
