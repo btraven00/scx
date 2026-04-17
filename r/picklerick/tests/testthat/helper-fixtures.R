@@ -1,8 +1,3 @@
-suppressPackageStartupMessages({
-  library(anndataR)
-  library(Matrix)
-})
-
 # Locate golden fixtures relative to the package root.
 # testthat::test_dir() sets cwd to the test directory, so go up twice.
 PKG_ROOT   <- normalizePath(file.path(getwd(), "../.."))
