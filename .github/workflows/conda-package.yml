@@ -91,15 +91,18 @@ jobs:
       - name: Build conda package
         shell: bash
         run: |
+          # Output dir MUST be outside the source tree, or rattler-build
+          # recurses into its own work dir while copying the path source
+          # and fails with ENAMETOOLONG (upstream issue #2045).
           rattler-build build --recipe conda.recipe/recipe.yaml \
-            --output-dir rattler-output \
+            --output-dir "${RUNNER_TEMP}/rattler-output" \
             --target-platform ${{ matrix.platform.target }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.platform.target }}
-          path: rattler-output/
+          path: ${{ runner.temp }}/rattler-output/
           retention-days: 7
           if-no-files-found: error
 

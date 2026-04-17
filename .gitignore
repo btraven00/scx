@@ -1,4 +1,6 @@
 /target/
+/rattler-output/
+/output/
 tests/golden/*.h5seurat
 tests/golden/*.h5ad
 tests/golden/*.json
