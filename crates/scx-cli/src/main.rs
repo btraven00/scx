@@ -318,8 +318,10 @@ async fn run() -> anyhow::Result<()> {
                 });
 
             let source_sha256 = if input_path.is_file() {
-                Some(provenance::sha256_file(input_path)
-                    .map_err(|e| anyhow::anyhow!("hashing source '{input}': {e}"))?)
+                Some(
+                    provenance::sha256_file(input_path)
+                        .map_err(|e| anyhow::anyhow!("hashing source '{input}': {e}"))?,
+                )
             } else {
                 None
             };
@@ -436,8 +438,17 @@ async fn run() -> anyhow::Result<()> {
             let record = ProvenanceRecord {
                 scx_version: env!("CARGO_PKG_VERSION").to_string(),
                 converted_at: provenance::utc_now_rfc3339(),
-                source: SourceInfo { path: input, url: source_url, sha256: source_sha256 },
-                output: OutputInfo { path: output.clone(), sha256: output_sha256, n_obs, n_vars },
+                source: SourceInfo {
+                    path: input,
+                    url: source_url,
+                    sha256: source_sha256,
+                },
+                output: OutputInfo {
+                    path: output.clone(),
+                    sha256: output_sha256,
+                    n_obs,
+                    n_vars,
+                },
             };
             provenance::write_sidecar(&record, output_path)
                 .map_err(|e| anyhow::anyhow!("writing provenance sidecar: {e}"))?;
@@ -671,10 +682,20 @@ async fn convert_with_reader(
     let mut uns = reader.uns().await?;
     let varm = reader.varm().await?;
 
-    let prov = scx_core::provenance::det_record(source_path, source_url, source_sha256.as_deref(), n_obs, n_vars);
+    let prov = scx_core::provenance::det_record(
+        source_path,
+        source_url,
+        source_sha256.as_deref(),
+        n_obs,
+        n_vars,
+    );
     match uns.raw.as_object_mut() {
-        Some(obj) => { obj.insert("scx_provenance".to_string(), prov); }
-        None => { uns.raw = serde_json::json!({ "scx_provenance": prov }); }
+        Some(obj) => {
+            obj.insert("scx_provenance".to_string(), prov);
+        }
+        None => {
+            uns.raw = serde_json::json!({ "scx_provenance": prov });
+        }
     }
 
     let layer_metas = reader.layer_metas().await?;
