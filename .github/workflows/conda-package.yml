@@ -58,17 +58,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Fetch tags
-        run: git fetch --tags --force
+          fetch-tags: true
 
       - name: Compute version
         shell: bash
         run: |
           # v0.0.1-0-gabcdef  → 0.0.1       (exact tag)
           # v0.0.1-5-gabcdef  → 0.0.1.post5 (N commits after tag)
+          COMMIT_COUNT=$(git rev-list --count HEAD)
           RAW=$(git describe --tags --long --match 'v*' 2>/dev/null \
-                || echo "v0.0.0-0-g$(git rev-parse --short HEAD)")
+                || echo "v0.0.0-${COMMIT_COUNT}-g$(git rev-parse --short HEAD)")
           TAG=$(echo "$RAW" | sed 's/^v//' | sed 's/-.*//')
           N=$(echo "$RAW"   | sed 's/[^-]*-//' | cut -d- -f1)
           if [ "$N" = "0" ]; then
