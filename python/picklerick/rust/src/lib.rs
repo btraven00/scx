@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion)]
+
 use std::path::Path;
 
 use futures::StreamExt;
@@ -25,15 +27,15 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-fn parse_dtype(dtype: &str) -> PyResult<DataType> {
+fn parse_dtype(dtype: &str) -> anyhow::Result<DataType> {
     match dtype {
         "f32" => Ok(DataType::F32),
         "f64" => Ok(DataType::F64),
         "i32" => Ok(DataType::I32),
         "u32" => Ok(DataType::U32),
-        other => Err(PyRuntimeError::new_err(format!(
+        other => Err(anyhow::anyhow!(
             "unknown dtype '{other}': use f32, f64, i32, or u32"
-        ))),
+        )),
     }
 }
 
@@ -177,11 +179,11 @@ fn scx_convert_native(
     assay: &str,
     layer: &str,
 ) -> PyResult<()> {
-    let out_dtype = parse_dtype(dtype)?;
     let input_path = Path::new(input);
     let output_path = Path::new(output);
 
     let result = block_on(async {
+        let out_dtype = parse_dtype(dtype)?;
         let mut reader = open_reader(input_path, chunk_size, assay, layer)?;
         do_convert(&mut *reader, output_path, out_dtype, chunk_size).await
     });
@@ -200,7 +202,7 @@ fn scx_write_h5seurat_native(
     let output_path = Path::new(output);
 
     let result = block_on(async {
-        let mut reader = H5AdReader::open(input_path, chunk_size).map_err(anyhow::Error::from)?;
+        let mut reader = H5AdReader::open(input_path, chunk_size)?;
         do_convert_h5seurat(&mut reader, output_path, DataType::F32, assay, chunk_size).await
     });
 
