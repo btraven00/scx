@@ -990,7 +990,7 @@ fn ad_read_obsm(path: &Path, n_obs: usize) -> Result<Embeddings> {
             arr
         };
         let shape = (arr.shape()[0], arr.shape()[1]);
-        map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec() });
+        map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
     }
     Ok(Embeddings { map })
 }
@@ -1284,7 +1284,7 @@ impl DatasetReader for H5AdReader {
             match ds.read::<f64, ndarray::Ix2>() {
                 Ok(arr) => {
                     let shape = (arr.shape()[0], arr.shape()[1]);
-                    map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec() });
+                    map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
                 }
                 Err(e) => tracing::warn!("skipping varm['{name}']: {e}"),
             }
