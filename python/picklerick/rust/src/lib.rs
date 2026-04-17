@@ -6,12 +6,14 @@ use futures::StreamExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use scx_core::{
+    bpcells::BpcellsDatasetReader,
     detect,
     detect::Format,
     dtype::DataType,
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5seurat::H5SeuratWriter,
+    ir::ColumnData,
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -74,10 +76,91 @@ fn open_reader(
             let reader = ScxH5Reader::open(input_path, chunk_size)?;
             Ok(Box::new(reader))
         }
+        Some(Format::BPCells) => {
+            let reader = BpcellsDatasetReader::open(input_path, chunk_size)?;
+            Ok(Box::new(reader))
+        }
         other => Err(anyhow::anyhow!(
-            "unsupported input format for native conversion: {other:?}"
+            "unsupported input format: {other:?}"
         )),
     }
+}
+
+fn open_reader_metadata_only(input_path: &Path) -> anyhow::Result<Box<dyn DatasetReader>> {
+    let fmt = detect_format(input_path);
+    match fmt {
+        Some(Format::H5Seurat) => {
+            let reader = scx_core::h5seurat::open_h5seurat(input_path, 1, None, None)?;
+            Ok(reader)
+        }
+        Some(Format::H5Ad) | None => {
+            Ok(Box::new(H5AdReader::open(input_path, 1)?))
+        }
+        Some(Format::ScxH5) => {
+            Ok(Box::new(ScxH5Reader::open(input_path, 1)?))
+        }
+        Some(Format::BPCells) => {
+            Ok(Box::new(BpcellsDatasetReader::open_metadata_only(input_path)?))
+        }
+        other => Err(anyhow::anyhow!("unsupported input format: {other:?}")),
+    }
+}
+
+async fn collect_inspect_info(
+    reader: &mut dyn DatasetReader,
+    format_name: &str,
+    py: Python<'_>,
+) -> anyhow::Result<PyObject> {
+    let (n_obs, n_vars) = reader.shape();
+    let obs         = reader.obs().await?;
+    let var         = reader.var().await?;
+    let obsm        = reader.obsm().await?;
+    let uns         = reader.uns().await?;
+    let layer_metas = reader.layer_metas().await?;
+    let obsp_metas  = reader.obsp_metas().await?;
+    let varm        = reader.varm().await?;
+
+    let obs_cols:   Vec<&str> = obs.columns.iter().map(|c| c.name.as_str()).collect();
+    let var_cols:   Vec<&str> = var.columns.iter().map(|c| c.name.as_str()).collect();
+    let obsm_keys:  Vec<&str> = obsm.map.keys().map(|s| s.as_str()).collect();
+    let layer_keys: Vec<&str> = layer_metas.iter().map(|m| m.name.as_str()).collect();
+    let obsp_keys:  Vec<&str> = obsp_metas.iter().map(|m| m.name.as_str()).collect();
+    let varm_keys:  Vec<&str> = varm.map.keys().map(|s| s.as_str()).collect();
+    let uns_keys:   Vec<String> = uns.raw
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+
+    // obs col dtypes
+    let obs_dtypes: Vec<&str> = obs.columns.iter().map(|c| match &c.data {
+        ColumnData::Float(_)        => "float64",
+        ColumnData::Int(_)          => "int32",
+        ColumnData::Bool(_)         => "bool",
+        ColumnData::String(_)       => "string",
+        ColumnData::Categorical {..}=> "categorical",
+    }).collect();
+    let var_dtypes: Vec<&str> = var.columns.iter().map(|c| match &c.data {
+        ColumnData::Float(_)        => "float64",
+        ColumnData::Int(_)          => "int32",
+        ColumnData::Bool(_)         => "bool",
+        ColumnData::String(_)       => "string",
+        ColumnData::Categorical {..}=> "categorical",
+    }).collect();
+
+    let d = pyo3::types::PyDict::new_bound(py);
+    d.set_item("format",     format_name)?;
+    d.set_item("n_obs",      n_obs as i64)?;
+    d.set_item("n_vars",     n_vars as i64)?;
+    d.set_item("obs_cols",   obs_cols)?;
+    d.set_item("obs_dtypes", obs_dtypes)?;
+    d.set_item("var_cols",   var_cols)?;
+    d.set_item("var_dtypes", var_dtypes)?;
+    d.set_item("obsm_keys",  obsm_keys)?;
+    d.set_item("layers",     layer_keys)?;
+    d.set_item("uns_keys",   uns_keys)?;
+    d.set_item("obsp_keys",  obsp_keys)?;
+    d.set_item("varm_keys",  varm_keys)?;
+    Ok(d.unbind().into())
 }
 
 async fn write_aux_sparse_matrices(
@@ -209,9 +292,30 @@ fn scx_write_h5seurat_native(
     result.map_err(py_err)
 }
 
+#[pyfunction]
+fn scx_inspect_native(py: Python<'_>, input: &str, chunk_size: usize) -> PyResult<PyObject> {
+    let input_path = Path::new(input);
+    let fmt = detect_format(input_path);
+    let format_name = match fmt {
+        Some(Format::H5Seurat) => "H5Seurat",
+        Some(Format::H5Ad)     => "H5AD",
+        Some(Format::ScxH5)    => "ScxH5",
+        Some(Format::BPCells)  => "BPCells",
+        _                      => "unknown",
+    };
+
+    let result = block_on(async {
+        let mut reader = open_reader_metadata_only(input_path)?;
+        collect_inspect_info(&mut *reader, format_name, py).await
+    });
+
+    result.map_err(py_err)
+}
+
 #[pymodule]
 fn picklerick_py_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scx_convert_native, m)?)?;
     m.add_function(wrap_pyfunction!(scx_write_h5seurat_native, m)?)?;
+    m.add_function(wrap_pyfunction!(scx_inspect_native, m)?)?;
     Ok(())
 }
