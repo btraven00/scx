@@ -13,8 +13,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use hdf5::{File, Group};
 use hdf5::types::{VarLenAscii, VarLenUnicode};
+use hdf5::{File, Group};
 use ndarray::Array1;
 
 use crate::bpcells::{
@@ -22,7 +22,10 @@ use crate::bpcells::{
 };
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
-use crate::ir::{Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
+use crate::ir::{
+    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable,
+    Varm,
+};
 use crate::stream::DatasetWriter;
 use ndarray::Array2;
 
@@ -33,9 +36,9 @@ fn read_u32s(grp: &Group, name: &str) -> Result<Vec<u32>> {
     let ds = grp.dataset(name).map_err(|e| {
         ScxError::InvalidFormat(format!("BPCells HDF5: missing dataset '{name}': {e}"))
     })?;
-    let arr: Array1<u32> = ds.read_1d().map_err(|e| {
-        ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}"))
-    })?;
+    let arr: Array1<u32> = ds
+        .read_1d()
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}")))?;
     Ok(arr.to_vec())
 }
 
@@ -44,9 +47,9 @@ fn read_u64s(grp: &Group, name: &str) -> Result<Vec<u64>> {
     let ds = grp.dataset(name).map_err(|e| {
         ScxError::InvalidFormat(format!("BPCells HDF5: missing dataset '{name}': {e}"))
     })?;
-    let arr: Array1<u64> = ds.read_1d().map_err(|e| {
-        ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}"))
-    })?;
+    let arr: Array1<u64> = ds
+        .read_1d()
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}")))?;
     Ok(arr.to_vec())
 }
 
@@ -55,9 +58,9 @@ fn read_f32s(grp: &Group, name: &str) -> Result<Vec<f32>> {
     let ds = grp.dataset(name).map_err(|e| {
         ScxError::InvalidFormat(format!("BPCells HDF5: missing dataset '{name}': {e}"))
     })?;
-    let arr: Array1<f32> = ds.read_1d().map_err(|e| {
-        ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}"))
-    })?;
+    let arr: Array1<f32> = ds
+        .read_1d()
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}")))?;
     Ok(arr.to_vec())
 }
 
@@ -66,9 +69,9 @@ fn read_f64s(grp: &Group, name: &str) -> Result<Vec<f64>> {
     let ds = grp.dataset(name).map_err(|e| {
         ScxError::InvalidFormat(format!("BPCells HDF5: missing dataset '{name}': {e}"))
     })?;
-    let arr: Array1<f64> = ds.read_1d().map_err(|e| {
-        ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}"))
-    })?;
+    let arr: Array1<f64> = ds
+        .read_1d()
+        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: reading '{name}': {e}")))?;
     Ok(arr.to_vec())
 }
 
@@ -82,15 +85,15 @@ fn read_strings(grp: &Group, name: &str) -> Result<Vec<String>> {
     }
     match ds.dtype().and_then(|t| t.to_descriptor()) {
         Ok(hdf5::types::TypeDescriptor::VarLenAscii) => {
-            let arr: Array1<VarLenAscii> = ds.read_1d().map_err(|e| {
-                ScxError::InvalidFormat(format!("reading '{name}': {e}"))
-            })?;
+            let arr: Array1<VarLenAscii> = ds
+                .read_1d()
+                .map_err(|e| ScxError::InvalidFormat(format!("reading '{name}': {e}")))?;
             Ok(arr.into_iter().map(|s| s.to_string()).collect())
         }
         _ => {
-            let arr: Array1<VarLenUnicode> = ds.read_1d().map_err(|e| {
-                ScxError::InvalidFormat(format!("reading '{name}': {e}"))
-            })?;
+            let arr: Array1<VarLenUnicode> = ds
+                .read_1d()
+                .map_err(|e| ScxError::InvalidFormat(format!("reading '{name}': {e}")))?;
             Ok(arr.into_iter().map(|s| s.to_string()).collect())
         }
     }
@@ -122,17 +125,25 @@ pub fn read_version_attr(grp: &Group) -> Option<String> {
 fn seurat_write_strings_local(grp: &Group, name: &str, strings: &[String]) -> Result<()> {
     if grp.link_exists(name) {
         grp.unlink(name).map_err(|e| {
-            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+            ScxError::InvalidFormat(format!(
+                "BPCells HDF5: removing existing dataset '{name}': {e}"
+            ))
         })?;
     }
     let vals: Vec<VarLenUnicode> = strings
         .iter()
         .map(|s| {
-            <VarLenUnicode as std::str::FromStr>::from_str(s)
-                .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: invalid UTF-8 string for '{name}': {e}")))
+            <VarLenUnicode as std::str::FromStr>::from_str(s).map_err(|e| {
+                ScxError::InvalidFormat(format!(
+                    "BPCells HDF5: invalid UTF-8 string for '{name}': {e}"
+                ))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
-    let ds = grp.new_dataset::<VarLenUnicode>().shape(vals.len()).create(name)?;
+    let ds = grp
+        .new_dataset::<VarLenUnicode>()
+        .shape(vals.len())
+        .create(name)?;
     ds.write(&Array1::from_vec(vals))?;
     Ok(())
 }
@@ -158,7 +169,10 @@ fn seurat_write_col_local(grp: &Group, name: &str, data: &ColumnData) -> Result<
         ColumnData::Categorical { codes, levels } => {
             let col_grp = grp.create_group(name)?;
             let values: Vec<i32> = codes.iter().map(|&c| c as i32 + 1).collect();
-            let ds = col_grp.new_dataset::<i32>().shape(values.len()).create("values")?;
+            let ds = col_grp
+                .new_dataset::<i32>()
+                .shape(values.len())
+                .create("values")?;
             ds.write(&Array1::from_vec(values))?;
             seurat_write_strings_local(&col_grp, "levels", levels)?;
         }
@@ -170,13 +184,11 @@ fn seurat_write_meta_cols_local(grp: &Group, columns: &[Column]) -> Result<()> {
     let logical_names: Vec<VarLenUnicode> = columns
         .iter()
         .filter(|c| matches!(c.data, ColumnData::Bool(_)))
-        .map(|c| {
-            <VarLenUnicode as std::str::FromStr>::from_str(&c.name)
-                .unwrap_or_default()
-        })
+        .map(|c| <VarLenUnicode as std::str::FromStr>::from_str(&c.name).unwrap_or_default())
         .collect();
     if !logical_names.is_empty() {
-        let attr = grp.new_attr::<VarLenUnicode>()
+        let attr = grp
+            .new_attr::<VarLenUnicode>()
             .shape(logical_names.len())
             .create("logicals")?;
         attr.write(&Array1::from_vec(logical_names))?;
@@ -186,14 +198,16 @@ fn seurat_write_meta_cols_local(grp: &Group, columns: &[Column]) -> Result<()> {
         .iter()
         .map(|c| <VarLenUnicode as std::str::FromStr>::from_str(&c.name).unwrap_or_default())
         .collect();
-    let col_attr = grp.new_attr::<VarLenUnicode>()
+    let col_attr = grp
+        .new_attr::<VarLenUnicode>()
         .shape(colnames.len())
         .create("colnames")?;
     col_attr.write(&Array1::from_vec(colnames))?;
 
     if grp.name() == "/meta.data" {
         let class_vals = vec![VarLenUnicode::from_str("data.frame").unwrap_or_default()];
-        let class_attr = grp.new_attr::<VarLenUnicode>()
+        let class_attr = grp
+            .new_attr::<VarLenUnicode>()
             .shape(class_vals.len())
             .create("_class")?;
         class_attr.write(&Array1::from_vec(class_vals))?;
@@ -205,7 +219,11 @@ fn seurat_write_meta_cols_local(grp: &Group, columns: &[Column]) -> Result<()> {
     Ok(())
 }
 
-fn seurat_write_json_value_local(parent: &Group, name: &str, value: &serde_json::Value) -> Result<()> {
+fn seurat_write_json_value_local(
+    parent: &Group,
+    name: &str,
+    value: &serde_json::Value,
+) -> Result<()> {
     match value {
         serde_json::Value::Null => Ok(()),
         serde_json::Value::Bool(b) => {
@@ -227,7 +245,10 @@ fn seurat_write_json_value_local(parent: &Group, name: &str, value: &serde_json:
             Ok(())
         }
         serde_json::Value::String(s) => {
-            let ds = parent.new_dataset::<VarLenUnicode>().shape(1).create(name)?;
+            let ds = parent
+                .new_dataset::<VarLenUnicode>()
+                .shape(1)
+                .create(name)?;
             let vals = vec![VarLenUnicode::from_str(s).unwrap_or_default()];
             ds.write(&Array1::from_vec(vals))?;
             Ok(())
@@ -239,20 +260,30 @@ fn seurat_write_json_value_local(parent: &Group, name: &str, value: &serde_json:
                 return Ok(());
             }
 
-            if arr.iter().all(|v| matches!(v, serde_json::Value::Number(_))) {
-                let vals: Vec<f64> = arr.iter()
-                    .map(|v| v.as_f64().unwrap_or(0.0))
-                    .collect();
+            if arr
+                .iter()
+                .all(|v| matches!(v, serde_json::Value::Number(_)))
+            {
+                let vals: Vec<f64> = arr.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
                 let ds = parent.new_dataset::<f64>().shape(vals.len()).create(name)?;
                 ds.write(&Array1::from_vec(vals))?;
                 return Ok(());
             }
 
-            if arr.iter().all(|v| matches!(v, serde_json::Value::String(_))) {
-                let vals: Vec<VarLenUnicode> = arr.iter()
-                    .map(|v| VarLenUnicode::from_str(v.as_str().unwrap_or_default()).unwrap_or_default())
+            if arr
+                .iter()
+                .all(|v| matches!(v, serde_json::Value::String(_)))
+            {
+                let vals: Vec<VarLenUnicode> = arr
+                    .iter()
+                    .map(|v| {
+                        VarLenUnicode::from_str(v.as_str().unwrap_or_default()).unwrap_or_default()
+                    })
                     .collect();
-                let ds = parent.new_dataset::<VarLenUnicode>().shape(vals.len()).create(name)?;
+                let ds = parent
+                    .new_dataset::<VarLenUnicode>()
+                    .shape(vals.len())
+                    .create(name)?;
                 ds.write(&Array1::from_vec(vals))?;
                 return Ok(());
             }
@@ -301,7 +332,9 @@ fn seurat_write_uns_local(file: &File, uns: &UnsTable) -> Result<()> {
 fn write_u32s(grp: &Group, name: &str, values: &[u32]) -> Result<()> {
     if grp.link_exists(name) {
         grp.unlink(name).map_err(|e| {
-            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+            ScxError::InvalidFormat(format!(
+                "BPCells HDF5: removing existing dataset '{name}': {e}"
+            ))
         })?;
     }
     grp.new_dataset_builder()
@@ -315,7 +348,9 @@ fn write_u32s(grp: &Group, name: &str, values: &[u32]) -> Result<()> {
 fn write_u64s(grp: &Group, name: &str, values: &[u64]) -> Result<()> {
     if grp.link_exists(name) {
         grp.unlink(name).map_err(|e| {
-            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+            ScxError::InvalidFormat(format!(
+                "BPCells HDF5: removing existing dataset '{name}': {e}"
+            ))
         })?;
     }
     grp.new_dataset_builder()
@@ -329,7 +364,9 @@ fn write_u64s(grp: &Group, name: &str, values: &[u64]) -> Result<()> {
 fn write_f32s(grp: &Group, name: &str, values: &[f32]) -> Result<()> {
     if grp.link_exists(name) {
         grp.unlink(name).map_err(|e| {
-            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+            ScxError::InvalidFormat(format!(
+                "BPCells HDF5: removing existing dataset '{name}': {e}"
+            ))
         })?;
     }
     grp.new_dataset_builder()
@@ -343,7 +380,9 @@ fn write_f32s(grp: &Group, name: &str, values: &[f32]) -> Result<()> {
 fn write_f64s(grp: &Group, name: &str, values: &[f64]) -> Result<()> {
     if grp.link_exists(name) {
         grp.unlink(name).map_err(|e| {
-            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+            ScxError::InvalidFormat(format!(
+                "BPCells HDF5: removing existing dataset '{name}': {e}"
+            ))
         })?;
     }
     grp.new_dataset_builder()
@@ -357,14 +396,19 @@ fn write_f64s(grp: &Group, name: &str, values: &[f64]) -> Result<()> {
 fn write_strings(grp: &Group, name: &str, values: &[String]) -> Result<()> {
     if grp.link_exists(name) {
         grp.unlink(name).map_err(|e| {
-            ScxError::InvalidFormat(format!("BPCells HDF5: removing existing dataset '{name}': {e}"))
+            ScxError::InvalidFormat(format!(
+                "BPCells HDF5: removing existing dataset '{name}': {e}"
+            ))
         })?;
     }
     let vals: Vec<VarLenUnicode> = values
         .iter()
         .map(|s| {
-            <VarLenUnicode as std::str::FromStr>::from_str(s)
-                .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: invalid UTF-8 string for '{name}': {e}")))
+            <VarLenUnicode as std::str::FromStr>::from_str(s).map_err(|e| {
+                ScxError::InvalidFormat(format!(
+                    "BPCells HDF5: invalid UTF-8 string for '{name}': {e}"
+                ))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     grp.new_dataset_builder()
@@ -378,21 +422,29 @@ fn write_strings(grp: &Group, name: &str, values: &[String]) -> Result<()> {
 fn write_version_attr(grp: &Group, version: &str) -> Result<()> {
     if grp.attr("version").is_ok() {
         grp.attr("version")
-            .and_then(|a| a.write_scalar(
-                &<VarLenUnicode as std::str::FromStr>::from_str(version)
-                    .map_err(|e| hdf5::Error::Internal(format!("invalid version string: {e}")))?,
-            ))
-            .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: writing 'version' attr: {e}")))?;
+            .and_then(|a| {
+                a.write_scalar(
+                    &<VarLenUnicode as std::str::FromStr>::from_str(version).map_err(|e| {
+                        hdf5::Error::Internal(format!("invalid version string: {e}"))
+                    })?,
+                )
+            })
+            .map_err(|e| {
+                ScxError::InvalidFormat(format!("BPCells HDF5: writing 'version' attr: {e}"))
+            })?;
         return Ok(());
     }
 
-    let v = <VarLenUnicode as std::str::FromStr>::from_str(version)
-        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: invalid version string: {e}")))?;
+    let v = <VarLenUnicode as std::str::FromStr>::from_str(version).map_err(|e| {
+        ScxError::InvalidFormat(format!("BPCells HDF5: invalid version string: {e}"))
+    })?;
     grp.new_attr::<VarLenUnicode>()
         .shape(())
         .create("version")
         .and_then(|a| a.write_scalar(&v))
-        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating 'version' attr: {e}")))?;
+        .map_err(|e| {
+            ScxError::InvalidFormat(format!("BPCells HDF5: creating 'version' attr: {e}"))
+        })?;
     Ok(())
 }
 
@@ -438,23 +490,23 @@ pub fn write_bpcells_h5(
     // Encode indices and values per-run so chunk boundaries align with run
     // boundaries. This is required by BPCells: runs must be independently
     // decodable.
-    let mut all_index_data:  Vec<u32> = Vec::new();
-    let mut all_index_idx:   Vec<u32> = Vec::new();
+    let mut all_index_data: Vec<u32> = Vec::new();
+    let mut all_index_idx: Vec<u32> = Vec::new();
     let mut all_index_starts: Vec<u32> = Vec::new();
     let mut index_idx_offsets: Vec<u64> = Vec::with_capacity(n_runs + 1);
     index_idx_offsets.push(0);
 
     // For Uint32 values only (floats have no compression index).
     let mut all_val_data: Vec<u32> = Vec::new();
-    let mut all_val_idx:  Vec<u32> = Vec::new();
+    let mut all_val_idx: Vec<u32> = Vec::new();
     let mut val_idx_offsets: Vec<u64> = Vec::with_capacity(n_runs + 1);
     val_idx_offsets.push(0);
 
     for r in 0..n_runs {
         let col_start = r * 128;
-        let col_end   = ((r + 1) * 128).min(ncol);
+        let col_end = ((r + 1) * 128).min(ncol);
         let nnz_start = idxptr[col_start] as usize;
-        let nnz_end   = idxptr[col_end]   as usize;
+        let nnz_end = idxptr[col_end] as usize;
 
         // Encode this run's row indices.
         let (run_idx_data, mut run_idx_idx, run_idx_starts) =
@@ -462,10 +514,12 @@ pub fn write_bpcells_h5(
 
         // Adjust run-local idx offsets to be global (offset by data written so far).
         let idx_data_offset = all_index_data.len() as u32;
-        for v in &mut run_idx_idx { *v += idx_data_offset; }
+        for v in &mut run_idx_idx {
+            *v += idx_data_offset;
+        }
 
         all_index_data.extend_from_slice(&run_idx_data);
-        all_index_idx.extend_from_slice(&run_idx_idx);  // includes per-run sentinel
+        all_index_idx.extend_from_slice(&run_idx_idx); // includes per-run sentinel
         all_index_starts.extend_from_slice(&run_idx_starts);
         index_idx_offsets.push(all_index_idx.len() as u64);
 
@@ -473,23 +527,25 @@ pub fn write_bpcells_h5(
         if let ValStore::Uint32(v) = values {
             let (run_val_data, mut run_val_idx) = encode_for(&v[nnz_start..nnz_end]);
             let val_data_offset = all_val_data.len() as u32;
-            for vv in &mut run_val_idx { *vv += val_data_offset; }
+            for vv in &mut run_val_idx {
+                *vv += val_data_offset;
+            }
             all_val_data.extend_from_slice(&run_val_data);
             all_val_idx.extend_from_slice(&run_val_idx);
             val_idx_offsets.push(all_val_idx.len() as u64);
         }
     }
 
-    write_u32s(&grp, "index_data",        &all_index_data)?;
-    write_u32s(&grp, "index_idx",         &all_index_idx)?;
+    write_u32s(&grp, "index_data", &all_index_data)?;
+    write_u32s(&grp, "index_idx", &all_index_idx)?;
     write_u64s(&grp, "index_idx_offsets", &index_idx_offsets)?;
-    write_u32s(&grp, "index_starts",      &all_index_starts)?;
+    write_u32s(&grp, "index_starts", &all_index_starts)?;
 
     match values {
         ValStore::Uint32(_) => {
             write_version_attr(&grp, "packed-uint-matrix-v2")?;
-            write_u32s(&grp, "val_data",        &all_val_data)?;
-            write_u32s(&grp, "val_idx",         &all_val_idx)?;
+            write_u32s(&grp, "val_data", &all_val_data)?;
+            write_u32s(&grp, "val_idx", &all_val_idx)?;
             write_u64s(&grp, "val_idx_offsets", &val_idx_offsets)?;
         }
         ValStore::Float32(v) => {
@@ -701,22 +757,32 @@ impl BpcellsH5Writer {
         project: Option<&str>,
         seuratdisk_compat: bool,
     ) -> Result<Self> {
-        let assay   = assay.unwrap_or("RNA").to_string();
-        let layer   = layer.unwrap_or("counts").to_string();
+        let assay = assay.unwrap_or("RNA").to_string();
+        let layer = layer.unwrap_or("counts").to_string();
         let project = project.unwrap_or("SeuratProject");
         let file = File::create(path.as_ref())?;
 
         if seuratdisk_compat {
             let root = file.group("/")?;
             for (name, value) in [
-                ("version",      "3.1.5.9900"),
+                ("version", "3.1.5.9900"),
                 ("active.assay", assay.as_str()),
-                ("project",      project),
+                ("project", project),
             ] {
                 let v = VarLenUnicode::from_str(value).unwrap_or_default();
-                root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+                root.new_attr::<VarLenUnicode>()
+                    .create(name)?
+                    .write_scalar(&v)?;
             }
-            for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
+            for grp in &[
+                "commands",
+                "graphs",
+                "images",
+                "misc",
+                "neighbors",
+                "reductions",
+                "tools",
+            ] {
                 file.create_group(grp)?;
             }
         }
@@ -730,8 +796,12 @@ impl BpcellsH5Writer {
             file.group(&format!("assays/{assay}"))?
         };
         if seuratdisk_compat {
-            let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
-            assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
+            let key =
+                VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
+            assay_grp
+                .new_attr::<VarLenUnicode>()
+                .create("key")?
+                .write_scalar(&key)?;
         }
 
         Ok(Self {
@@ -778,7 +848,12 @@ impl DatasetWriter for BpcellsH5Writer {
         Ok(())
     }
 
-    async fn begin_sparse(&mut self, group_prefix: &str, name: &str, meta: &SparseMatrixMeta) -> Result<()> {
+    async fn begin_sparse(
+        &mut self,
+        group_prefix: &str,
+        name: &str,
+        meta: &SparseMatrixMeta,
+    ) -> Result<()> {
         if self.sparse_state.is_some() {
             return Err(ScxError::InvalidFormat(
                 "BPCells writer: begin_sparse called while another sparse matrix is open".into(),
@@ -801,7 +876,9 @@ impl DatasetWriter for BpcellsH5Writer {
 
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
         let state = self.sparse_state.as_mut().ok_or_else(|| {
-            ScxError::InvalidFormat("BPCells writer: write_sparse_chunk called without begin_sparse".into())
+            ScxError::InvalidFormat(
+                "BPCells writer: write_sparse_chunk called without begin_sparse".into(),
+            )
         })?;
         state.accumulator.push_chunk(chunk)
     }
@@ -925,11 +1002,13 @@ impl DatasetWriter for BpcellsH5Writer {
                 };
                 let assay_attr = vec![VarLenUnicode::from_str(&self.assay).unwrap_or_default()];
                 let key_attr = vec![VarLenUnicode::from_str(key).unwrap_or_default()];
-                let attr = red_grp.new_attr::<VarLenUnicode>()
+                let attr = red_grp
+                    .new_attr::<VarLenUnicode>()
                     .shape(assay_attr.len())
                     .create("active.assay")?;
                 attr.write(&Array1::from_vec(assay_attr))?;
-                let attr = red_grp.new_attr::<VarLenUnicode>()
+                let attr = red_grp
+                    .new_attr::<VarLenUnicode>()
                     .shape(key_attr.len())
                     .create("key")?;
                 attr.write(&Array1::from_vec(key_attr))?;
@@ -961,14 +1040,16 @@ impl DatasetWriter for BpcellsH5Writer {
 
                 if red_grp.attr("active.assay").is_err() {
                     let assay_attr = vec![VarLenUnicode::from_str(&self.assay).unwrap_or_default()];
-                    let attr = red_grp.new_attr::<VarLenUnicode>()
+                    let attr = red_grp
+                        .new_attr::<VarLenUnicode>()
                         .shape(assay_attr.len())
                         .create("active.assay")?;
                     attr.write(&Array1::from_vec(assay_attr))?;
                 }
                 if red_grp.attr("key").is_err() {
                     let key_attr = vec![VarLenUnicode::from_str("").unwrap_or_default()];
-                    let attr = red_grp.new_attr::<VarLenUnicode>()
+                    let attr = red_grp
+                        .new_attr::<VarLenUnicode>()
                         .shape(key_attr.len())
                         .create("key")?;
                     attr.write(&Array1::from_vec(key_attr))?;
@@ -1022,7 +1103,9 @@ pub fn open_bpcells_h5(
     chunk_size: usize,
 ) -> Result<BpcellsDatasetReader> {
     let grp = file.group(group_path).map_err(|e| {
-        ScxError::InvalidFormat(format!("BPCells HDF5: can't open group '{group_path}': {e}"))
+        ScxError::InvalidFormat(format!(
+            "BPCells HDF5: can't open group '{group_path}': {e}"
+        ))
     })?;
 
     let version = read_version_attr(&grp).ok_or_else(|| {
@@ -1046,7 +1129,9 @@ pub fn open_bpcells_h5(
     // --- shape: [nrow, ncol] ---
     let shape = read_u32s(&grp, "shape")?;
     if shape.len() < 2 {
-        return Err(ScxError::InvalidFormat("BPCells HDF5: shape has < 2 elements".into()));
+        return Err(ScxError::InvalidFormat(
+            "BPCells HDF5: shape has < 2 elements".into(),
+        ));
     }
     let (nrow, ncol) = (shape[0] as usize, shape[1] as usize);
 
@@ -1055,7 +1140,10 @@ pub fn open_bpcells_h5(
         read_u64s(&grp, "idxptr")?
     } else {
         // v1 stores idxptr as uint32
-        read_u32s(&grp, "idxptr")?.into_iter().map(|v| v as u64).collect()
+        read_u32s(&grp, "idxptr")?
+            .into_iter()
+            .map(|v| v as u64)
+            .collect()
     };
     let total_nnz = *idxptr.last().unwrap_or(&0) as usize;
 
@@ -1066,34 +1154,34 @@ pub fn open_bpcells_h5(
     // --- index + values depending on version ---
     let (index, values) = match version.as_str() {
         v if v.starts_with("packed-uint-") => {
-            let idx_data   = read_u32s(&grp, "index_data")?;
-            let idx_idx    = read_u32s(&grp, "index_idx")?;
+            let idx_data = read_u32s(&grp, "index_data")?;
+            let idx_idx = read_u32s(&grp, "index_idx")?;
             let idx_starts = read_u32s(&grp, "index_starts")?;
-            let val_data   = read_u32s(&grp, "val_data")?;
-            let val_idx    = read_u32s(&grp, "val_idx")?;
+            let val_data = read_u32s(&grp, "val_data")?;
+            let val_idx = read_u32s(&grp, "val_idx")?;
             let index = decode_d1z(&idx_data, &idx_idx, &idx_starts, total_nnz);
-            let vals  = decode_for(&val_data, &val_idx, total_nnz);
+            let vals = decode_for(&val_data, &val_idx, total_nnz);
             (index, ValStore::Uint32(vals))
         }
         v if v.starts_with("unpacked-uint-") => {
             let index = read_u32s(&grp, "index")?;
-            let vals  = read_u32s(&grp, "val")?;
+            let vals = read_u32s(&grp, "val")?;
             (index, ValStore::Uint32(vals))
         }
         v if v.starts_with("packed-float-") => {
-            let idx_data   = read_u32s(&grp, "index_data")?;
-            let idx_idx    = read_u32s(&grp, "index_idx")?;
+            let idx_data = read_u32s(&grp, "index_data")?;
+            let idx_idx = read_u32s(&grp, "index_idx")?;
             let idx_starts = read_u32s(&grp, "index_starts")?;
             let index = decode_d1z(&idx_data, &idx_idx, &idx_starts, total_nnz);
-            let vals  = read_f32s(&grp, "val")?;
+            let vals = read_f32s(&grp, "val")?;
             (index, ValStore::Float32(vals))
         }
         v if v.starts_with("packed-double-") => {
-            let idx_data   = read_u32s(&grp, "index_data")?;
-            let idx_idx    = read_u32s(&grp, "index_idx")?;
+            let idx_data = read_u32s(&grp, "index_data")?;
+            let idx_idx = read_u32s(&grp, "index_idx")?;
             let idx_starts = read_u32s(&grp, "index_starts")?;
             let index = decode_d1z(&idx_data, &idx_idx, &idx_starts, total_nnz);
-            let vals  = read_f64s(&grp, "val")?;
+            let vals = read_f64s(&grp, "val")?;
             (index, ValStore::Float64(vals))
         }
         other => {
@@ -1110,7 +1198,7 @@ pub fn open_bpcells_h5(
     };
 
     let dtype = match &values {
-        ValStore::Uint32(_)  => DataType::U32,
+        ValStore::Uint32(_) => DataType::U32,
         ValStore::Float32(_) => DataType::F32,
         ValStore::Float64(_) => DataType::F64,
     };
@@ -1128,7 +1216,13 @@ mod tests {
     #[test]
     fn bp128_pack_roundtrip_all_bit_widths() {
         for b in 0u8..=32 {
-            let mask = if b == 32 { u32::MAX } else if b == 0 { 0 } else { (1u32 << b) - 1 };
+            let mask = if b == 32 {
+                u32::MAX
+            } else if b == 0 {
+                0
+            } else {
+                (1u32 << b) - 1
+            };
             let mut vals = [0u32; 128];
             for (i, v) in vals.iter_mut().enumerate() {
                 let base = ((i as u32).wrapping_mul(2654435761)).rotate_left((i % 31) as u32);
@@ -1195,7 +1289,10 @@ mod tests {
         let reopened = open_bpcells_h5(&file, "matrix", 2).unwrap();
         assert_eq!(reopened.n_obs, 2);
         assert_eq!(reopened.n_vars, 3);
-        assert_eq!(read_version_attr(&file.group("matrix").unwrap()).as_deref(), Some("packed-uint-matrix-v2"));
+        assert_eq!(
+            read_version_attr(&file.group("matrix").unwrap()).as_deref(),
+            Some("packed-uint-matrix-v2")
+        );
     }
 
     #[test]
@@ -1227,14 +1324,20 @@ mod tests {
         let reopened = open_bpcells_h5(&file, "matrix", 2).unwrap();
         assert_eq!(reopened.n_obs, 3);
         assert_eq!(reopened.n_vars, 2);
-        assert_eq!(read_version_attr(&file.group("matrix").unwrap()).as_deref(), Some("packed-float-matrix-v2"));
+        assert_eq!(
+            read_version_attr(&file.group("matrix").unwrap()).as_deref(),
+            Some("packed-float-matrix-v2")
+        );
     }
 
     #[tokio::test]
     async fn bpcells_writer_preserves_obsm_varm_uns_layers_and_obsp_for_h5seurat_reader() {
         use crate::dtype::TypedVec;
         use crate::h5seurat::H5SeuratReader;
-        use crate::ir::{DenseMatrix, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm};
+        use crate::ir::{
+            DenseMatrix, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable,
+            VarTable, Varm,
+        };
         use crate::stream::{DatasetReader, DatasetWriter};
         use futures::StreamExt;
 
@@ -1255,23 +1358,14 @@ mod tests {
             "X_pca".into(),
             DenseMatrix {
                 shape: (n_obs, 2),
-                data: vec![
-                    1.0, 2.0,
-                    3.0, 4.0,
-                    5.0, 6.0,
-                ],
+                data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             },
         );
 
         let mut varm = Varm::default();
         let varm_mat = DenseMatrix {
             shape: (n_vars, 2),
-            data: vec![
-                10.0, 11.0,
-                12.0, 13.0,
-                14.0, 15.0,
-                16.0, 17.0,
-            ],
+            data: vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
         };
         varm.map.insert("X_pca".into(), varm_mat.clone());
 
@@ -1316,7 +1410,9 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
+        let mut writer =
+            BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false)
+                .unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&obsm).await.unwrap();
@@ -1338,10 +1434,16 @@ mod tests {
             indptr: obsp_chunk.data.indptr.clone(),
         };
 
-        writer.begin_sparse("layers", "data", &layer_meta).await.unwrap();
+        writer
+            .begin_sparse("layers", "data", &layer_meta)
+            .await
+            .unwrap();
         writer.write_sparse_chunk(&layer_chunk).await.unwrap();
         writer.end_sparse().await.unwrap();
-        writer.begin_sparse("obsp", "knn", &obsp_meta).await.unwrap();
+        writer
+            .begin_sparse("obsp", "knn", &obsp_meta)
+            .await
+            .unwrap();
         writer.write_sparse_chunk(&obsp_chunk).await.unwrap();
         writer.end_sparse().await.unwrap();
         writer.write_x_chunk(&x_chunk).await.unwrap();
@@ -1374,7 +1476,10 @@ mod tests {
         assert_eq!(rt_uns.raw["nested"]["beta"], serde_json::json!([1.0, 2.0]));
 
         let layer_metas = reader.layer_metas().await.unwrap();
-        let lm = layer_metas.iter().find(|m| m.name == "data").expect("layers['data'] missing");
+        let lm = layer_metas
+            .iter()
+            .find(|m| m.name == "data")
+            .expect("layers['data'] missing");
         assert_eq!(lm.shape, layer_meta.shape);
 
         let seen_nnz = {
@@ -1393,7 +1498,10 @@ mod tests {
         assert!(seen_nnz > 0, "layer stream should yield non-empty chunks");
 
         let obsp_metas = reader.obsp_metas().await.unwrap();
-        let om = obsp_metas.iter().find(|m| m.name == "knn").expect("obsp['knn'] missing");
+        let om = obsp_metas
+            .iter()
+            .find(|m| m.name == "knn")
+            .expect("obsp['knn'] missing");
         assert_eq!(om.shape, obsp_meta.shape);
 
         let mut stream = reader.obsp_stream(om, 10);
@@ -1424,7 +1532,7 @@ mod tests {
         use crate::stream::{DatasetReader, DatasetWriter};
         use futures::StreamExt;
 
-        let n_obs  = 3usize;
+        let n_obs = 3usize;
         let n_vars = 4usize;
 
         let obs = ObsTable {
@@ -1451,7 +1559,9 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
+        let mut writer =
+            BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false)
+                .unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_x_chunk(&chunk).await.unwrap();
@@ -1459,15 +1569,11 @@ mod tests {
         drop(writer);
 
         // Expected dense [obs × vars], row-major
-        let expected: Vec<f64> = vec![
-            1.0, 0.0, 2.0, 0.0,
-            0.0, 3.0, 0.0, 0.0,
-            4.0, 0.0, 0.0, 5.0,
-        ];
+        let expected: Vec<f64> = vec![1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 4.0, 0.0, 0.0, 5.0];
 
         let mut reader = H5SeuratReader::open(&path, 1000, None, None).unwrap();
         let (rt_n_obs, rt_n_vars) = reader.shape();
-        assert_eq!(rt_n_obs,  n_obs,  "n_obs mismatch");
+        assert_eq!(rt_n_obs, n_obs, "n_obs mismatch");
         assert_eq!(rt_n_vars, n_vars, "n_vars mismatch");
 
         let mut dense = vec![0.0f64; n_obs * n_vars];
@@ -1480,10 +1586,10 @@ mod tests {
                 for k in csr.indptr[row] as usize..csr.indptr[row + 1] as usize {
                     let var_i = csr.indices[k] as usize;
                     dense[obs_i * n_vars + var_i] = match &csr.data {
-                        TypedVec::U32(v)  => v[k] as f64,
-                        TypedVec::F32(v)  => v[k] as f64,
-                        TypedVec::F64(v)  => v[k],
-                        TypedVec::I32(v)  => v[k] as f64,
+                        TypedVec::U32(v) => v[k] as f64,
+                        TypedVec::F32(v) => v[k] as f64,
+                        TypedVec::F64(v) => v[k],
+                        TypedVec::I32(v) => v[k] as f64,
                     };
                 }
             }
@@ -1495,30 +1601,40 @@ mod tests {
     /// survives the BpcellsH5Writer → H5SeuratReader round-trip.
     #[tokio::test]
     async fn bpcells_writer_obs_var_metadata_roundtrip() {
+        use crate::dtype::TypedVec;
         use crate::h5seurat::H5SeuratReader;
         use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
         use crate::stream::{DatasetReader, DatasetWriter};
-        use crate::dtype::TypedVec;
 
-        let n_obs  = 3usize;
+        let n_obs = 3usize;
         let n_vars = 2usize;
 
         let obs = ObsTable {
             index: vec!["cell_A".into(), "cell_B".into(), "cell_C".into()],
             columns: vec![
-                Column { name: "n_counts".into(), data: ColumnData::Float(vec![100.0, 200.0, 300.0]) },
-                Column { name: "is_doublet".into(), data: ColumnData::Bool(vec![false, true, false]) },
-                Column { name: "cell_type".into(), data: ColumnData::Categorical {
-                    codes: vec![0, 1, 0],
-                    levels: vec!["T cell".into(), "B cell".into()],
-                }},
+                Column {
+                    name: "n_counts".into(),
+                    data: ColumnData::Float(vec![100.0, 200.0, 300.0]),
+                },
+                Column {
+                    name: "is_doublet".into(),
+                    data: ColumnData::Bool(vec![false, true, false]),
+                },
+                Column {
+                    name: "cell_type".into(),
+                    data: ColumnData::Categorical {
+                        codes: vec![0, 1, 0],
+                        levels: vec!["T cell".into(), "B cell".into()],
+                    },
+                },
             ],
         };
         let var = VarTable {
             index: vec!["GeneA".into(), "GeneB".into()],
-            columns: vec![
-                Column { name: "highly_variable".into(), data: ColumnData::Bool(vec![true, false]) },
-            ],
+            columns: vec![Column {
+                name: "highly_variable".into(),
+                data: ColumnData::Bool(vec![true, false]),
+            }],
         };
 
         let chunk = MatrixChunk {
@@ -1535,7 +1651,9 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
+        let mut writer =
+            BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false)
+                .unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_x_chunk(&chunk).await.unwrap();
@@ -1549,7 +1667,10 @@ mod tests {
         assert_eq!(rt_obs.index, obs.index, "cell names mismatch");
 
         // n_counts float column
-        let nc = rt_obs.columns.iter().find(|c| c.name == "n_counts")
+        let nc = rt_obs
+            .columns
+            .iter()
+            .find(|c| c.name == "n_counts")
             .expect("n_counts column missing");
         if let ColumnData::Float(vals) = &nc.data {
             assert_eq!(vals.len(), n_obs);
@@ -1561,7 +1682,10 @@ mod tests {
         }
 
         // is_doublet bool column
-        let id = rt_obs.columns.iter().find(|c| c.name == "is_doublet")
+        let id = rt_obs
+            .columns
+            .iter()
+            .find(|c| c.name == "is_doublet")
             .expect("is_doublet column missing");
         if let ColumnData::Bool(vals) = &id.data {
             assert_eq!(vals, &[false, true, false], "is_doublet mismatch");
@@ -1570,7 +1694,10 @@ mod tests {
         }
 
         // cell_type categorical column
-        let ct = rt_obs.columns.iter().find(|c| c.name == "cell_type")
+        let ct = rt_obs
+            .columns
+            .iter()
+            .find(|c| c.name == "cell_type")
             .expect("cell_type column missing");
         if let ColumnData::Categorical { codes, levels } = &ct.data {
             assert_eq!(codes, &[0u32, 1, 0], "cell_type codes mismatch");
@@ -1590,12 +1717,12 @@ mod tests {
     ///   /assays/RNA/features — gene feature names
     #[tokio::test]
     async fn bpcells_writer_cell_gene_names_in_seurat_locations() {
+        use crate::dtype::TypedVec;
         use crate::ir::{MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
         use crate::stream::DatasetWriter;
-        use crate::dtype::TypedVec;
         use hdf5::types::VarLenUnicode;
 
-        let n_obs  = 2usize;
+        let n_obs = 2usize;
         let n_vars = 3usize;
 
         let obs = ObsTable {
@@ -1621,7 +1748,9 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false).unwrap();
+        let mut writer =
+            BpcellsH5Writer::create(&path, n_obs, n_vars, DataType::U32, None, None, None, false)
+                .unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_x_chunk(&chunk).await.unwrap();
@@ -1631,26 +1760,38 @@ mod tests {
         // Verify directly in the HDF5 file — same checks Seurat v5 would perform
         let file = hdf5::File::open(&path).unwrap();
 
-        let cell_names: Vec<VarLenUnicode> = file.dataset("cell.names")
+        let cell_names: Vec<VarLenUnicode> = file
+            .dataset("cell.names")
             .expect("/cell.names missing")
             .read_1d::<VarLenUnicode>()
             .unwrap()
             .to_vec();
         let cell_strs: Vec<&str> = cell_names.iter().map(|s| s.as_str()).collect();
-        assert_eq!(cell_strs, ["ACGT-1", "TGCA-2"], "/cell.names content mismatch");
+        assert_eq!(
+            cell_strs,
+            ["ACGT-1", "TGCA-2"],
+            "/cell.names content mismatch"
+        );
 
-        let features: Vec<VarLenUnicode> = file.dataset("assays/RNA/features")
+        let features: Vec<VarLenUnicode> = file
+            .dataset("assays/RNA/features")
             .expect("/assays/RNA/features missing")
             .read_1d::<VarLenUnicode>()
             .unwrap()
             .to_vec();
         let feat_strs: Vec<&str> = features.iter().map(|s| s.as_str()).collect();
-        assert_eq!(feat_strs, ["CD3D", "CD3E", "GAPDH"], "/assays/RNA/features content mismatch");
+        assert_eq!(
+            feat_strs,
+            ["CD3D", "CD3E", "GAPDH"],
+            "/assays/RNA/features content mismatch"
+        );
 
         // BPCells version attribute must be set so Seurat v5 routes to BPCells backend
-        let counts_grp = file.group("assays/RNA/counts")
+        let counts_grp = file
+            .group("assays/RNA/counts")
             .expect("/assays/RNA/counts group missing");
-        let version_attr = counts_grp.attr("version")
+        let version_attr = counts_grp
+            .attr("version")
             .expect("version attribute missing on /assays/RNA/counts");
         let version: VarLenUnicode = version_attr.read_scalar().unwrap();
         assert!(

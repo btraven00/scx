@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/scx")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/scx")
 }
 
 fn golden_path(filename: &str) -> PathBuf {
@@ -66,16 +65,8 @@ fn test_convert_h5ad_to_h5seurat_bpcells_default() {
         "missing expected shape\n{}",
         stdout
     );
-    assert!(
-        stdout.contains("obs ("),
-        "missing obs section\n{}",
-        stdout
-    );
-    assert!(
-        stdout.contains("var ("),
-        "missing var section\n{}",
-        stdout
-    );
+    assert!(stdout.contains("obs ("), "missing obs section\n{}", stdout);
+    assert!(stdout.contains("var ("), "missing var section\n{}", stdout);
     assert!(
         stdout.contains("obsm (2 keys):"),
         "missing expected obsm key count\n{}",
@@ -143,16 +134,8 @@ fn test_convert_h5seurat_to_h5seurat_bpcells_default() {
         "missing expected shape\n{}",
         stdout
     );
-    assert!(
-        stdout.contains("obs ("),
-        "missing obs section\n{}",
-        stdout
-    );
-    assert!(
-        stdout.contains("var ("),
-        "missing var section\n{}",
-        stdout
-    );
+    assert!(stdout.contains("obs ("), "missing obs section\n{}", stdout);
+    assert!(stdout.contains("var ("), "missing var section\n{}", stdout);
     assert!(
         stdout.contains("obsm (2 keys):"),
         "missing expected obsm key count\n{}",
@@ -221,14 +204,6 @@ fn test_convert_h5ad_to_h5seurat_dgcmatrix_opt_out() {
         "missing expected shape\n{}",
         stdout
     );
-    assert!(
-        stdout.contains("obs ("),
-        "missing obs section\n{}",
-        stdout
-    );
-    assert!(
-        stdout.contains("var ("),
-        "missing var section\n{}",
-        stdout
-    );
+    assert!(stdout.contains("obs ("), "missing obs section\n{}", stdout);
+    assert!(stdout.contains("var ("), "missing var section\n{}", stdout);
 }

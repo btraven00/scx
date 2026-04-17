@@ -5,15 +5,17 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
+use hdf5::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
 use hdf5::{Dataset, File, Group, SimpleExtents};
-use hdf5::types::{IntSize, TypeDescriptor, FloatSize, VarLenUnicode};
 use ndarray::{s, Array1, Array2};
 
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
-         SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm},
+    ir::{
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+        SparseMatrixMeta, UnsTable, VarTable, Varm,
+    },
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -143,7 +145,10 @@ fn write_vlen_str_dataset(grp: &Group, name: &str, strings: &[String]) -> Result
         .iter()
         .map(|s| VarLenUnicode::from_str(s).unwrap_or_default())
         .collect();
-    let ds = grp.new_dataset::<VarLenUnicode>().shape(vals.len()).create(name)?;
+    let ds = grp
+        .new_dataset::<VarLenUnicode>()
+        .shape(vals.len())
+        .create(name)?;
     ds.write(&Array1::from_vec(vals))?;
     Ok(ds)
 }
@@ -252,7 +257,10 @@ impl DatasetWriter for H5AdWriter {
             let (nrows, ncols) = mat.shape;
             let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
                 .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-            let ds = grp.new_dataset::<f64>().shape((nrows, ncols)).create(name.as_str())?;
+            let ds = grp
+                .new_dataset::<f64>()
+                .shape((nrows, ncols))
+                .create(name.as_str())?;
             ds.write(&arr)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
@@ -274,7 +282,7 @@ impl DatasetWriter for H5AdWriter {
     ) -> Result<()> {
         // Ensure the top-level dict group exists (created once on first call).
         let top = match self.file.group(group_prefix) {
-            Ok(g)  => g,
+            Ok(g) => g,
             Err(_) => {
                 let g = self.file.create_group(group_prefix)?;
                 write_encoding_on_group(&g, "dict", "0.1.0")?;
@@ -304,9 +312,9 @@ impl DatasetWriter for H5AdWriter {
     }
 
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
-        let state = self.sparse_state.as_mut()
-            .ok_or_else(|| ScxError::InvalidFormat(
-                "write_sparse_chunk called without begin_sparse".into()))?;
+        let state = self.sparse_state.as_mut().ok_or_else(|| {
+            ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into())
+        })?;
 
         let csr = &chunk.data;
         let nnz = csr.indices.len();
@@ -319,7 +327,9 @@ impl DatasetWriter for H5AdWriter {
             let vals: Vec<f32> = csr.data.to_f64().into_iter().map(|x| x as f32).collect();
             data_ds.write_slice(&Array1::from_vec(vals), s![old_len..new_len])?;
 
-            let idx_ds = self.file.dataset(&format!("{}/indices", state.group_path))?;
+            let idx_ds = self
+                .file
+                .dataset(&format!("{}/indices", state.group_path))?;
             idx_ds.resize(new_len)?;
             let cols_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
             idx_ds.write_slice(&Array1::from_vec(cols_i32), s![old_len..new_len])?;
@@ -333,9 +343,9 @@ impl DatasetWriter for H5AdWriter {
     }
 
     async fn end_sparse(&mut self) -> Result<()> {
-        let state = self.sparse_state.take()
-            .ok_or_else(|| ScxError::InvalidFormat(
-                "end_sparse called without begin_sparse".into()))?;
+        let state = self.sparse_state.take().ok_or_else(|| {
+            ScxError::InvalidFormat("end_sparse called without begin_sparse".into())
+        })?;
 
         let grp = self.file.group(&state.group_path)?;
 
@@ -365,7 +375,10 @@ impl DatasetWriter for H5AdWriter {
             let (nrows, ncols) = mat.shape;
             let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
                 .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-            let ds = grp.new_dataset::<f64>().shape((nrows, ncols)).create(name.as_str())?;
+            let ds = grp
+                .new_dataset::<f64>()
+                .shape((nrows, ncols))
+                .create(name.as_str())?;
             ds.write(&arr)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
@@ -417,7 +430,11 @@ impl DatasetWriter for H5AdWriter {
                 }
                 // Integer sources — go through f64 then cast.
                 (_, DataType::F32) => {
-                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    let f = if nnz >= PAR_THRESHOLD {
+                        csr.data.to_f64_par()
+                    } else {
+                        csr.data.to_f64()
+                    };
                     let w: Vec<f32> = if nnz >= PAR_THRESHOLD {
                         f.into_par_iter().map(|x| x as f32).collect()
                     } else {
@@ -426,11 +443,19 @@ impl DatasetWriter for H5AdWriter {
                     data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
                 (_, DataType::F64) => {
-                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    let f = if nnz >= PAR_THRESHOLD {
+                        csr.data.to_f64_par()
+                    } else {
+                        csr.data.to_f64()
+                    };
                     data_ds.write_slice(&Array1::from_vec(f), s![old_len..new_len])?;
                 }
                 (_, DataType::I32) => {
-                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    let f = if nnz >= PAR_THRESHOLD {
+                        csr.data.to_f64_par()
+                    } else {
+                        csr.data.to_f64()
+                    };
                     let w: Vec<i32> = if nnz >= PAR_THRESHOLD {
                         f.into_par_iter().map(|x| x as i32).collect()
                     } else {
@@ -439,7 +464,11 @@ impl DatasetWriter for H5AdWriter {
                     data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
                 }
                 (_, DataType::U32) => {
-                    let f = if nnz >= PAR_THRESHOLD { csr.data.to_f64_par() } else { csr.data.to_f64() };
+                    let f = if nnz >= PAR_THRESHOLD {
+                        csr.data.to_f64_par()
+                    } else {
+                        csr.data.to_f64()
+                    };
                     let w: Vec<u32> = if nnz >= PAR_THRESHOLD {
                         f.into_par_iter().map(|x| x as u32).collect()
                     } else {
@@ -543,15 +572,13 @@ impl H5AdReader {
             let ds = file.dataset("X")?;
             let sh = ds.shape();
             if sh.len() != 2 {
-                return Err(ScxError::InvalidFormat(
-                    "dense X must be 2-D".into(),
-                ));
+                return Err(ScxError::InvalidFormat("dense X must be 2-D".into()));
             }
             let dtype = match ds.dtype()?.to_descriptor()? {
                 TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-                TypeDescriptor::Float(_)             => DataType::F64,
-                TypeDescriptor::Integer(_)           => DataType::I32,
-                _                                    => DataType::F32,
+                TypeDescriptor::Float(_) => DataType::F64,
+                TypeDescriptor::Integer(_) => DataType::I32,
+                _ => DataType::F32,
             };
             (sh[0], sh[1], None, dtype)
         } else {
@@ -563,14 +590,15 @@ impl H5AdReader {
                 if enc == "csc_matrix" {
                     return Err(ScxError::InvalidFormat(
                         "X is stored as CSC. Convert to CSR first: \
-                         adata.X = adata.X.tocsr(); adata.write_h5ad(path)".into(),
+                         adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
+                            .into(),
                     ));
                 }
             }
 
-            let shape_attr = x_grp.attr("shape").map_err(|_| {
-                ScxError::InvalidFormat("missing X/shape attribute".into())
-            })?;
+            let shape_attr = x_grp
+                .attr("shape")
+                .map_err(|_| ScxError::InvalidFormat("missing X/shape attribute".into()))?;
             let (n_obs, n_vars) = match shape_attr.dtype()?.to_descriptor()? {
                 TypeDescriptor::Integer(IntSize::U8) => {
                     let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
@@ -585,14 +613,23 @@ impl H5AdReader {
             let indptr = ad_read_indptr(&file, "X/indptr")?;
             if indptr.len() != n_obs + 1 {
                 return Err(ScxError::InvalidFormat(format!(
-                    "X/indptr length {} != n_obs+1 {}", indptr.len(), n_obs + 1
+                    "X/indptr length {} != n_obs+1 {}",
+                    indptr.len(),
+                    n_obs + 1
                 )));
             }
             let dtype = ad_detect_dtype(&file, "X/data")?;
             (n_obs, n_vars, Some(indptr), dtype)
         };
 
-        Ok(Self { path, n_obs, n_vars, indptr, chunk_size, dtype })
+        Ok(Self {
+            path,
+            n_obs,
+            n_vars,
+            indptr,
+            chunk_size,
+            dtype,
+        })
     }
 }
 
@@ -616,15 +653,14 @@ fn ad_read_indptr(file: &File, path: &str) -> Result<Vec<u64>> {
         TypeDescriptor::Integer(IntSize::U8) => {
             ds.read_1d::<i64>()?.iter().map(|&x| x as u64).collect()
         }
-        TypeDescriptor::Integer(_) => {
-            ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect()
+        TypeDescriptor::Integer(_) => ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect(),
+        TypeDescriptor::Float(_) => ds.read_1d::<f64>()?.iter().map(|&x| x as u64).collect(),
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "unexpected indptr dtype {:?} at {path}",
+                other
+            )))
         }
-        TypeDescriptor::Float(_) => {
-            ds.read_1d::<f64>()?.iter().map(|&x| x as u64).collect()
-        }
-        other => return Err(ScxError::InvalidFormat(format!(
-            "unexpected indptr dtype {:?} at {path}", other
-        ))),
     })
 }
 
@@ -632,10 +668,10 @@ fn ad_detect_dtype(file: &File, path: &str) -> Result<DataType> {
     let ds = file.dataset(path)?;
     Ok(match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-        TypeDescriptor::Float(_)             => DataType::F64,
+        TypeDescriptor::Float(_) => DataType::F64,
         TypeDescriptor::Integer(IntSize::U4) => DataType::I32,
         TypeDescriptor::Integer(IntSize::U8) => DataType::I32, // i64 → i32 (counts fit)
-        _                                    => DataType::F32,
+        _ => DataType::F32,
     })
 }
 
@@ -660,7 +696,7 @@ fn ad_read_dense_chunk_at(
     row_end: usize,
     n_vars: usize,
 ) -> Result<MatrixChunk> {
-    let file  = File::open(path)?;
+    let file = File::open(path)?;
     let dtype = ad_detect_dtype(&file, ds_path)?;
     ad_read_dense_chunk_with_dtype(&file, ds_path, row_start, row_end, n_vars, dtype)
 }
@@ -673,11 +709,15 @@ fn ad_read_dense_chunk_with_dtype(
     n_vars: usize,
     dtype: DataType,
 ) -> Result<MatrixChunk> {
-    let ds    = file.dataset(ds_path)?;
+    let ds = file.dataset(ds_path)?;
     let nrows = row_end - row_start;
     let slice = ds.read_slice::<f64, _, _>(s![row_start..row_end, ..])?;
     let csr = dense_array2_to_csr(slice.view(), nrows, n_vars, dtype);
-    Ok(MatrixChunk { row_offset: row_start, nrows, data: csr })
+    Ok(MatrixChunk {
+        row_offset: row_start,
+        nrows,
+        data: csr,
+    })
 }
 
 /// Convert a dense 2-D array view to a CSR sparse matrix, skipping exact zeros.
@@ -706,7 +746,12 @@ fn dense_array2_to_csr(
         DataType::I32 => TypedVec::I32(data_f64.iter().map(|&x| x as i32).collect()),
         DataType::U32 => TypedVec::U32(data_f64.iter().map(|&x| x as u32).collect()),
     };
-    SparseMatrixCSR { shape: (nrows, ncols), indptr, indices, data }
+    SparseMatrixCSR {
+        shape: (nrows, ncols),
+        indptr,
+        indices,
+        data,
+    }
 }
 
 fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
@@ -721,7 +766,8 @@ fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
             Ok(raw.into_iter().map(|s| s.to_string()).collect())
         }
         other => Err(ScxError::InvalidFormat(format!(
-            "expected string dataset at '{path}', got {:?}", other
+            "expected string dataset at '{path}', got {:?}",
+            other
         ))),
     }
 }
@@ -739,19 +785,23 @@ fn ad_read_chunk(
     let file = File::open(path)?;
     let nrows = row_end - row_start;
     let nnz_start = indptr[row_start] as usize;
-    let nnz_end   = indptr[row_end]   as usize;
+    let nnz_end = indptr[row_end] as usize;
     let nnz = nnz_end - nnz_start;
 
     let indices: Vec<u32> = if nnz > 0 {
         let ds = file.dataset("X/indices")?;
         match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Integer(_) => {
-                ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?
-                    .iter().map(|&x| x as u32).collect()
+            TypeDescriptor::Integer(_) => ds
+                .read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?
+                .iter()
+                .map(|&x| x as u32)
+                .collect(),
+            other => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "unexpected X/indices dtype {:?}",
+                    other
+                )))
             }
-            other => return Err(ScxError::InvalidFormat(format!(
-                "unexpected X/indices dtype {:?}", other
-            ))),
         }
     } else {
         Vec::new()
@@ -760,14 +810,18 @@ fn ad_read_chunk(
     let data: TypedVec = if nnz > 0 {
         let ds = file.dataset("X/data")?;
         match dtype {
-            DataType::F32 => TypedVec::F32(
-                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            DataType::F64 => TypedVec::F64(
-                ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec()),
-            DataType::I32 => TypedVec::I32(
-                ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            DataType::U32 => TypedVec::U32(
-                ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            DataType::F32 => {
+                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            DataType::F64 => {
+                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            DataType::I32 => {
+                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            DataType::U32 => {
+                TypedVec::U32(ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
         }
     } else {
         TypedVec::F32(Vec::new())
@@ -775,7 +829,9 @@ fn ad_read_chunk(
 
     // Normalise indptr to start from 0 for this chunk
     let chunk_indptr: Vec<u64> = indptr[row_start..=row_end]
-        .iter().map(|&p| p - indptr[row_start]).collect();
+        .iter()
+        .map(|&p| p - indptr[row_start])
+        .collect();
 
     Ok(MatrixChunk {
         row_offset: row_start,
@@ -811,12 +867,11 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
     for col_name in col_names {
         let col_path = format!("{group_path}/{col_name}");
         // Groups are categorical; datasets are array/string-array
-        let is_group = file.group(&col_path).is_ok()
-            && file.dataset(&col_path).is_err();
+        let is_group = file.group(&col_path).is_ok() && file.dataset(&col_path).is_err();
 
         let col_data = if is_group {
             // Distinguish categorical (codes+categories) from nullable (values+mask)
-            let has_codes  = file.dataset(&format!("{col_path}/codes")).is_ok();
+            let has_codes = file.dataset(&format!("{col_path}/codes")).is_ok();
             let has_values = file.dataset(&format!("{col_path}/values")).is_ok();
             let result = if has_codes {
                 ad_read_categorical(file, &col_path)
@@ -829,15 +884,24 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
             };
             match result {
                 Ok(cd) => cd,
-                Err(e) => { tracing::warn!("skipping column '{col_name}': {e}"); continue; }
+                Err(e) => {
+                    tracing::warn!("skipping column '{col_name}': {e}");
+                    continue;
+                }
             }
         } else {
             match ad_read_column(file, &col_path) {
                 Ok(cd) => cd,
-                Err(e) => { tracing::warn!("skipping column '{col_name}': {e}"); continue; }
+                Err(e) => {
+                    tracing::warn!("skipping column '{col_name}': {e}");
+                    continue;
+                }
             }
         };
-        columns.push(Column { name: col_name, data: col_data });
+        columns.push(Column {
+            name: col_name,
+            data: col_data,
+        });
     }
 
     Ok((index, columns))
@@ -858,26 +922,21 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
             let v: Vec<f32> = ds.read_1d::<f32>()?.to_vec();
             Ok(ColumnData::Float(v.into_iter().map(|x| x as f64).collect()))
         }
-        TypeDescriptor::Float(_) => {
-            Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec()))
-        }
+        TypeDescriptor::Float(_) => Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec())),
         // Native HDF5 boolean type (anndata >= 0.10 uses this for bool columns)
-        TypeDescriptor::Boolean => {
-            Ok(ColumnData::Bool(ds.read_1d::<bool>()?.to_vec()))
-        }
+        TypeDescriptor::Boolean => Ok(ColumnData::Bool(ds.read_1d::<bool>()?.to_vec())),
         // uint8 is used for bool columns (AnnData encodes bool as u8 0/1)
         TypeDescriptor::Integer(IntSize::U1) => {
             let v: Vec<u8> = ds.read_1d::<u8>()?.to_vec();
             Ok(ColumnData::Bool(v.into_iter().map(|x| x != 0).collect()))
         }
-        TypeDescriptor::Integer(_) => {
-            Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec()))
-        }
+        TypeDescriptor::Integer(_) => Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec())),
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
             Ok(ColumnData::String(ad_read_strings(file, path)?))
         }
         other => Err(ScxError::InvalidFormat(format!(
-            "unsupported column dtype {:?} at '{path}'", other
+            "unsupported column dtype {:?} at '{path}'",
+            other
         ))),
     }
 }
@@ -887,18 +946,27 @@ fn ad_read_categorical(file: &File, grp_path: &str) -> Result<ColumnData> {
     let codes_path = format!("{grp_path}/codes");
     let codes_ds = file.dataset(&codes_path)?;
     let codes: Vec<u32> = match codes_ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(IntSize::U1) => {
-            codes_ds.read_1d::<i8>()?.iter().map(|&x| x as u32).collect()
+        TypeDescriptor::Integer(IntSize::U1) => codes_ds
+            .read_1d::<i8>()?
+            .iter()
+            .map(|&x| x as u32)
+            .collect(),
+        TypeDescriptor::Integer(IntSize::U2) => codes_ds
+            .read_1d::<i16>()?
+            .iter()
+            .map(|&x| x as u32)
+            .collect(),
+        TypeDescriptor::Integer(_) => codes_ds
+            .read_1d::<i32>()?
+            .iter()
+            .map(|&x| x as u32)
+            .collect(),
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "unexpected categorical codes dtype {:?}",
+                other
+            )))
         }
-        TypeDescriptor::Integer(IntSize::U2) => {
-            codes_ds.read_1d::<i16>()?.iter().map(|&x| x as u32).collect()
-        }
-        TypeDescriptor::Integer(_) => {
-            codes_ds.read_1d::<i32>()?.iter().map(|&x| x as u32).collect()
-        }
-        other => return Err(ScxError::InvalidFormat(format!(
-            "unexpected categorical codes dtype {:?}", other
-        ))),
     };
 
     let levels = ad_read_strings(file, &format!("{grp_path}/categories"))?;
@@ -910,15 +978,13 @@ fn ad_read_categorical(file: &File, grp_path: &str) -> Result<ColumnData> {
 /// Float/Int columns use NaN for NA; Bool columns use false.
 fn ad_read_nullable(file: &File, grp_path: &str) -> Result<ColumnData> {
     let values_path = format!("{grp_path}/values");
-    let mask_path   = format!("{grp_path}/mask");
+    let mask_path = format!("{grp_path}/mask");
 
     let ds = file.dataset(&values_path)?;
     let mask: Vec<bool> = if let Ok(mds) = file.dataset(&mask_path) {
         match mds.dtype()?.to_descriptor()? {
             TypeDescriptor::Boolean => mds.read_1d::<bool>()?.to_vec(),
-            TypeDescriptor::Integer(_) => {
-                mds.read_1d::<i8>()?.iter().map(|&x| x != 0).collect()
-            }
+            TypeDescriptor::Integer(_) => mds.read_1d::<i8>()?.iter().map(|&x| x != 0).collect(),
             _ => vec![false; ds.shape().first().copied().unwrap_or(0)],
         }
     } else {
@@ -929,38 +995,43 @@ fn ad_read_nullable(file: &File, grp_path: &str) -> Result<ColumnData> {
         TypeDescriptor::Float(FloatSize::U4) => {
             let vals: Vec<f32> = ds.read_1d::<f32>()?.to_vec();
             Ok(ColumnData::Float(
-                vals.iter().zip(&mask)
+                vals.iter()
+                    .zip(&mask)
                     .map(|(&v, &na)| if na { f64::NAN } else { v as f64 })
-                    .collect()
+                    .collect(),
             ))
         }
         TypeDescriptor::Float(_) => {
             let vals: Vec<f64> = ds.read_1d::<f64>()?.to_vec();
             Ok(ColumnData::Float(
-                vals.iter().zip(&mask)
+                vals.iter()
+                    .zip(&mask)
                     .map(|(&v, &na)| if na { f64::NAN } else { v })
-                    .collect()
+                    .collect(),
             ))
         }
         TypeDescriptor::Integer(_) => {
             // Widen nullable int to f64 with NaN for NA
             let vals: Vec<i32> = ds.read_1d::<i32>()?.to_vec();
             Ok(ColumnData::Float(
-                vals.iter().zip(&mask)
+                vals.iter()
+                    .zip(&mask)
                     .map(|(&v, &na)| if na { f64::NAN } else { v as f64 })
-                    .collect()
+                    .collect(),
             ))
         }
         TypeDescriptor::Boolean => {
             let vals: Vec<bool> = ds.read_1d::<bool>()?.to_vec();
             Ok(ColumnData::Bool(
-                vals.iter().zip(&mask)
+                vals.iter()
+                    .zip(&mask)
                     .map(|(&v, &na)| if na { false } else { v })
-                    .collect()
+                    .collect(),
             ))
         }
         other => Err(ScxError::InvalidFormat(format!(
-            "unsupported nullable column dtype {:?} at '{grp_path}'", other
+            "unsupported nullable column dtype {:?} at '{grp_path}'",
+            other
         ))),
     }
 }
@@ -969,19 +1040,22 @@ fn ad_read_nullable(file: &File, grp_path: &str) -> Result<ColumnData> {
 fn ad_read_obsm(path: &Path, n_obs: usize) -> Result<Embeddings> {
     let file = File::open(path)?;
     let grp = match file.group("obsm") {
-        Ok(g)  => g,
+        Ok(g) => g,
         Err(_) => return Ok(Embeddings::default()),
     };
     let mut map = HashMap::new();
     for name in grp.member_names().unwrap_or_default() {
         let ds_path = format!("obsm/{name}");
         let ds = match file.dataset(&ds_path) {
-            Ok(d)  => d,
+            Ok(d) => d,
             Err(_) => continue,
         };
         let arr: Array2<f64> = match ds.read::<f64, ndarray::Ix2>() {
-            Ok(a)  => a,
-            Err(e) => { tracing::warn!("skipping obsm['{name}']: {e}"); continue; }
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("skipping obsm['{name}']: {e}");
+                continue;
+            }
         };
         // Guard against transposed storage (some writers store (k, n_obs))
         let arr = if arr.shape()[0] != n_obs && arr.shape()[1] == n_obs {
@@ -990,7 +1064,13 @@ fn ad_read_obsm(path: &Path, n_obs: usize) -> Result<Embeddings> {
             arr
         };
         let shape = (arr.shape()[0], arr.shape()[1]);
-        map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
+        map.insert(
+            name,
+            DenseMatrix {
+                shape,
+                data: arr.into_raw_vec_and_offset().0,
+            },
+        );
     }
     Ok(Embeddings { map })
 }
@@ -1002,8 +1082,7 @@ fn ad_walk_group(file: &File, group_path: &str) -> Result<serde_json::Value> {
     let mut map = serde_json::Map::new();
     for name in members {
         let child_path = format!("{group_path}/{name}");
-        let is_group = file.group(&child_path).is_ok()
-            && file.dataset(&child_path).is_err();
+        let is_group = file.group(&child_path).is_ok() && file.dataset(&child_path).is_err();
         let value = if is_group {
             ad_walk_group(file, &child_path).unwrap_or(serde_json::Value::Null)
         } else {
@@ -1040,7 +1119,7 @@ fn ad_dataset_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
             let strings = ad_read_strings(file, path)?;
             if is_scalar || strings.len() == 1 {
                 Ok(serde_json::Value::String(
-                    strings.into_iter().next().unwrap_or_default()
+                    strings.into_iter().next().unwrap_or_default(),
                 ))
             } else {
                 Ok(serde_json::json!(strings))
@@ -1065,7 +1144,11 @@ fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<Spar
         }
     };
     let indptr = ad_read_indptr(file, &format!("{group_path}/indptr"))?;
-    Ok(SparseMatrixMeta { name: name.to_string(), shape: (nrows, ncols), indptr })
+    Ok(SparseMatrixMeta {
+        name: name.to_string(),
+        shape: (nrows, ncols),
+        indptr,
+    })
 }
 
 /// Read a row-slice of an H5AD CSR sparse group as a `MatrixChunk`.
@@ -1081,7 +1164,7 @@ fn ad_read_sparse_chunk(
     let chunk_rows = row_end - row_start;
 
     let nnz_start = meta.indptr[row_start] as usize;
-    let nnz_end   = meta.indptr[row_end]   as usize;
+    let nnz_end = meta.indptr[row_end] as usize;
     let nnz = nnz_end - nnz_start;
 
     let indices: Vec<u32> = if nnz > 0 {
@@ -1092,9 +1175,11 @@ fn ad_read_sparse_chunk(
                 .iter()
                 .map(|&x| x as u32)
                 .collect(),
-            other => return Err(ScxError::InvalidFormat(format!(
-                "unexpected indices dtype {other:?} at {group_path}/indices"
-            ))),
+            other => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "unexpected indices dtype {other:?} at {group_path}/indices"
+                )))
+            }
         }
     } else {
         Vec::new()
@@ -1103,14 +1188,16 @@ fn ad_read_sparse_chunk(
     let data: TypedVec = if nnz > 0 {
         let ds = file.dataset(&format!("{group_path}/data"))?;
         match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Float(FloatSize::U4) => TypedVec::F32(
-                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            TypeDescriptor::Float(_) => TypedVec::F64(
-                ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec()),
-            TypeDescriptor::Integer(_) => TypedVec::I32(
-                ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            _ => TypedVec::F32(
-                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            TypeDescriptor::Float(FloatSize::U4) => {
+                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            TypeDescriptor::Float(_) => {
+                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            TypeDescriptor::Integer(_) => {
+                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            _ => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
         }
     } else {
         TypedVec::F32(Vec::new())
@@ -1167,7 +1254,7 @@ impl DatasetReader for H5AdReader {
         let file = File::open(&self.path)?;
         match file.group("uns") {
             Err(_) => Ok(UnsTable::default()),
-            Ok(_)  => {
+            Ok(_) => {
                 let raw = ad_walk_group(&file, "uns")?;
                 Ok(UnsTable { raw })
             }
@@ -1178,7 +1265,7 @@ impl DatasetReader for H5AdReader {
         let file = File::open(&self.path)?;
         let grp = match file.group("layers") {
             Err(_) => return Ok(Vec::new()),
-            Ok(g)  => g,
+            Ok(g) => g,
         };
         let mut metas = Vec::new();
         for name in grp.member_names().unwrap_or_default() {
@@ -1194,13 +1281,16 @@ impl DatasetReader for H5AdReader {
                             indptr: Vec::new(),
                         });
                     } else {
-                        tracing::warn!("skipping dense layer '{name}': unexpected rank {}", shape.len());
+                        tracing::warn!(
+                            "skipping dense layer '{name}': unexpected rank {}",
+                            shape.len()
+                        );
                     }
                     continue;
                 }
             }
             match ad_read_sparse_meta(&file, &name, &grp_path) {
-                Ok(m)  => metas.push(m),
+                Ok(m) => metas.push(m),
                 Err(e) => tracing::warn!("skipping layers['{name}']: {e}"),
             }
         }
@@ -1211,12 +1301,12 @@ impl DatasetReader for H5AdReader {
         let file = File::open(&self.path)?;
         let grp = match file.group("obsp") {
             Err(_) => return Ok(Vec::new()),
-            Ok(g)  => g,
+            Ok(g) => g,
         };
         let mut metas = Vec::new();
         for name in grp.member_names().unwrap_or_default() {
             match ad_read_sparse_meta(&file, &name, &format!("obsp/{name}")) {
-                Ok(m)  => metas.push(m),
+                Ok(m) => metas.push(m),
                 Err(e) => tracing::warn!("skipping obsp['{name}']: {e}"),
             }
         }
@@ -1228,16 +1318,18 @@ impl DatasetReader for H5AdReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        let path     = self.path.clone();
+        let path = self.path.clone();
         let grp_path = format!("layers/{}", meta.name);
-        let n_rows   = meta.shape.0;
-        let n_cols   = meta.shape.1;
+        let n_rows = meta.shape.0;
+        let n_cols = meta.shape.1;
         let is_dense = meta.indptr.is_empty();
         Box::pin(stream::unfold(0usize, move |row_start| {
-            let path     = path.clone();
+            let path = path.clone();
             let grp_path = grp_path.clone();
             async move {
-                if row_start >= n_rows { return None; }
+                if row_start >= n_rows {
+                    return None;
+                }
                 let row_end = (row_start + chunk_size).min(n_rows);
                 let chunk = if is_dense {
                     ad_read_dense_chunk_at(&path, &grp_path, row_start, row_end, n_cols)
@@ -1254,14 +1346,16 @@ impl DatasetReader for H5AdReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        let path     = self.path.clone();
+        let path = self.path.clone();
         let grp_path = format!("obsp/{}", meta.name);
-        let n_rows   = meta.shape.0;
+        let n_rows = meta.shape.0;
         Box::pin(stream::unfold(0usize, move |row_start| {
-            let path     = path.clone();
+            let path = path.clone();
             let grp_path = grp_path.clone();
             async move {
-                if row_start >= n_rows { return None; }
+                if row_start >= n_rows {
+                    return None;
+                }
                 let row_end = (row_start + chunk_size).min(n_rows);
                 let chunk = ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
                 Some((chunk, row_end))
@@ -1273,18 +1367,24 @@ impl DatasetReader for H5AdReader {
         let file = File::open(&self.path)?;
         let grp = match file.group("varm") {
             Err(_) => return Ok(Varm::default()),
-            Ok(g)  => g,
+            Ok(g) => g,
         };
         let mut map = HashMap::new();
         for name in grp.member_names().unwrap_or_default() {
             let ds = match file.dataset(&format!("varm/{name}")) {
-                Ok(d)  => d,
+                Ok(d) => d,
                 Err(_) => continue,
             };
             match ds.read::<f64, ndarray::Ix2>() {
                 Ok(arr) => {
                     let shape = (arr.shape()[0], arr.shape()[1]);
-                    map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
+                    map.insert(
+                        name,
+                        DenseMatrix {
+                            shape,
+                            data: arr.into_raw_vec_and_offset().0,
+                        },
+                    );
                 }
                 Err(e) => tracing::warn!("skipping varm['{name}']: {e}"),
             }
@@ -1293,22 +1393,25 @@ impl DatasetReader for H5AdReader {
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
-        let path       = self.path.clone();
-        let n_obs      = self.n_obs;
-        let n_vars     = self.n_vars;
+        let path = self.path.clone();
+        let n_obs = self.n_obs;
+        let n_vars = self.n_vars;
         let chunk_size = self.chunk_size;
-        let dtype      = self.dtype;
+        let dtype = self.dtype;
 
         match &self.indptr {
             Some(indptr) => {
                 let indptr = indptr.clone();
                 Box::pin(stream::unfold(0usize, move |row_start| {
-                    let path   = path.clone();
+                    let path = path.clone();
                     let indptr = indptr.clone();
                     async move {
-                        if row_start >= n_obs { return None; }
+                        if row_start >= n_obs {
+                            return None;
+                        }
                         let row_end = (row_start + chunk_size).min(n_obs);
-                        let chunk = ad_read_chunk(&path, &indptr, row_start, row_end, n_vars, dtype);
+                        let chunk =
+                            ad_read_chunk(&path, &indptr, row_start, row_end, n_vars, dtype);
                         Some((chunk, row_end))
                     }
                 }))
@@ -1318,7 +1421,9 @@ impl DatasetReader for H5AdReader {
                 Box::pin(stream::unfold(0usize, move |row_start| {
                     let path = path.clone();
                     async move {
-                        if row_start >= n_obs { return None; }
+                        if row_start >= n_obs {
+                            return None;
+                        }
                         let row_end = (row_start + chunk_size).min(n_obs);
                         let chunk = ad_read_dense_chunk(&path, row_start, row_end, n_vars, dtype);
                         Some((chunk, row_end))
@@ -1348,7 +1453,9 @@ mod tests {
     // Committed subset fixture (generate with scripts/prepare_norman_subset.py)
     const NORMAN_SUBSET: &str = "../../tests/fixtures/norman_subset.h5ad";
 
-    fn ref_exists() -> bool { std::path::Path::new(GOLDEN_REF).exists() }
+    fn ref_exists() -> bool {
+        std::path::Path::new(GOLDEN_REF).exists()
+    }
 
     /// Return the path to the Norman H5AD to test against.
     /// Prefers the full file via `NORMAN_H5AD` env var (dev/CI with large data),
@@ -1356,27 +1463,37 @@ mod tests {
     fn norman_path() -> Option<std::path::PathBuf> {
         if let Ok(p) = std::env::var("NORMAN_H5AD") {
             let pb = std::path::PathBuf::from(&p);
-            if pb.exists() { return Some(pb); }
+            if pb.exists() {
+                return Some(pb);
+            }
             eprintln!("NORMAN_H5AD={p} not found, falling back to subset");
         }
         let pb = std::path::PathBuf::from(NORMAN_SUBSET);
-        if pb.exists() { Some(pb) } else { None }
+        if pb.exists() {
+            Some(pb)
+        } else {
+            None
+        }
     }
 
     // --- H5AdReader tests (against zellkonverter reference) ---
 
     #[tokio::test]
     async fn test_reader_shape() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
         let reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
         let (n_obs, n_vars) = reader.shape();
-        assert_eq!(n_obs,  2700,  "expected 2700 cells");
+        assert_eq!(n_obs, 2700, "expected 2700 cells");
         assert_eq!(n_vars, 13714, "expected 13714 genes");
     }
 
     #[tokio::test]
     async fn test_reader_obs() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
         let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
         let obs = reader.obs().await.unwrap();
         assert_eq!(obs.index.len(), 2700, "obs index length");
@@ -1389,19 +1506,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_obs_categorical() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
         let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
         let obs = reader.obs().await.unwrap();
         // Seurat factor columns become categoricals in AnnData
-        let cat_cols: Vec<_> = obs.columns.iter()
+        let cat_cols: Vec<_> = obs
+            .columns
+            .iter()
             .filter(|c| matches!(c.data, ColumnData::Categorical { .. }))
             .collect();
-        assert!(!cat_cols.is_empty(), "expected at least one categorical obs column");
+        assert!(
+            !cat_cols.is_empty(),
+            "expected at least one categorical obs column"
+        );
     }
 
     #[tokio::test]
     async fn test_reader_var() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
         let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
         let var = reader.var().await.unwrap();
         assert_eq!(var.index.len(), 13714, "var index length");
@@ -1409,26 +1535,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_obsm() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
         let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
         let obsm = reader.obsm().await.unwrap();
-        assert!(obsm.map.contains_key("X_pca"),  "missing X_pca");
+        assert!(obsm.map.contains_key("X_pca"), "missing X_pca");
         assert!(obsm.map.contains_key("X_umap"), "missing X_umap");
-        assert_eq!(obsm.map["X_pca"].shape.0,  2700);
+        assert_eq!(obsm.map["X_pca"].shape.0, 2700);
         assert_eq!(obsm.map["X_umap"].shape.0, 2700);
     }
 
     #[tokio::test]
     async fn test_reader_stream_coverage() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
         let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
         let mut total_cells = 0usize;
-        let mut total_nnz   = 0usize;
+        let mut total_nnz = 0usize;
         let mut stream = reader.x_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
             total_cells += chunk.nrows;
-            total_nnz   += chunk.data.indices.len();
+            total_nnz += chunk.data.indices.len();
         }
         assert_eq!(total_cells, 2700);
         // nnz must match the reference (exact value verified against H5Seurat golden)
@@ -1437,7 +1567,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_chunk_size_respected() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
         let chunk_size = 300usize;
         let mut reader = H5AdReader::open(GOLDEN_REF, chunk_size).unwrap();
         let mut stream = reader.x_stream();
@@ -1451,7 +1583,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_h5ad_roundtrip() {
-        if !ref_exists() { return; }
+        if !ref_exists() {
+            return;
+        }
 
         let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
         let (n_obs, n_vars) = reader.shape();
@@ -1460,10 +1594,10 @@ mod tests {
         let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
         let out_path = tmp.path().to_path_buf();
 
-        let obs  = reader.obs().await.unwrap();
-        let var  = reader.var().await.unwrap();
+        let obs = reader.obs().await.unwrap();
+        let var = reader.var().await.unwrap();
         let obsm = reader.obsm().await.unwrap();
-        let uns  = reader.uns().await.unwrap();
+        let uns = reader.uns().await.unwrap();
 
         let mut writer = H5AdWriter::create(&out_path, n_obs, n_vars, dtype).unwrap();
         writer.write_obs(&obs).await.unwrap();
@@ -1488,7 +1622,10 @@ mod tests {
 
         let rt_obsm = rt.obsm().await.unwrap();
         for key in obsm.map.keys() {
-            assert!(rt_obsm.map.contains_key(key), "obsm['{key}'] missing after roundtrip");
+            assert!(
+                rt_obsm.map.contains_key(key),
+                "obsm['{key}'] missing after roundtrip"
+            );
             assert_eq!(rt_obsm.map[key].shape, obsm.map[key].shape);
         }
 
@@ -1507,7 +1644,9 @@ mod tests {
     /// Full round-trip: read PBMC 3k → write h5ad → verify structure
     #[tokio::test]
     async fn test_roundtrip_pbmc3k() {
-        if !golden_exists() { return; }
+        if !golden_exists() {
+            return;
+        }
 
         let mut reader = ScxH5Reader::open(GOLDEN, 500).unwrap();
         let (n_obs, n_vars) = reader.shape();
@@ -1515,10 +1654,10 @@ mod tests {
         let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
         let out_path = tmp.path().to_path_buf();
 
-        let obs  = reader.obs().await.unwrap();
-        let var  = reader.var().await.unwrap();
+        let obs = reader.obs().await.unwrap();
+        let var = reader.var().await.unwrap();
         let obsm = reader.obsm().await.unwrap();
-        let uns  = reader.uns().await.unwrap();
+        let uns = reader.uns().await.unwrap();
 
         let mut writer = H5AdWriter::create(&out_path, n_obs, n_vars, DataType::F32).unwrap();
         writer.write_obs(&obs).await.unwrap();
@@ -1537,14 +1676,20 @@ mod tests {
         let out = File::open(&out_path).unwrap();
 
         // Root encoding
-        let enc_type: String = out.group("/").unwrap().attr("encoding-type").unwrap()
-            .read_scalar::<VarLenUnicode>().unwrap().to_string();
+        let enc_type: String = out
+            .group("/")
+            .unwrap()
+            .attr("encoding-type")
+            .unwrap()
+            .read_scalar::<VarLenUnicode>()
+            .unwrap()
+            .to_string();
         assert_eq!(enc_type, "anndata");
 
         // X shape attribute
         let x_grp = out.group("X").unwrap();
         let shape: ndarray::Array1<i64> = x_grp.attr("shape").unwrap().read_1d().unwrap();
-        assert_eq!(shape[0], n_obs as i64,  "n_obs mismatch");
+        assert_eq!(shape[0], n_obs as i64, "n_obs mismatch");
         assert_eq!(shape[1], n_vars as i64, "n_vars mismatch");
 
         // X/data length matches indptr last value
@@ -1555,14 +1700,20 @@ mod tests {
 
         // obs
         let obs_grp = out.group("obs").unwrap();
-        let obs_enc: String = obs_grp.attr("encoding-type").unwrap()
-            .read_scalar::<VarLenUnicode>().unwrap().to_string();
+        let obs_enc: String = obs_grp
+            .attr("encoding-type")
+            .unwrap()
+            .read_scalar::<VarLenUnicode>()
+            .unwrap()
+            .to_string();
         assert_eq!(obs_enc, "dataframe");
-        let obs_idx: ndarray::Array1<VarLenUnicode> = out.dataset("obs/index").unwrap().read_1d().unwrap();
+        let obs_idx: ndarray::Array1<VarLenUnicode> =
+            out.dataset("obs/index").unwrap().read_1d().unwrap();
         assert_eq!(obs_idx.len(), n_obs);
 
         // var
-        let var_idx: ndarray::Array1<VarLenUnicode> = out.dataset("var/index").unwrap().read_1d().unwrap();
+        let var_idx: ndarray::Array1<VarLenUnicode> =
+            out.dataset("var/index").unwrap().read_1d().unwrap();
         assert_eq!(var_idx.len(), n_vars);
 
         // obsm
@@ -1582,7 +1733,7 @@ mod tests {
         use hdf5::File as H5File;
         use ndarray::Array2;
 
-        let tmp  = NamedTempFile::with_suffix(".h5ad").unwrap();
+        let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
         let path = tmp.path().to_path_buf();
 
         let n_obs: usize = 5;
@@ -1594,74 +1745,145 @@ mod tests {
         {
             let f = H5File::create(&path).unwrap();
             let root = f.group("/").unwrap();
-            root.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
-                .write_scalar(&vlu("anndata")).unwrap();
-            root.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
-                .write_scalar(&vlu("0.1.0")).unwrap();
+            root.new_attr::<VarLenUnicode>()
+                .create("encoding-type")
+                .unwrap()
+                .write_scalar(&vlu("anndata"))
+                .unwrap();
+            root.new_attr::<VarLenUnicode>()
+                .create("encoding-version")
+                .unwrap()
+                .write_scalar(&vlu("0.1.0"))
+                .unwrap();
 
             // Minimal obs/var dataframes (just the index).
             let obs_grp = f.create_group("obs").unwrap();
-            obs_grp.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
-                .write_scalar(&vlu("dataframe")).unwrap();
-            obs_grp.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
-                .write_scalar(&vlu("0.2.0")).unwrap();
-            obs_grp.new_attr::<VarLenUnicode>().create("_index").unwrap()
-                .write_scalar(&vlu("index")).unwrap();
-            let obs_idx: ndarray::Array1<VarLenUnicode> = (0..n_obs)
-                .map(|i| vlu(&format!("cell{i}")))
-                .collect();
-            obs_grp.new_dataset_builder().with_data(&obs_idx).create("index").unwrap();
+            obs_grp
+                .new_attr::<VarLenUnicode>()
+                .create("encoding-type")
+                .unwrap()
+                .write_scalar(&vlu("dataframe"))
+                .unwrap();
+            obs_grp
+                .new_attr::<VarLenUnicode>()
+                .create("encoding-version")
+                .unwrap()
+                .write_scalar(&vlu("0.2.0"))
+                .unwrap();
+            obs_grp
+                .new_attr::<VarLenUnicode>()
+                .create("_index")
+                .unwrap()
+                .write_scalar(&vlu("index"))
+                .unwrap();
+            let obs_idx: ndarray::Array1<VarLenUnicode> =
+                (0..n_obs).map(|i| vlu(&format!("cell{i}"))).collect();
+            obs_grp
+                .new_dataset_builder()
+                .with_data(&obs_idx)
+                .create("index")
+                .unwrap();
 
             let var_grp = f.create_group("var").unwrap();
-            var_grp.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
-                .write_scalar(&vlu("dataframe")).unwrap();
-            var_grp.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
-                .write_scalar(&vlu("0.2.0")).unwrap();
-            var_grp.new_attr::<VarLenUnicode>().create("_index").unwrap()
-                .write_scalar(&vlu("index")).unwrap();
-            let var_idx: ndarray::Array1<VarLenUnicode> = (0..n_vars)
-                .map(|i| vlu(&format!("gene{i}")))
-                .collect();
-            var_grp.new_dataset_builder().with_data(&var_idx).create("index").unwrap();
+            var_grp
+                .new_attr::<VarLenUnicode>()
+                .create("encoding-type")
+                .unwrap()
+                .write_scalar(&vlu("dataframe"))
+                .unwrap();
+            var_grp
+                .new_attr::<VarLenUnicode>()
+                .create("encoding-version")
+                .unwrap()
+                .write_scalar(&vlu("0.2.0"))
+                .unwrap();
+            var_grp
+                .new_attr::<VarLenUnicode>()
+                .create("_index")
+                .unwrap()
+                .write_scalar(&vlu("index"))
+                .unwrap();
+            let var_idx: ndarray::Array1<VarLenUnicode> =
+                (0..n_vars).map(|i| vlu(&format!("gene{i}"))).collect();
+            var_grp
+                .new_dataset_builder()
+                .with_data(&var_idx)
+                .create("index")
+                .unwrap();
 
             // Sparse X (required by H5AdReader::open).
             let x_grp = f.create_group("X").unwrap();
-            x_grp.new_attr::<VarLenUnicode>().create("encoding-type").unwrap()
-                .write_scalar(&vlu("csr_matrix")).unwrap();
-            x_grp.new_attr::<VarLenUnicode>().create("encoding-version").unwrap()
-                .write_scalar(&vlu("0.1.0")).unwrap();
+            x_grp
+                .new_attr::<VarLenUnicode>()
+                .create("encoding-type")
+                .unwrap()
+                .write_scalar(&vlu("csr_matrix"))
+                .unwrap();
+            x_grp
+                .new_attr::<VarLenUnicode>()
+                .create("encoding-version")
+                .unwrap()
+                .write_scalar(&vlu("0.1.0"))
+                .unwrap();
             let shape = ndarray::array![n_obs as i64, n_vars as i64];
-            x_grp.new_attr_builder().with_data(&shape).create("shape").unwrap();
+            x_grp
+                .new_attr_builder()
+                .with_data(&shape)
+                .create("shape")
+                .unwrap();
             let indptr: ndarray::Array1<i32> = ndarray::Array1::zeros(n_obs + 1);
-            x_grp.new_dataset_builder().with_data(&indptr).create("indptr").unwrap();
+            x_grp
+                .new_dataset_builder()
+                .with_data(&indptr)
+                .create("indptr")
+                .unwrap();
             let indices: ndarray::Array1<i32> = ndarray::Array1::zeros(0);
-            x_grp.new_dataset_builder().with_data(&indices).create("indices").unwrap();
+            x_grp
+                .new_dataset_builder()
+                .with_data(&indices)
+                .create("indices")
+                .unwrap();
             let data: ndarray::Array1<f32> = ndarray::Array1::zeros(0);
-            x_grp.new_dataset_builder().with_data(&data).create("data").unwrap();
+            x_grp
+                .new_dataset_builder()
+                .with_data(&data)
+                .create("data")
+                .unwrap();
 
             // Dense "counts" layer — shape (n_obs, n_vars), stored as f32.
             let layers_grp = f.create_group("layers").unwrap();
             let counts: Array2<f32> = Array2::from_elem((n_obs, n_vars), 1.0_f32);
-            layers_grp.new_dataset_builder().with_data(&counts).create("counts").unwrap();
+            layers_grp
+                .new_dataset_builder()
+                .with_data(&counts)
+                .create("counts")
+                .unwrap();
         }
 
         let mut reader = H5AdReader::open(&path, 3).unwrap();
         let metas = reader.layer_metas().await.unwrap();
         assert_eq!(metas.len(), 1, "expected 1 layer meta");
         assert_eq!(metas[0].name, "counts");
-        assert!(metas[0].indptr.is_empty(), "dense layer must have empty indptr");
+        assert!(
+            metas[0].indptr.is_empty(),
+            "dense layer must have empty indptr"
+        );
 
         // Stream and collect all chunks — must not panic.
         let mut total_rows = 0usize;
-        let mut total_nnz  = 0usize;
+        let mut total_nnz = 0usize;
         let mut stream = reader.layer_stream(&metas[0], 3);
         while let Some(res) = stream.next().await {
             let chunk = res.unwrap();
             total_rows += chunk.nrows;
-            total_nnz  += chunk.data.indptr.last().copied().unwrap_or(0) as usize;
+            total_nnz += chunk.data.indptr.last().copied().unwrap_or(0) as usize;
         }
         assert_eq!(total_rows, n_obs);
-        assert_eq!(total_nnz, n_obs * n_vars, "all values are 1.0 so every entry is non-zero");
+        assert_eq!(
+            total_nnz,
+            n_obs * n_vars,
+            "all values are 1.0 so every entry is non-zero"
+        );
     }
 
     // --- Norman perturbation tests ---
@@ -1673,17 +1895,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_norman_shape() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let reader = H5AdReader::open(&path, 500).unwrap();
         let (n_obs, n_vars) = reader.shape();
-        assert!(n_obs  > 0, "n_obs must be > 0");
+        assert!(n_obs > 0, "n_obs must be > 0");
         assert!(n_vars > 0, "n_vars must be > 0");
         eprintln!("norman shape: {n_obs} × {n_vars}");
     }
 
     #[tokio::test]
     async fn test_norman_obs_has_perturbation_column() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let mut reader = H5AdReader::open(&path, 500).unwrap();
         let obs = reader.obs().await.unwrap();
         // Norman obs must contain at least one perturbation-related column
@@ -1694,17 +1920,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_norman_dense_layer_stream_coverage() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let (n_obs, n_vars) = H5AdReader::open(&path, 500).unwrap().shape();
 
         let mut reader = H5AdReader::open(&path, 500).unwrap();
         let metas = reader.layer_metas().await.unwrap();
-        assert!(!metas.is_empty(), "norman H5AD must have at least one layer");
+        assert!(
+            !metas.is_empty(),
+            "norman H5AD must have at least one layer"
+        );
 
         // counts layer should be present and dense
-        let counts = metas.iter().find(|m| m.name == "counts")
+        let counts = metas
+            .iter()
+            .find(|m| m.name == "counts")
             .expect("expected a 'counts' layer");
-        assert!(counts.indptr.is_empty(), "counts layer should be dense (empty indptr)");
+        assert!(
+            counts.indptr.is_empty(),
+            "counts layer should be dense (empty indptr)"
+        );
         assert_eq!(counts.shape, (n_obs, n_vars));
 
         // stream and verify total row coverage
@@ -1720,7 +1956,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_norman_x_stream_coverage() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let (n_obs, _) = H5AdReader::open(&path, 500).unwrap().shape();
 
         let mut reader = H5AdReader::open(&path, 500).unwrap();

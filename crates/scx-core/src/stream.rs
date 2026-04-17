@@ -78,7 +78,12 @@ pub trait DatasetWriter: Send {
     /// Begin writing a named sparse matrix (layer or obsp).
     /// `group_prefix` is e.g. "layers" or "obsp".
     /// Must be followed by one or more `write_sparse_chunk` calls and then `end_sparse`.
-    async fn begin_sparse(&mut self, group_prefix: &str, name: &str, meta: &SparseMatrixMeta) -> Result<()>;
+    async fn begin_sparse(
+        &mut self,
+        group_prefix: &str,
+        name: &str,
+        meta: &SparseMatrixMeta,
+    ) -> Result<()>;
 
     /// Append a row-chunk to the currently open sparse matrix.
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()>;

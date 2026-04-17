@@ -4,15 +4,15 @@ use clap::Parser;
 use futures::StreamExt;
 use owo_colors::{OwoColorize, Stream::Stdout};
 use scx_core::{
+    bpcells::BpcellsDatasetReader,
     detect,
     detect::Format,
     dtype::DataType,
-    ir::ColumnData,
-    bpcells::BpcellsDatasetReader,
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5bpcells::BpcellsH5Writer,
-    h5seurat::{H5SeuratWriter, open_h5seurat},
+    h5seurat::{open_h5seurat, H5SeuratWriter},
+    ir::ColumnData,
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     stream::{DatasetReader, DatasetWriter},
     validate::{run_validation, ValidationSchema},
@@ -183,7 +183,11 @@ async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli {
-        Cli::Validate { input, schema, json } => {
+        Cli::Validate {
+            input,
+            schema,
+            json,
+        } => {
             let schema_src = std::fs::read_to_string(&schema)
                 .map_err(|e| anyhow::anyhow!("cannot read schema '{schema}': {e}"))?;
             let schema_parsed: ValidationSchema = serde_yaml::from_str(&schema_src)
@@ -194,8 +198,8 @@ async fn run() -> anyhow::Result<()> {
                 .or_else(|| detect::sniff(input_path))
                 .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
                     Some("h5seurat") => Some(Format::H5Seurat),
-                    Some("h5ad")     => Some(Format::H5Ad),
-                    _                => Some(Format::ScxH5),
+                    Some("h5ad") => Some(Format::H5Ad),
+                    _ => Some(Format::ScxH5),
                 });
 
             let report = match fmt {
@@ -237,16 +241,18 @@ async fn run() -> anyhow::Result<()> {
             }
         }
 
-        Cli::Inspect { input, assay, layer } => {
+        Cli::Inspect {
+            input,
+            assay,
+            layer,
+        } => {
             let input_path = Path::new(&input);
             let fmt = detect::sniff_dir(input_path)
                 .or_else(|| detect::sniff(input_path))
-                .or_else(|| {
-                    match input_path.extension().and_then(|e| e.to_str()) {
-                        Some("h5seurat") => Some(Format::H5Seurat),
-                        Some("h5ad")     => Some(Format::H5Ad),
-                        _                => Some(Format::ScxH5),
-                    }
+                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
+                    Some("h5seurat") => Some(Format::H5Seurat),
+                    Some("h5ad") => Some(Format::H5Ad),
+                    _ => Some(Format::ScxH5),
                 });
 
             let chunk = 1000;
@@ -274,7 +280,18 @@ async fn run() -> anyhow::Result<()> {
             }
         }
 
-        Cli::Convert { input, output, chunk_size, dtype, assay, layer, dgcmatrix, x_slot, project, seuratdisk_compat } => {
+        Cli::Convert {
+            input,
+            output,
+            chunk_size,
+            dtype,
+            assay,
+            layer,
+            dgcmatrix,
+            x_slot,
+            project,
+            seuratdisk_compat,
+        } => {
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
                 "f64" => DataType::F64,
@@ -288,51 +305,118 @@ async fn run() -> anyhow::Result<()> {
             // NPY snapshot directory takes priority.
             let fmt = detect::sniff_dir(input_path)
                 .or_else(|| detect::sniff(input_path))
-                .or_else(|| {
-                    match input_path.extension().and_then(|e| e.to_str()) {
-                        Some("h5seurat") => Some(Format::H5Seurat),
-                        Some("h5ad")     => Some(Format::H5Ad),
-                        _                => Some(Format::ScxH5),
-                    }
+                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
+                    Some("h5seurat") => Some(Format::H5Seurat),
+                    Some("h5ad") => Some(Format::H5Ad),
+                    _ => Some(Format::ScxH5),
                 });
 
             match fmt {
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix, seuratdisk_compat).await?;
+                    convert_with_reader(
+                        &mut reader,
+                        Path::new(&output),
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                    )
+                    .await?;
                 }
                 Some(Format::BPCells) => {
                     tracing::info!(path = %input, "detected format: BPCells directory");
                     let mut reader = BpcellsDatasetReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix, seuratdisk_compat).await?;
+                    convert_with_reader(
+                        &mut reader,
+                        Path::new(&output),
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                    )
+                    .await?;
                 }
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
-                    let mut reader = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(&mut *reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix, seuratdisk_compat).await?;
+                    let mut reader =
+                        open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
+                    convert_with_reader(
+                        &mut *reader,
+                        Path::new(&output),
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                    )
+                    .await?;
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
                     let mut reader = H5AdReader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix, seuratdisk_compat).await?;
+                    convert_with_reader(
+                        &mut reader,
+                        Path::new(&output),
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                    )
+                    .await?;
                 }
                 Some(Format::ScxH5) | None => {
                     tracing::info!(path = %input, "detected format: SCX H5 (internal)");
                     let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix, seuratdisk_compat).await?;
+                    convert_with_reader(
+                        &mut reader,
+                        Path::new(&output),
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                    )
+                    .await?;
                 }
             }
         }
 
-        Cli::Snapshot { input, output_dir, only, exclude, chunk_size, assay, layer } => {
+        Cli::Snapshot {
+            input,
+            output_dir,
+            only,
+            exclude,
+            chunk_size,
+            assay,
+            layer,
+        } => {
             let input_path = Path::new(&input);
             let output_path = Path::new(&output_dir);
 
             let filter = match (only.as_deref(), exclude.as_deref()) {
                 (Some(o), _) => SlotFilter::from_only(o),
                 (_, Some(e)) => SlotFilter::from_exclude(e),
-                _            => SlotFilter::all(),
+                _ => SlotFilter::all(),
             };
 
             tracing::info!(
@@ -344,30 +428,32 @@ async fn run() -> anyhow::Result<()> {
             // Read the full dataset from any supported input format.
             let fmt = detect::sniff_dir(input_path)
                 .or_else(|| detect::sniff(input_path))
-                .or_else(|| {
-                    match input_path.extension().and_then(|e| e.to_str()) {
-                        Some("h5seurat") => Some(Format::H5Seurat),
-                        Some("h5ad")     => Some(Format::H5Ad),
-                        _                => Some(Format::ScxH5),
-                    }
+                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
+                    Some("h5seurat") => Some(Format::H5Seurat),
+                    Some("h5ad") => Some(Format::H5Ad),
+                    _ => Some(Format::ScxH5),
                 });
 
             let dataset = match fmt {
-                Some(Format::NpyDir) => {
-                    NpyIrReader::open(input_path, chunk_size)?.into_dataset()
-                }
+                Some(Format::NpyDir) => NpyIrReader::open(input_path, chunk_size)?.into_dataset(),
                 Some(Format::BPCells) => {
-                    materialise_dataset(&mut BpcellsDatasetReader::open(input_path, chunk_size)?, chunk_size).await?
+                    materialise_dataset(
+                        &mut BpcellsDatasetReader::open(input_path, chunk_size)?,
+                        chunk_size,
+                    )
+                    .await?
                 }
                 Some(Format::H5Seurat) => {
                     let mut r = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
                     materialise_dataset(&mut *r, chunk_size).await?
                 }
                 Some(Format::H5Ad) => {
-                    materialise_dataset(&mut H5AdReader::open(input_path, chunk_size)?, chunk_size).await?
+                    materialise_dataset(&mut H5AdReader::open(input_path, chunk_size)?, chunk_size)
+                        .await?
                 }
                 Some(Format::ScxH5) | None => {
-                    materialise_dataset(&mut ScxH5Reader::open(input_path, chunk_size)?, chunk_size).await?
+                    materialise_dataset(&mut ScxH5Reader::open(input_path, chunk_size)?, chunk_size)
+                        .await?
                 }
             };
 
@@ -391,17 +477,17 @@ async fn materialise_dataset(
     chunk_size: usize,
 ) -> anyhow::Result<scx_core::ir::SingleCellDataset> {
     use futures::StreamExt;
-    use scx_core::ir::{Layers, Obsp, SparseMatrixCSR, SingleCellDataset};
     use scx_core::dtype::TypedVec;
+    use scx_core::ir::{Layers, Obsp, SingleCellDataset, SparseMatrixCSR};
 
     let (n_obs, n_vars) = reader.shape();
     let x_dtype = reader.dtype();
 
-    let obs   = reader.obs().await?;
-    let var   = reader.var().await?;
-    let obsm  = reader.obsm().await?;
-    let uns   = reader.uns().await?;
-    let varm  = reader.varm().await?;
+    let obs = reader.obs().await?;
+    let var = reader.var().await?;
+    let obsm = reader.obsm().await?;
+    let uns = reader.uns().await?;
+    let varm = reader.varm().await?;
 
     // Materialise layers by consuming the stream for each named matrix.
     let layer_metas = reader.layer_metas().await?;
@@ -414,16 +500,21 @@ async fn materialise_dataset(
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             let base = *indptr.last().unwrap();
-            for &p in &chunk.data.indptr[1..] { indptr.push(base + p); }
+            for &p in &chunk.data.indptr[1..] {
+                indptr.push(base + p);
+            }
             indices.extend_from_slice(&chunk.data.indices);
             data_vals.extend(chunk.data.data.to_f64().into_iter().map(|x| x as f32));
         }
-        layers.map.insert(meta.name.clone(), SparseMatrixCSR {
-            shape: meta.shape,
-            indptr,
-            indices,
-            data: scx_core::dtype::TypedVec::F32(data_vals),
-        });
+        layers.map.insert(
+            meta.name.clone(),
+            SparseMatrixCSR {
+                shape: meta.shape,
+                indptr,
+                indices,
+                data: scx_core::dtype::TypedVec::F32(data_vals),
+            },
+        );
     }
 
     // Materialise obsp.
@@ -437,16 +528,21 @@ async fn materialise_dataset(
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             let base = *indptr.last().unwrap();
-            for &p in &chunk.data.indptr[1..] { indptr.push(base + p); }
+            for &p in &chunk.data.indptr[1..] {
+                indptr.push(base + p);
+            }
             indices.extend_from_slice(&chunk.data.indices);
             data_vals.extend(chunk.data.data.to_f64().into_iter().map(|x| x as f32));
         }
-        obsp.map.insert(meta.name.clone(), SparseMatrixCSR {
-            shape: meta.shape,
-            indptr,
-            indices,
-            data: scx_core::dtype::TypedVec::F32(data_vals),
-        });
+        obsp.map.insert(
+            meta.name.clone(),
+            SparseMatrixCSR {
+                shape: meta.shape,
+                indptr,
+                indices,
+                data: scx_core::dtype::TypedVec::F32(data_vals),
+            },
+        );
     }
 
     // varp is not streamed (no source currently emits it), default to empty.
@@ -492,7 +588,18 @@ async fn materialise_dataset(
         data: x_data,
     };
 
-    Ok(SingleCellDataset { x, x_dtype, obs, var, obsm, uns, layers, obsp, varp, varm })
+    Ok(SingleCellDataset {
+        x,
+        x_dtype,
+        obs,
+        var,
+        obsm,
+        uns,
+        layers,
+        obsp,
+        varp,
+        varm,
+    })
 }
 
 async fn convert_with_reader(
@@ -512,13 +619,13 @@ async fn convert_with_reader(
 
     let is_h5seurat = output.extension().and_then(|e| e.to_str()) == Some("h5seurat");
 
-    let obs          = reader.obs().await?;
-    let var          = reader.var().await?;
-    let obsm         = reader.obsm().await?;
-    let uns          = reader.uns().await?;
-    let varm         = reader.varm().await?;
-    let layer_metas  = reader.layer_metas().await?;
-    let obsp_metas   = reader.obsp_metas().await?;
+    let obs = reader.obs().await?;
+    let var = reader.var().await?;
+    let obsm = reader.obsm().await?;
+    let uns = reader.uns().await?;
+    let varm = reader.varm().await?;
+    let layer_metas = reader.layer_metas().await?;
+    let obsp_metas = reader.obsp_metas().await?;
 
     // Resolve the effective X slot for H5Seurat output.
     // auto: if source has a "counts" layer, X is assumed normalised → goes to "data".
@@ -554,19 +661,38 @@ async fn convert_with_reader(
     );
 
     tracing::info!(
-        obs_cols   = obs.columns.len(),
-        var_cols   = var.columns.len(),
+        obs_cols = obs.columns.len(),
+        var_cols = var.columns.len(),
         embeddings = obsm.map.len(),
-        layers     = layer_metas.len(),
-        obsp       = obsp_metas.len(),
-        "metadata loaded in {:.2?}", t0.elapsed()
+        layers = layer_metas.len(),
+        obsp = obsp_metas.len(),
+        "metadata loaded in {:.2?}",
+        t0.elapsed()
     );
 
     let mut writer: Box<dyn DatasetWriter> = if is_h5seurat {
         if use_dgcmatrix {
-            Box::new(H5SeuratWriter::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot), Some(project), seuratdisk_compat)?)
+            Box::new(H5SeuratWriter::create(
+                output,
+                n_obs,
+                n_vars,
+                out_dtype,
+                Some(out_assay),
+                Some(effective_x_slot),
+                Some(project),
+                seuratdisk_compat,
+            )?)
         } else {
-            Box::new(BpcellsH5Writer::create(output, n_obs, n_vars, out_dtype, Some(out_assay), Some(effective_x_slot), Some(project), seuratdisk_compat)?)
+            Box::new(BpcellsH5Writer::create(
+                output,
+                n_obs,
+                n_vars,
+                out_dtype,
+                Some(out_assay),
+                Some(effective_x_slot),
+                Some(project),
+                seuratdisk_compat,
+            )?)
         }
     } else {
         Box::new(H5AdWriter::create(output, n_obs, n_vars, out_dtype)?)
@@ -611,12 +737,12 @@ async fn convert_with_reader(
     let t_x = std::time::Instant::now();
     let mut stream = reader.x_stream();
     let mut total_nnz = 0usize;
-    let mut n_chunks  = 0usize;
+    let mut n_chunks = 0usize;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         total_nnz += chunk.data.indices.len();
-        n_chunks  += 1;
+        n_chunks += 1;
         writer.write_x_chunk(&chunk).await?;
     }
 
@@ -624,7 +750,8 @@ async fn convert_with_reader(
         n_chunks,
         total_nnz,
         throughput_cells_s = (n_obs as f64 / t_x.elapsed().as_secs_f64()) as u64,
-        "matrix streamed in {:.2?}", t_x.elapsed()
+        "matrix streamed in {:.2?}",
+        t_x.elapsed()
     );
 
     writer.finalize().await?;
@@ -644,10 +771,10 @@ async fn convert_with_reader(
 
 fn col_type_str(data: &ColumnData) -> &'static str {
     match data {
-        ColumnData::Float(_)         => "float64",
-        ColumnData::Int(_)           => "int32",
-        ColumnData::Bool(_)          => "bool",
-        ColumnData::String(_)        => "string",
+        ColumnData::Float(_) => "float64",
+        ColumnData::Int(_) => "int32",
+        ColumnData::Bool(_) => "bool",
+        ColumnData::String(_) => "string",
         ColumnData::Categorical { .. } => "categorical",
     }
 }
@@ -666,27 +793,52 @@ fn cat_levels_preview(data: &ColumnData) -> String {
     }
 }
 
-async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) -> anyhow::Result<()> {
+async fn inspect(
+    reader: &mut dyn DatasetReader,
+    path: &str,
+    format_name: &str,
+) -> anyhow::Result<()> {
     let (n_obs, n_vars) = reader.shape();
 
     // Colour helpers -- all checks against Stdout so piped output stays plain.
-    macro_rules! bold  { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.bold()) } }
-    macro_rules! cyan  { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.bright_cyan()) } }
-    macro_rules! green { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.bright_green()) } }
-    macro_rules! dim   { ($x:expr) => { $x.if_supports_color(Stdout, |t| t.dimmed()) } }
+    macro_rules! bold {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bold())
+        };
+    }
+    macro_rules! cyan {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_cyan())
+        };
+    }
+    macro_rules! green {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_green())
+        };
+    }
+    macro_rules! dim {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.dimmed())
+        };
+    }
     // yellow! and bold_cyan! use Style to avoid borrow-of-temporary when chaining.
-    macro_rules! yellow { ($x:expr) => {{
-        use owo_colors::Style;
-        $x.if_supports_color(Stdout, |t| t.style(Style::new().bright_yellow()))
-    }} }
-    macro_rules! bold_cyan { ($x:expr) => {{
-        use owo_colors::Style;
-        $x.if_supports_color(Stdout, |t| t.style(Style::new().bold().bright_cyan()))
-    }} }
+    macro_rules! yellow {
+        ($x:expr) => {{
+            use owo_colors::Style;
+            $x.if_supports_color(Stdout, |t| t.style(Style::new().bright_yellow()))
+        }};
+    }
+    macro_rules! bold_cyan {
+        ($x:expr) => {{
+            use owo_colors::Style;
+            $x.if_supports_color(Stdout, |t| t.style(Style::new().bold().bright_cyan()))
+        }};
+    }
 
-    println!("{} {}",  bold!("File   :"), green!(path));
-    println!("{} {}",  bold!("Format :"), cyan!(format_name));
-    println!("{} {} × {}  {}",
+    println!("{} {}", bold!("File   :"), green!(path));
+    println!("{} {}", bold!("Format :"), cyan!(format_name));
+    println!(
+        "{} {} × {}  {}",
         bold!("Shape  :"),
         yellow!(n_obs),
         yellow!(n_vars),
@@ -699,7 +851,8 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
     // section header helper
     let section = |name: &str, count: usize, unit: &str| {
         let label = format!(" {unit}):");
-        println!("{} {}{}{}",
+        println!(
+            "{} {}{}{}",
             bold_cyan!(name),
             bold!("("),
             yellow!(count),
@@ -710,14 +863,22 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
     // ── obs ──────────────────────────────────────────────────────────────────
     let obs = reader.obs().await?;
     section("obs", obs.columns.len(), "columns");
-    if obs.columns.is_empty() { println!("  {}", dim!("(none)")); }
+    if obs.columns.is_empty() {
+        println!("  {}", dim!("(none)"));
+    }
     for col in &obs.columns {
         let extra = cat_levels_preview(&col.data);
         let type_str = col_type_str(&col.data);
         if extra.is_empty() {
             println!("  {:<30} {}", col.name, dim!(&type_str));
         } else {
-            println!("  {:<30} {}  {} {}", col.name, dim!(&type_str), dim!("—"), dim!(&extra));
+            println!(
+                "  {:<30} {}  {} {}",
+                col.name,
+                dim!(&type_str),
+                dim!("—"),
+                dim!(&extra)
+            );
         }
     }
     println!();
@@ -725,14 +886,22 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
     // ── var ──────────────────────────────────────────────────────────────────
     let var = reader.var().await?;
     section("var", var.columns.len(), "columns");
-    if var.columns.is_empty() { println!("  {}", dim!("(none)")); }
+    if var.columns.is_empty() {
+        println!("  {}", dim!("(none)"));
+    }
     for col in &var.columns {
         let extra = cat_levels_preview(&col.data);
         let type_str = col_type_str(&col.data);
         if extra.is_empty() {
             println!("  {:<30} {}", col.name, dim!(&type_str));
         } else {
-            println!("  {:<30} {}  {} {}", col.name, dim!(&type_str), dim!("—"), dim!(&extra));
+            println!(
+                "  {:<30} {}  {} {}",
+                col.name,
+                dim!(&type_str),
+                dim!("—"),
+                dim!(&extra)
+            );
         }
     }
     println!();
@@ -747,7 +916,9 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
         let shape = format!("({}, {})", m.shape.0, m.shape.1);
         println!("  {:<30} {}", k, dim!(&shape));
     }
-    if obsm.map.is_empty() { println!("  {}", dim!("(none)")); }
+    if obsm.map.is_empty() {
+        println!("  {}", dim!("(none)"));
+    }
     println!();
 
     // ── varm ─────────────────────────────────────────────────────────────────
@@ -760,7 +931,9 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
         let shape = format!("({}, {})", m.shape.0, m.shape.1);
         println!("  {:<30} {}", k, dim!(&shape));
     }
-    if varm.map.is_empty() { println!("  {}", dim!("(none)")); }
+    if varm.map.is_empty() {
+        println!("  {}", dim!("(none)"));
+    }
     println!();
 
     // ── layers ───────────────────────────────────────────────────────────────
@@ -770,11 +943,18 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
     sorted_layers.sort_by(|a, b| a.name.cmp(&b.name));
     for m in &sorted_layers {
         let nnz = m.indptr.last().copied().unwrap_or(0);
-        println!("  {:<30} {} × {}  {}{}",
-            m.name, yellow!(m.shape.0), yellow!(m.shape.1),
-            dim!("nnz="), yellow!(nnz));
+        println!(
+            "  {:<30} {} × {}  {}{}",
+            m.name,
+            yellow!(m.shape.0),
+            yellow!(m.shape.1),
+            dim!("nnz="),
+            yellow!(nnz)
+        );
     }
-    if layer_metas.is_empty() { println!("  {}", dim!("(none)")); }
+    if layer_metas.is_empty() {
+        println!("  {}", dim!("(none)"));
+    }
     println!();
 
     // ── obsp ─────────────────────────────────────────────────────────────────
@@ -784,11 +964,18 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
     sorted_obsp.sort_by(|a, b| a.name.cmp(&b.name));
     for m in &sorted_obsp {
         let nnz = m.indptr.last().copied().unwrap_or(0);
-        println!("  {:<30} {} × {}  {}{}",
-            m.name, yellow!(m.shape.0), yellow!(m.shape.1),
-            dim!("nnz="), yellow!(nnz));
+        println!(
+            "  {:<30} {} × {}  {}{}",
+            m.name,
+            yellow!(m.shape.0),
+            yellow!(m.shape.1),
+            dim!("nnz="),
+            yellow!(nnz)
+        );
     }
-    if obsp_metas.is_empty() { println!("  {}", dim!("(none)")); }
+    if obsp_metas.is_empty() {
+        println!("  {}", dim!("(none)"));
+    }
     println!();
 
     // ── uns ──────────────────────────────────────────────────────────────────
@@ -803,11 +990,14 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
         for k in keys {
             let v = &obj[k];
             let summary = match v {
-                serde_json::Value::Array(a)  => format!("array [{}]", a.len()),
+                serde_json::Value::Array(a) => format!("array [{}]", a.len()),
                 serde_json::Value::Object(o) => format!("dict  ({} keys)", o.len()),
                 serde_json::Value::String(s) => {
-                    if s.len() > 60 { format!("\"{}...\"", &s[..57]) }
-                    else { format!("\"{s}\"") }
+                    if s.len() > 60 {
+                        format!("\"{}...\"", &s[..57])
+                    } else {
+                        format!("\"{s}\"")
+                    }
                 }
                 other => format!("{other}"),
             };
@@ -849,13 +1039,17 @@ fn print_report_human(report: &scx_core::validate::ValidationReport) {
 }
 
 fn print_report_json(report: &scx_core::validate::ValidationReport) {
-    let checks: Vec<serde_json::Value> = report.checks.iter().map(|c| {
-        serde_json::json!({
-            "name":   c.name,
-            "status": if c.passed { "PASS" } else { "FAIL" },
-            "detail": c.detail,
+    let checks: Vec<serde_json::Value> = report
+        .checks
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name":   c.name,
+                "status": if c.passed { "PASS" } else { "FAIL" },
+                "detail": c.detail,
+            })
         })
-    }).collect();
+        .collect();
 
     let out = serde_json::json!({
         "file":   report.file,

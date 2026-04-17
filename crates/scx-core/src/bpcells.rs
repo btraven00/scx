@@ -5,8 +5,8 @@
 //!
 //! Format spec: https://bnprks.github.io/BPCells/articles/web-only/bitpacking-format.html
 
-use std::path::Path;
 use rayon::prelude::*;
+use std::path::Path;
 
 /// Minimum number of BP-128 chunks before switching to parallel decode.
 /// Below ~256 chunks (32 768 values) the rayon thread-pool overhead dominates.
@@ -27,7 +27,11 @@ pub fn zigzag_decode(z: u32) -> i32 {
 
 /// Return the minimum number of bits needed to represent `max_val`.
 pub fn bits_needed(max_val: u32) -> u8 {
-    if max_val == 0 { 0 } else { (32 - max_val.leading_zeros()) as u8 }
+    if max_val == 0 {
+        0
+    } else {
+        (32 - max_val.leading_zeros()) as u8
+    }
 }
 
 // ─── BP-128 core pack / unpack ───────────────────────────────────────────────
@@ -180,12 +184,7 @@ pub fn encode_d1z(values: &[u32]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
 /// - `chunk_offsets`: word boundary per chunk in `data`, length `n_chunks + 1`
 ///   (`index_idx` file, body only).
 /// - `starts`: the "previous" value before each chunk (`index_starts` file).
-pub fn decode_d1z(
-    data: &[u32],
-    chunk_offsets: &[u32],
-    starts: &[u32],
-    count: usize,
-) -> Vec<u32> {
+pub fn decode_d1z(data: &[u32], chunk_offsets: &[u32], starts: &[u32], count: usize) -> Vec<u32> {
     let n_chunks = chunk_offsets.len().saturating_sub(1);
     // `starts[k]` is the running-prefix value before chunk k, so each chunk
     // is fully independent — perfect for parallel decode.
@@ -196,30 +195,40 @@ pub fn decode_d1z(
             .map(|k| {
                 let out_start = k * 128;
                 let take = (count.saturating_sub(out_start)).min(128);
-                (out_start, take, chunk_offsets[k] as usize, chunk_offsets[k + 1] as usize, starts[k])
+                (
+                    out_start,
+                    take,
+                    chunk_offsets[k] as usize,
+                    chunk_offsets[k + 1] as usize,
+                    starts[k],
+                )
             })
             .take_while(|(s, t, ..)| *s < count && *t > 0)
             .collect();
         // SAFETY: each descriptor maps to a non-overlapping slice of `out`.
-        descs.par_iter().for_each(|&(out_start, take, ws, we, prev_start)| {
-            let b = ((we - ws) / 4) as u8;
-            let raw = bp128_unpack(b, &data[ws..we]);
-            let dst = unsafe {
-                std::slice::from_raw_parts_mut(out.as_ptr().add(out_start) as *mut u32, take)
-            };
-            let mut prev = prev_start;
-            for i in 0..take {
-                let delta = zigzag_decode(raw[i]);
-                prev = (prev as i64 + delta as i64) as u32;
-                dst[i] = prev;
-            }
-        });
+        descs
+            .par_iter()
+            .for_each(|&(out_start, take, ws, we, prev_start)| {
+                let b = ((we - ws) / 4) as u8;
+                let raw = bp128_unpack(b, &data[ws..we]);
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(out.as_ptr().add(out_start) as *mut u32, take)
+                };
+                let mut prev = prev_start;
+                for i in 0..take {
+                    let delta = zigzag_decode(raw[i]);
+                    prev = (prev as i64 + delta as i64) as u32;
+                    dst[i] = prev;
+                }
+            });
         out
     } else {
         let mut out = Vec::with_capacity(count);
         let mut remaining = count;
         for k in 0..n_chunks {
-            if remaining == 0 { break; }
+            if remaining == 0 {
+                break;
+            }
             let ws = chunk_offsets[k] as usize;
             let we = chunk_offsets[k + 1] as usize;
             let b = ((we - ws) / 4) as u8;
@@ -251,7 +260,12 @@ pub fn decode_for(data: &[u32], chunk_offsets: &[u32], count: usize) -> Vec<u32>
             .map(|k| {
                 let out_start = k * 128;
                 let take = (count.saturating_sub(out_start)).min(128);
-                (out_start, take, chunk_offsets[k] as usize, chunk_offsets[k + 1] as usize)
+                (
+                    out_start,
+                    take,
+                    chunk_offsets[k] as usize,
+                    chunk_offsets[k + 1] as usize,
+                )
             })
             .take_while(|(s, t, ..)| *s < count && *t > 0)
             .collect();
@@ -262,20 +276,26 @@ pub fn decode_for(data: &[u32], chunk_offsets: &[u32], count: usize) -> Vec<u32>
             let dst = unsafe {
                 std::slice::from_raw_parts_mut(out.as_ptr().add(out_start) as *mut u32, take)
             };
-            for i in 0..take { dst[i] = raw[i].wrapping_add(1); }
+            for i in 0..take {
+                dst[i] = raw[i].wrapping_add(1);
+            }
         });
         out
     } else {
         let mut out = Vec::with_capacity(count);
         let mut remaining = count;
         for k in 0..n_chunks {
-            if remaining == 0 { break; }
+            if remaining == 0 {
+                break;
+            }
             let ws = chunk_offsets[k] as usize;
             let we = chunk_offsets[k + 1] as usize;
             let b = ((we - ws) / 4) as u8;
             let raw = bp128_unpack(b, &data[ws..we]);
             let take = remaining.min(128);
-            for i in 0..take { out.push(raw[i].wrapping_add(1)); }
+            for i in 0..take {
+                out.push(raw[i].wrapping_add(1));
+            }
             remaining -= take;
         }
         out
@@ -324,7 +344,11 @@ fn read_f64s_file(path: &Path) -> std::io::Result<Vec<f64>> {
 /// Returns an empty vec if the file is missing or empty.
 fn read_names_file(path: &Path) -> std::io::Result<Vec<String>> {
     match std::fs::read_to_string(path) {
-        Ok(s) => Ok(s.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()),
+        Ok(s) => Ok(s
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         Err(e) => Err(e),
     }
@@ -478,16 +502,15 @@ impl BpcellsDirReader {
 
 // ─── BpcellsDatasetReader ─────────────────────────────────────────────────────
 
-use std::pin::Pin;
-use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{stream, Stream};
+use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::dtype::{DataType, TypedVec};
 use crate::error::Result;
 use crate::ir::{
-    Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-    SparseMatrixMeta, UnsTable, VarTable, Varm,
+    Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
 };
 use crate::stream::DatasetReader;
 
@@ -532,7 +555,11 @@ impl BpcellsDatasetReader {
         dtype: DataType,
     ) -> Self {
         Self {
-            n_obs, n_vars, chunk_size, obs_names, var_names,
+            n_obs,
+            n_vars,
+            chunk_size,
+            obs_names,
+            var_names,
             idxptr: Arc::new(idxptr),
             index: Arc::new(index),
             values: Arc::new(values),
@@ -576,17 +603,18 @@ impl BpcellsDatasetReader {
     /// Reads `version`, `storage_order`, `shape`, `row_names`, `col_names`.
     /// Calling `x_stream()` or `read_chunk()` on this reader returns an error.
     pub fn open_metadata_only(dir: &Path) -> std::io::Result<Self> {
-        let version = std::fs::read_to_string(dir.join("version"))
-            .map(|s| s.trim().to_owned())?;
+        let version = std::fs::read_to_string(dir.join("version")).map(|s| s.trim().to_owned())?;
 
         let order_str = std::fs::read_to_string(dir.join("storage_order"))?;
         let storage_order = match order_str.trim() {
             "col" => StorageOrder::Col,
             "row" => StorageOrder::Row,
-            s => return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unknown storage_order: {s}"),
-            )),
+            s => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown storage_order: {s}"),
+                ))
+            }
         };
 
         let shape = read_u32s_file(&dir.join("shape"))?;
@@ -602,7 +630,7 @@ impl BpcellsDatasetReader {
 
         let dtype = match version.as_str() {
             "packed-uint-matrix-v2" | "unpacked-uint-matrix-v2" => DataType::U32,
-            "packed-float-matrix-v2"  => DataType::F32,
+            "packed-float-matrix-v2" => DataType::F32,
             "packed-double-matrix-v2" => DataType::F64,
             _ => DataType::F32,
         };
@@ -628,7 +656,8 @@ impl BpcellsDatasetReader {
     pub fn read_chunk(&self, obs_start: usize, obs_end: usize) -> Result<MatrixChunk> {
         if self.metadata_only {
             return Err(crate::error::ScxError::InvalidFormat(
-                "BPCells reader opened in metadata-only mode; call open() to stream matrix data".into(),
+                "BPCells reader opened in metadata-only mode; call open() to stream matrix data"
+                    .into(),
             ));
         }
         if obs_start > obs_end || obs_end > self.n_obs {
@@ -640,7 +669,7 @@ impl BpcellsDatasetReader {
 
         let n_chunk = obs_end - obs_start;
         let nnz_start = self.idxptr[obs_start] as usize;
-        let nnz_end   = self.idxptr[obs_end]   as usize;
+        let nnz_end = self.idxptr[obs_end] as usize;
 
         let indptr: Vec<u64> = self.idxptr[obs_start..=obs_end]
             .iter()
@@ -679,19 +708,35 @@ impl DatasetReader for BpcellsDatasetReader {
     }
 
     async fn obs(&mut self) -> Result<ObsTable> {
-        Ok(ObsTable { index: self.obs_names.clone(), columns: vec![] })
+        Ok(ObsTable {
+            index: self.obs_names.clone(),
+            columns: vec![],
+        })
     }
 
     async fn var(&mut self) -> Result<VarTable> {
-        Ok(VarTable { index: self.var_names.clone(), columns: vec![] })
+        Ok(VarTable {
+            index: self.var_names.clone(),
+            columns: vec![],
+        })
     }
 
-    async fn obsm(&mut self) -> Result<Embeddings> { Ok(Embeddings::default()) }
-    async fn uns(&mut self) -> Result<UnsTable>    { Ok(UnsTable::default()) }
-    async fn varm(&mut self) -> Result<Varm>       { Ok(Varm::default()) }
+    async fn obsm(&mut self) -> Result<Embeddings> {
+        Ok(Embeddings::default())
+    }
+    async fn uns(&mut self) -> Result<UnsTable> {
+        Ok(UnsTable::default())
+    }
+    async fn varm(&mut self) -> Result<Varm> {
+        Ok(Varm::default())
+    }
 
-    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> { Ok(Vec::new()) }
-    async fn obsp_metas(&mut self)  -> Result<Vec<SparseMatrixMeta>> { Ok(Vec::new()) }
+    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
+        Ok(Vec::new())
+    }
+    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
+        Ok(Vec::new())
+    }
 
     fn layer_stream<'a>(
         &'a self,
@@ -746,7 +791,9 @@ impl DatasetReader for BpcellsDatasetReader {
                 metadata_only: reader.metadata_only,
             };
             async move {
-                if obs_start >= n_obs { return None; }
+                if obs_start >= n_obs {
+                    return None;
+                }
                 let obs_end = (obs_start + chunk_size).min(n_obs);
                 let chunk = reader.read_chunk(obs_start, obs_end);
                 Some((chunk, obs_end))
