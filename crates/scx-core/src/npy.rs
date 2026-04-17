@@ -35,10 +35,10 @@
 //!   varp/{name}/
 //! ```
 
+use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
-use memmap2::Mmap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -51,8 +51,8 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, Layers, MatrixChunk, Obsp, ObsTable,
-        SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm, Varp, SingleCellDataset,
+        Column, ColumnData, DenseMatrix, Embeddings, Layers, MatrixChunk, ObsTable, Obsp,
+        SingleCellDataset, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm, Varp,
     },
     stream::DatasetReader,
 };
@@ -78,7 +78,12 @@ pub struct SlotFilter {
 }
 
 impl SlotFilter {
-    pub fn all() -> Self { Self { only: None, exclude: vec![] } }
+    pub fn all() -> Self {
+        Self {
+            only: None,
+            exclude: vec![],
+        }
+    }
 
     pub fn from_only(s: &str) -> Self {
         Self {
@@ -95,7 +100,9 @@ impl SlotFilter {
     }
 
     pub fn includes(&self, target: &str) -> bool {
-        if self.exclude.iter().any(|s| slot_matches(s, target)) { return false; }
+        if self.exclude.iter().any(|s| slot_matches(s, target)) {
+            return false;
+        }
         if let Some(only) = &self.only {
             return only.iter().any(|s| slot_matches(s, target));
         }
@@ -170,22 +177,32 @@ struct Meta {
 }
 
 fn dtype_str(dt: DataType) -> &'static str {
-    match dt { DataType::F32 => "f32", DataType::F64 => "f64",
-               DataType::I32 => "i32", DataType::U32 => "u32" }
+    match dt {
+        DataType::F32 => "f32",
+        DataType::F64 => "f64",
+        DataType::I32 => "i32",
+        DataType::U32 => "u32",
+    }
 }
 
 fn parse_dtype(s: &str) -> Result<DataType> {
     match s {
-        "f32" => Ok(DataType::F32), "f64" => Ok(DataType::F64),
-        "i32" => Ok(DataType::I32), "u32" => Ok(DataType::U32),
-        other => Err(ScxError::InvalidFormat(format!("unknown dtype in meta.json: {other}"))),
+        "f32" => Ok(DataType::F32),
+        "f64" => Ok(DataType::F64),
+        "i32" => Ok(DataType::I32),
+        "u32" => Ok(DataType::U32),
+        other => Err(ScxError::InvalidFormat(format!(
+            "unknown dtype in meta.json: {other}"
+        ))),
     }
 }
 
 fn col_kind(data: &ColumnData) -> &'static str {
     match data {
-        ColumnData::Int(_) => "int",       ColumnData::Float(_) => "float",
-        ColumnData::Bool(_) => "bool",     ColumnData::String(_) => "string",
+        ColumnData::Int(_) => "int",
+        ColumnData::Float(_) => "float",
+        ColumnData::Bool(_) => "bool",
+        ColumnData::String(_) => "string",
         ColumnData::Categorical { .. } => "categorical",
     }
 }
@@ -194,14 +211,30 @@ fn col_kind(data: &ColumnData) -> &'static str {
 // Directory helpers
 // ---------------------------------------------------------------------------
 
-fn x_dir(root: &Path)           -> PathBuf { root.join("X") }
-fn obs_dir(root: &Path)         -> PathBuf { root.join("obs") }
-fn var_dir(root: &Path)         -> PathBuf { root.join("var") }
-fn obsm_dir(root: &Path)        -> PathBuf { root.join("obsm") }
-fn varm_dir(root: &Path)        -> PathBuf { root.join("varm") }
-fn layers_key_dir(root: &Path, k: &str) -> PathBuf { root.join("layers").join(k) }
-fn obsp_key_dir(root: &Path, k: &str)   -> PathBuf { root.join("obsp").join(k) }
-fn varp_key_dir(root: &Path, k: &str)   -> PathBuf { root.join("varp").join(k) }
+fn x_dir(root: &Path) -> PathBuf {
+    root.join("X")
+}
+fn obs_dir(root: &Path) -> PathBuf {
+    root.join("obs")
+}
+fn var_dir(root: &Path) -> PathBuf {
+    root.join("var")
+}
+fn obsm_dir(root: &Path) -> PathBuf {
+    root.join("obsm")
+}
+fn varm_dir(root: &Path) -> PathBuf {
+    root.join("varm")
+}
+fn layers_key_dir(root: &Path, k: &str) -> PathBuf {
+    root.join("layers").join(k)
+}
+fn obsp_key_dir(root: &Path, k: &str) -> PathBuf {
+    root.join("obsp").join(k)
+}
+fn varp_key_dir(root: &Path, k: &str) -> PathBuf {
+    root.join("varp").join(k)
+}
 
 // ---------------------------------------------------------------------------
 // NPY v1.0 header write
@@ -216,9 +249,7 @@ fn write_npy_header<W: Write>(w: &mut W, descr: &str, shape: &[usize]) -> io::Re
             format!("({})", parts.join(", "))
         }
     };
-    let dict = format!(
-        "{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_str}, }}"
-    );
+    let dict = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_str}, }}");
     let needed = 10 + dict.len() + 1;
     let padded = (needed + 63) / 64 * 64;
     let header_len = padded - 10;
@@ -227,7 +258,9 @@ fn write_npy_header<W: Write>(w: &mut W, descr: &str, shape: &[usize]) -> io::Re
     w.write_all(b"\x93NUMPY\x01\x00")?;
     w.write_all(&(header_len as u16).to_le_bytes())?;
     w.write_all(dict.as_bytes())?;
-    for _ in 0..n_spaces { w.write_all(b" ")?; }
+    for _ in 0..n_spaces {
+        w.write_all(b" ")?;
+    }
     w.write_all(b"\n")
 }
 
@@ -243,7 +276,10 @@ fn read_npy_raw(path: &Path) -> Result<(String, Vec<usize>, Mmap, usize)> {
         .map_err(|e| ScxError::InvalidFormat(format!("mmap {}: {e}", path.display())))?;
 
     if mmap.len() < 10 || &mmap[..6] != b"\x93NUMPY" {
-        return Err(ScxError::InvalidFormat(format!("not an NPY file: {}", path.display())));
+        return Err(ScxError::InvalidFormat(format!(
+            "not an NPY file: {}",
+            path.display()
+        )));
     }
     let major = mmap[6];
     if major != 1 {
@@ -252,19 +288,23 @@ fn read_npy_raw(path: &Path) -> Result<(String, Vec<usize>, Mmap, usize)> {
     let header_len = u16::from_le_bytes([mmap[8], mmap[9]]) as usize;
     let body_offset = 10 + header_len;
     if mmap.len() < body_offset {
-        return Err(ScxError::InvalidFormat(format!("NPY header truncated: {}", path.display())));
+        return Err(ScxError::InvalidFormat(format!(
+            "NPY header truncated: {}",
+            path.display()
+        )));
     }
     let header_str = std::str::from_utf8(&mmap[10..body_offset])
         .map_err(|_| ScxError::InvalidFormat("NPY header not UTF-8".into()))?
         .trim_end();
 
-    let descr   = extract_header_str(header_str, "descr")?;
+    let descr = extract_header_str(header_str, "descr")?;
     let fortran = extract_header_bool(header_str, "fortran_order")?;
-    let shape   = extract_header_shape(header_str)?;
+    let shape = extract_header_shape(header_str)?;
 
     if fortran {
         return Err(ScxError::InvalidFormat(format!(
-            "Fortran-order NPY not supported: {}", path.display()
+            "Fortran-order NPY not supported: {}",
+            path.display()
         )));
     }
     Ok((descr, shape, mmap, body_offset))
@@ -272,50 +312,72 @@ fn read_npy_raw(path: &Path) -> Result<(String, Vec<usize>, Mmap, usize)> {
 
 fn extract_header_str(header: &str, key: &str) -> Result<String> {
     let needle = format!("'{key}'");
-    let pos = header.find(&needle)
+    let pos = header
+        .find(&needle)
         .ok_or_else(|| ScxError::MissingField(format!("NPY header missing '{key}'")))?;
     let rest = header[pos + needle.len()..].trim_start();
-    let rest = rest.strip_prefix(':')
+    let rest = rest
+        .strip_prefix(':')
         .ok_or_else(|| ScxError::InvalidFormat(format!("NPY header malformed at '{key}'")))?
         .trim_start();
     let q = if rest.starts_with('\'') { '\'' } else { '"' };
-    let inner = rest.strip_prefix(q)
+    let inner = rest
+        .strip_prefix(q)
         .ok_or_else(|| ScxError::InvalidFormat("NPY header: missing opening quote".into()))?;
-    let end = inner.find(q)
+    let end = inner
+        .find(q)
         .ok_or_else(|| ScxError::InvalidFormat("NPY header: unclosed string".into()))?;
     Ok(inner[..end].to_string())
 }
 
 fn extract_header_bool(header: &str, key: &str) -> Result<bool> {
     let needle = format!("'{key}'");
-    let pos = header.find(&needle)
+    let pos = header
+        .find(&needle)
         .ok_or_else(|| ScxError::MissingField(format!("NPY header missing '{key}'")))?;
     let rest = header[pos + needle.len()..].trim_start();
-    let rest = rest.strip_prefix(':')
+    let rest = rest
+        .strip_prefix(':')
         .ok_or_else(|| ScxError::InvalidFormat(format!("NPY header malformed at '{key}'")))?
         .trim_start();
-    if rest.starts_with("True") { Ok(true) }
-    else if rest.starts_with("False") { Ok(false) }
-    else { Err(ScxError::InvalidFormat(format!("NPY header bad bool for '{key}'"))) }
+    if rest.starts_with("True") {
+        Ok(true)
+    } else if rest.starts_with("False") {
+        Ok(false)
+    } else {
+        Err(ScxError::InvalidFormat(format!(
+            "NPY header bad bool for '{key}'"
+        )))
+    }
 }
 
 fn extract_header_shape(header: &str) -> Result<Vec<usize>> {
-    let pos = header.find("'shape'")
+    let pos = header
+        .find("'shape'")
         .ok_or_else(|| ScxError::MissingField("NPY header missing 'shape'".into()))?;
     let rest = header[pos + 7..].trim_start();
-    let rest = rest.strip_prefix(':')
+    let rest = rest
+        .strip_prefix(':')
         .ok_or_else(|| ScxError::InvalidFormat("NPY header malformed at 'shape'".into()))?
         .trim_start();
-    let rest = rest.strip_prefix('(')
+    let rest = rest
+        .strip_prefix('(')
         .ok_or_else(|| ScxError::InvalidFormat("NPY shape missing '('".into()))?;
-    let end = rest.find(')')
+    let end = rest
+        .find(')')
         .ok_or_else(|| ScxError::InvalidFormat("NPY shape missing ')'".into()))?;
     let inner = rest[..end].trim();
-    if inner.is_empty() { return Ok(vec![]); }
-    inner.split(',')
+    if inner.is_empty() {
+        return Ok(vec![]);
+    }
+    inner
+        .split(',')
         .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().parse::<usize>()
-            .map_err(|_| ScxError::InvalidFormat(format!("NPY shape non-integer: '{s}'"))))
+        .map(|s| {
+            s.trim()
+                .parse::<usize>()
+                .map_err(|_| ScxError::InvalidFormat(format!("NPY shape non-integer: '{s}'")))
+        })
         .collect()
 }
 
@@ -331,7 +393,9 @@ unsafe fn bytes_to_vec<T: Copy>(body: &[u8], n: usize) -> Result<Vec<T>> {
     let elem = std::mem::size_of::<T>();
     if body.len() != n * elem {
         return Err(ScxError::InvalidFormat(format!(
-            "NPY body size mismatch: expected {} bytes for {n} elements, got {}", n * elem, body.len()
+            "NPY body size mismatch: expected {} bytes for {n} elements, got {}",
+            n * elem,
+            body.len()
         )));
     }
     let mut v = vec![std::mem::zeroed::<T>(); n];
@@ -344,8 +408,12 @@ unsafe fn bytes_to_vec<T: Copy>(body: &[u8], n: usize) -> Result<Vec<T>> {
 // ---------------------------------------------------------------------------
 
 fn npy_descr(tv: &TypedVec) -> &'static str {
-    match tv { TypedVec::F32(_) => "<f4", TypedVec::F64(_) => "<f8",
-               TypedVec::I32(_) => "<i4", TypedVec::U32(_) => "<u4" }
+    match tv {
+        TypedVec::F32(_) => "<f4",
+        TypedVec::F64(_) => "<f8",
+        TypedVec::I32(_) => "<i4",
+        TypedVec::U32(_) => "<u4",
+    }
 }
 
 fn write_1d_typed(path: &Path, tv: &TypedVec) -> Result<()> {
@@ -405,7 +473,9 @@ fn write_2d_f64(path: &Path, data: &[f64], shape: (usize, usize)) -> Result<()> 
 
 fn write_txt(path: &Path, lines: &[String]) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
-    for line in lines { writeln!(w, "{line}")?; }
+    for line in lines {
+        writeln!(w, "{line}")?;
+    }
     Ok(())
 }
 
@@ -424,50 +494,72 @@ fn read_1d_typed(path: &Path, dtype: DataType) -> Result<TypedVec> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
     if shape.len() != 1 {
         return Err(ScxError::InvalidFormat(format!(
-            "expected 1D NPY, got {}D: {}", shape.len(), path.display()
+            "expected 1D NPY, got {}D: {}",
+            shape.len(),
+            path.display()
         )));
     }
     let n = shape[0];
     let body = &mmap[off..];
     match dtype {
-        DataType::F32 => { check_descr(&descr, "<f4", path)?; Ok(TypedVec::F32(unsafe { bytes_to_vec::<f32>(body, n) }?)) }
-        DataType::F64 => { check_descr(&descr, "<f8", path)?; Ok(TypedVec::F64(unsafe { bytes_to_vec::<f64>(body, n) }?)) }
-        DataType::I32 => { check_descr(&descr, "<i4", path)?; Ok(TypedVec::I32(unsafe { bytes_to_vec::<i32>(body, n) }?)) }
-        DataType::U32 => { check_descr(&descr, "<u4", path)?; Ok(TypedVec::U32(unsafe { bytes_to_vec::<u32>(body, n) }?)) }
+        DataType::F32 => {
+            check_descr(&descr, "<f4", path)?;
+            Ok(TypedVec::F32(unsafe { bytes_to_vec::<f32>(body, n) }?))
+        }
+        DataType::F64 => {
+            check_descr(&descr, "<f8", path)?;
+            Ok(TypedVec::F64(unsafe { bytes_to_vec::<f64>(body, n) }?))
+        }
+        DataType::I32 => {
+            check_descr(&descr, "<i4", path)?;
+            Ok(TypedVec::I32(unsafe { bytes_to_vec::<i32>(body, n) }?))
+        }
+        DataType::U32 => {
+            check_descr(&descr, "<u4", path)?;
+            Ok(TypedVec::U32(unsafe { bytes_to_vec::<u32>(body, n) }?))
+        }
     }
 }
 
 fn read_1d_u32(path: &Path) -> Result<Vec<u32>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
-    check_1d(&shape, path)?; check_descr(&descr, "<u4", path)?;
+    check_1d(&shape, path)?;
+    check_descr(&descr, "<u4", path)?;
     unsafe { bytes_to_vec::<u32>(&mmap[off..], shape[0]) }
 }
 
 fn read_1d_u64(path: &Path) -> Result<Vec<u64>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
-    check_1d(&shape, path)?; check_descr(&descr, "<u8", path)?;
+    check_1d(&shape, path)?;
+    check_descr(&descr, "<u8", path)?;
     unsafe { bytes_to_vec::<u64>(&mmap[off..], shape[0]) }
 }
 
 fn read_1d_i32(path: &Path) -> Result<Vec<i32>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
-    check_1d(&shape, path)?; check_descr(&descr, "<i4", path)?;
+    check_1d(&shape, path)?;
+    check_descr(&descr, "<i4", path)?;
     unsafe { bytes_to_vec::<i32>(&mmap[off..], shape[0]) }
 }
 
 fn read_1d_f64(path: &Path) -> Result<Vec<f64>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
-    check_1d(&shape, path)?; check_descr(&descr, "<f8", path)?;
+    check_1d(&shape, path)?;
+    check_descr(&descr, "<f8", path)?;
     unsafe { bytes_to_vec::<f64>(&mmap[off..], shape[0]) }
 }
 
 fn read_1d_bool(path: &Path) -> Result<Vec<bool>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
-    check_1d(&shape, path)?; check_descr(&descr, "|b1", path)?;
+    check_1d(&shape, path)?;
+    check_descr(&descr, "|b1", path)?;
     let n = shape[0];
     let body = &mmap[off..];
     if body.len() != n {
-        return Err(ScxError::InvalidFormat(format!("bool NPY body size mismatch: {}", path.display())));
+        return Err(ScxError::InvalidFormat(format!(
+            "bool NPY body size mismatch: {}",
+            path.display()
+        )));
     }
     Ok(body.iter().map(|&b| b != 0).collect())
 }
@@ -476,13 +568,18 @@ fn read_2d_f64(path: &Path) -> Result<DenseMatrix> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
     if shape.len() != 2 {
         return Err(ScxError::InvalidFormat(format!(
-            "expected 2D NPY, got {}D: {}", shape.len(), path.display()
+            "expected 2D NPY, got {}D: {}",
+            shape.len(),
+            path.display()
         )));
     }
     check_descr(&descr, "<f8", path)?;
     let (nrows, ncols) = (shape[0], shape[1]);
     let data = unsafe { bytes_to_vec::<f64>(&mmap[off..], nrows * ncols) }?;
-    Ok(DenseMatrix { shape: (nrows, ncols), data })
+    Ok(DenseMatrix {
+        shape: (nrows, ncols),
+        data,
+    })
 }
 
 fn read_txt(path: &Path) -> Result<Vec<String>> {
@@ -492,14 +589,17 @@ fn read_txt(path: &Path) -> Result<Vec<String>> {
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content)
-        .map_err(|e| ScxError::InvalidFormat(format!("JSON parse error in {}: {e}", path.display())))
+    serde_json::from_str(&content).map_err(|e| {
+        ScxError::InvalidFormat(format!("JSON parse error in {}: {e}", path.display()))
+    })
 }
 
 fn check_1d(shape: &[usize], path: &Path) -> Result<()> {
     if shape.len() != 1 {
         return Err(ScxError::InvalidFormat(format!(
-            "expected 1D NPY, got {}D: {}", shape.len(), path.display()
+            "expected 1D NPY, got {}D: {}",
+            shape.len(),
+            path.display()
         )));
     }
     Ok(())
@@ -507,7 +607,10 @@ fn check_1d(shape: &[usize], path: &Path) -> Result<()> {
 
 fn check_descr(got: &str, expected: &str, _path: &Path) -> Result<()> {
     if got != expected {
-        return Err(ScxError::DtypeMismatch { expected: expected.to_string(), got: got.to_string() });
+        return Err(ScxError::DtypeMismatch {
+            expected: expected.to_string(),
+            got: got.to_string(),
+        });
     }
     Ok(())
 }
@@ -518,9 +621,9 @@ fn check_descr(got: &str, expected: &str, _path: &Path) -> Result<()> {
 
 fn write_col(col_dir: &Path, col: &Column) -> Result<()> {
     match &col.data {
-        ColumnData::Int(v)    => write_1d_i32(&col_dir.join(format!("{}.npy", col.name)), v)?,
-        ColumnData::Float(v)  => write_1d_f64(&col_dir.join(format!("{}.npy", col.name)), v)?,
-        ColumnData::Bool(v)   => write_1d_bool(&col_dir.join(format!("{}.npy", col.name)), v)?,
+        ColumnData::Int(v) => write_1d_i32(&col_dir.join(format!("{}.npy", col.name)), v)?,
+        ColumnData::Float(v) => write_1d_f64(&col_dir.join(format!("{}.npy", col.name)), v)?,
+        ColumnData::Bool(v) => write_1d_bool(&col_dir.join(format!("{}.npy", col.name)), v)?,
         ColumnData::String(v) => write_txt(&col_dir.join(format!("{}_strings.txt", col.name)), v)?,
         ColumnData::Categorical { codes, levels } => {
             write_1d_u32(&col_dir.join(format!("{}_codes.npy", col.name)), codes)?;
@@ -532,18 +635,25 @@ fn write_col(col_dir: &Path, col: &Column) -> Result<()> {
 
 fn read_col(col_dir: &Path, name: &str, cm: &ColumnMeta) -> Result<Column> {
     let data = match cm.kind.as_str() {
-        "int"  => ColumnData::Int(read_1d_i32(&col_dir.join(format!("{name}.npy")))?),
-        "float"=> ColumnData::Float(read_1d_f64(&col_dir.join(format!("{name}.npy")))?),
+        "int" => ColumnData::Int(read_1d_i32(&col_dir.join(format!("{name}.npy")))?),
+        "float" => ColumnData::Float(read_1d_f64(&col_dir.join(format!("{name}.npy")))?),
         "bool" => ColumnData::Bool(read_1d_bool(&col_dir.join(format!("{name}.npy")))?),
         "string" => ColumnData::String(read_txt(&col_dir.join(format!("{name}_strings.txt")))?),
         "categorical" => {
-            let codes  = read_1d_u32(&col_dir.join(format!("{name}_codes.npy")))?;
+            let codes = read_1d_u32(&col_dir.join(format!("{name}_codes.npy")))?;
             let levels = read_txt(&col_dir.join(format!("{name}_levels.txt")))?;
             ColumnData::Categorical { codes, levels }
         }
-        other => return Err(ScxError::InvalidFormat(format!("unknown column kind '{other}' for '{name}'"))),
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "unknown column kind '{other}' for '{name}'"
+            )))
+        }
     };
-    Ok(Column { name: name.to_string(), data })
+    Ok(Column {
+        name: name.to_string(),
+        data,
+    })
 }
 
 fn write_sparse(dir: &Path, csr: &SparseMatrixCSR) -> Result<()> {
@@ -555,10 +665,15 @@ fn write_sparse(dir: &Path, csr: &SparseMatrixCSR) -> Result<()> {
 }
 
 fn read_sparse(dir: &Path, shape: (usize, usize), dtype: DataType) -> Result<SparseMatrixCSR> {
-    let data    = read_1d_typed(&dir.join("data.npy"), dtype)?;
+    let data = read_1d_typed(&dir.join("data.npy"), dtype)?;
     let indices = read_1d_u32(&dir.join("indices.npy"))?;
-    let indptr  = read_1d_u64(&dir.join("indptr.npy"))?;
-    Ok(SparseMatrixCSR { shape, data, indices, indptr })
+    let indptr = read_1d_u64(&dir.join("indptr.npy"))?;
+    Ok(SparseMatrixCSR {
+        shape,
+        data,
+        indices,
+        indptr,
+    })
 }
 
 fn sparse_meta(csr: &SparseMatrixCSR, dtype: DataType) -> SparseArrayMeta {
@@ -583,11 +698,18 @@ impl NpyIrWriter {
         let x_dtype = dataset.x_dtype;
         let mut meta = Meta {
             scxd_version: "0.1".to_string(),
-            n_obs, n_vars,
-            x: None, obs_index: None, var_index: None,
-            obs: Vec::new(), var: Vec::new(),
-            obsm: HashMap::new(), varm: HashMap::new(),
-            layers: HashMap::new(), obsp: HashMap::new(), varp: HashMap::new(),
+            n_obs,
+            n_vars,
+            x: None,
+            obs_index: None,
+            var_index: None,
+            obs: Vec::new(),
+            var: Vec::new(),
+            obsm: HashMap::new(),
+            varm: HashMap::new(),
+            layers: HashMap::new(),
+            obsp: HashMap::new(),
+            varp: HashMap::new(),
             uns: None,
         };
 
@@ -619,7 +741,9 @@ impl NpyIrWriter {
                     shape: [col.data.len()],
                     n_levels: if let ColumnData::Categorical { levels, .. } = &col.data {
                         Some(levels.len())
-                    } else { None },
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -636,7 +760,9 @@ impl NpyIrWriter {
                     shape: [col.data.len()],
                     n_levels: if let ColumnData::Categorical { levels, .. } = &col.data {
                         Some(levels.len())
-                    } else { None },
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -647,9 +773,13 @@ impl NpyIrWriter {
             if filter.includes(&format!("obsm:{key}")) {
                 fs::create_dir_all(&om)?;
                 write_2d_f64(&om.join(format!("{key}.npy")), &m.data, m.shape)?;
-                meta.obsm.insert(key.clone(), DenseArrayMeta {
-                    shape: [m.shape.0, m.shape.1], dtype: "f64".to_string(),
-                });
+                meta.obsm.insert(
+                    key.clone(),
+                    DenseArrayMeta {
+                        shape: [m.shape.0, m.shape.1],
+                        dtype: "f64".to_string(),
+                    },
+                );
             }
         }
 
@@ -659,9 +789,13 @@ impl NpyIrWriter {
             if filter.includes(&format!("varm:{key}")) {
                 fs::create_dir_all(&vm)?;
                 write_2d_f64(&vm.join(format!("{key}.npy")), &m.data, m.shape)?;
-                meta.varm.insert(key.clone(), DenseArrayMeta {
-                    shape: [m.shape.0, m.shape.1], dtype: "f64".to_string(),
-                });
+                meta.varm.insert(
+                    key.clone(),
+                    DenseArrayMeta {
+                        shape: [m.shape.0, m.shape.1],
+                        dtype: "f64".to_string(),
+                    },
+                );
             }
         }
 
@@ -713,7 +847,9 @@ impl NpyIrReader {
     pub fn open(dir: &Path, chunk_size: usize) -> Result<Self> {
         let meta: Meta = read_json(&dir.join("meta.json"))?;
 
-        let x_dtype = meta.x.as_ref()
+        let x_dtype = meta
+            .x
+            .as_ref()
             .map(|m| parse_dtype(&m.dtype))
             .transpose()?
             .unwrap_or(DataType::F32);
@@ -776,7 +912,10 @@ impl NpyIrReader {
         for (key, lm) in &meta.layers {
             let dtype = parse_dtype(&lm.dtype)?;
             let shape = (lm.shape[0], lm.shape[1]);
-            layers_map.insert(key.clone(), read_sparse(&layers_key_dir(dir, key), shape, dtype)?);
+            layers_map.insert(
+                key.clone(),
+                read_sparse(&layers_key_dir(dir, key), shape, dtype)?,
+            );
         }
 
         // --- obsp ---
@@ -784,7 +923,10 @@ impl NpyIrReader {
         for (key, sm) in &meta.obsp {
             let dtype = parse_dtype(&sm.dtype)?;
             let shape = (sm.shape[0], sm.shape[1]);
-            obsp_map.insert(key.clone(), read_sparse(&obsp_key_dir(dir, key), shape, dtype)?);
+            obsp_map.insert(
+                key.clone(),
+                read_sparse(&obsp_key_dir(dir, key), shape, dtype)?,
+            );
         }
 
         // --- varp ---
@@ -792,7 +934,10 @@ impl NpyIrReader {
         for (key, sm) in &meta.varp {
             let dtype = parse_dtype(&sm.dtype)?;
             let shape = (sm.shape[0], sm.shape[1]);
-            varp_map.insert(key.clone(), read_sparse(&varp_key_dir(dir, key), shape, dtype)?);
+            varp_map.insert(
+                key.clone(),
+                read_sparse(&varp_key_dir(dir, key), shape, dtype)?,
+            );
         }
 
         // --- uns ---
@@ -804,20 +949,32 @@ impl NpyIrReader {
         };
 
         let dataset = SingleCellDataset {
-            x, x_dtype,
-            obs: ObsTable { index: obs_index, columns: obs_columns },
-            var: VarTable  { index: var_index, columns: var_columns },
+            x,
+            x_dtype,
+            obs: ObsTable {
+                index: obs_index,
+                columns: obs_columns,
+            },
+            var: VarTable {
+                index: var_index,
+                columns: var_columns,
+            },
             obsm: Embeddings { map: obsm_map },
             uns,
             layers: Layers { map: layers_map },
-            obsp:   Obsp   { map: obsp_map },
-            varp:   Varp   { map: varp_map },
-            varm:   Varm   { map: varm_map },
+            obsp: Obsp { map: obsp_map },
+            varp: Varp { map: varp_map },
+            varm: Varm { map: varm_map },
         };
-        Ok(Self { dataset, chunk_size })
+        Ok(Self {
+            dataset,
+            chunk_size,
+        })
     }
 
-    pub fn into_dataset(self) -> SingleCellDataset { self.dataset }
+    pub fn into_dataset(self) -> SingleCellDataset {
+        self.dataset
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,20 +995,22 @@ fn npy_sparse_stream<'a>(
     };
     let n_rows = mat.shape.0;
     let n_cols = mat.shape.1;
-    let indptr  = Arc::new(mat.indptr.clone());
+    let indptr = Arc::new(mat.indptr.clone());
     let indices = Arc::new(mat.indices.clone());
-    let data    = Arc::new(mat.data.clone());
+    let data = Arc::new(mat.data.clone());
 
     Box::pin(stream::unfold(0usize, move |row_start| {
-        let indptr  = Arc::clone(&indptr);
+        let indptr = Arc::clone(&indptr);
         let indices = Arc::clone(&indices);
-        let data    = Arc::clone(&data);
+        let data = Arc::clone(&data);
         async move {
-            if row_start >= n_rows { return None; }
-            let row_end   = (row_start + chunk_size).min(n_rows);
+            if row_start >= n_rows {
+                return None;
+            }
+            let row_end = (row_start + chunk_size).min(n_rows);
             let nnz_start = indptr[row_start] as usize;
-            let nnz_end   = indptr[row_end]   as usize;
-            let nrows     = row_end - row_start;
+            let nnz_end = indptr[row_end] as usize;
+            let nrows = row_end - row_start;
             let chunk_indptr: Vec<u64> = (row_start..=row_end)
                 .map(|i| indptr[i] - indptr[row_start])
                 .collect();
@@ -879,29 +1038,55 @@ fn npy_sparse_stream<'a>(
 
 #[async_trait]
 impl DatasetReader for NpyIrReader {
-    fn shape(&self) -> (usize, usize) { self.dataset.x.shape }
-    fn dtype(&self)  -> DataType      { self.dataset.x_dtype  }
+    fn shape(&self) -> (usize, usize) {
+        self.dataset.x.shape
+    }
+    fn dtype(&self) -> DataType {
+        self.dataset.x_dtype
+    }
 
-    async fn obs(&mut self)    -> Result<ObsTable>   { Ok(self.dataset.obs.clone()) }
-    async fn var(&mut self)    -> Result<VarTable>   { Ok(self.dataset.var.clone()) }
-    async fn obsm(&mut self)   -> Result<Embeddings> { Ok(self.dataset.obsm.clone()) }
-    async fn uns(&mut self)    -> Result<UnsTable>   { Ok(self.dataset.uns.clone()) }
-    async fn varm(&mut self) -> Result<Varm> { Ok(self.dataset.varm.clone()) }
+    async fn obs(&mut self) -> Result<ObsTable> {
+        Ok(self.dataset.obs.clone())
+    }
+    async fn var(&mut self) -> Result<VarTable> {
+        Ok(self.dataset.var.clone())
+    }
+    async fn obsm(&mut self) -> Result<Embeddings> {
+        Ok(self.dataset.obsm.clone())
+    }
+    async fn uns(&mut self) -> Result<UnsTable> {
+        Ok(self.dataset.uns.clone())
+    }
+    async fn varm(&mut self) -> Result<Varm> {
+        Ok(self.dataset.varm.clone())
+    }
 
     async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(self.dataset.layers.map.iter().map(|(name, mat)| SparseMatrixMeta {
-            name:   name.clone(),
-            shape:  mat.shape,
-            indptr: mat.indptr.clone(),
-        }).collect())
+        Ok(self
+            .dataset
+            .layers
+            .map
+            .iter()
+            .map(|(name, mat)| SparseMatrixMeta {
+                name: name.clone(),
+                shape: mat.shape,
+                indptr: mat.indptr.clone(),
+            })
+            .collect())
     }
 
     async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(self.dataset.obsp.map.iter().map(|(name, mat)| SparseMatrixMeta {
-            name:   name.clone(),
-            shape:  mat.shape,
-            indptr: mat.indptr.clone(),
-        }).collect())
+        Ok(self
+            .dataset
+            .obsp
+            .map
+            .iter()
+            .map(|(name, mat)| SparseMatrixMeta {
+                name: name.clone(),
+                shape: mat.shape,
+                indptr: mat.indptr.clone(),
+            })
+            .collect())
     }
 
     fn layer_stream<'a>(
@@ -921,28 +1106,30 @@ impl DatasetReader for NpyIrReader {
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn stream::Stream<Item = Result<MatrixChunk>> + Send + '_>> {
-        let n_obs      = self.dataset.x.shape.0;
-        let n_vars     = self.dataset.x.shape.1;
+        let n_obs = self.dataset.x.shape.0;
+        let n_vars = self.dataset.x.shape.1;
         let chunk_size = self.chunk_size;
         // Move X arrays into Arcs without cloning — avoids a full duplicate
         // of the X data in memory while the stream is live.
-        let indptr  = Arc::new(std::mem::take(&mut self.dataset.x.indptr));
+        let indptr = Arc::new(std::mem::take(&mut self.dataset.x.indptr));
         let indices = Arc::new(std::mem::take(&mut self.dataset.x.indices));
-        let data    = Arc::new(std::mem::replace(
+        let data = Arc::new(std::mem::replace(
             &mut self.dataset.x.data,
             TypedVec::F32(vec![]),
         ));
 
         Box::pin(stream::unfold(0usize, move |row_start| {
-            let indptr  = Arc::clone(&indptr);
+            let indptr = Arc::clone(&indptr);
             let indices = Arc::clone(&indices);
-            let data    = Arc::clone(&data);
+            let data = Arc::clone(&data);
             async move {
-                if row_start >= n_obs { return None; }
-                let row_end   = (row_start + chunk_size).min(n_obs);
+                if row_start >= n_obs {
+                    return None;
+                }
+                let row_end = (row_start + chunk_size).min(n_obs);
                 let nnz_start = indptr[row_start] as usize;
-                let nnz_end   = indptr[row_end]   as usize;
-                let nrows     = row_end - row_start;
+                let nnz_end = indptr[row_end] as usize;
+                let nrows = row_end - row_start;
                 let chunk_indptr: Vec<u64> = (row_start..=row_end)
                     .map(|i| indptr[i] - indptr[row_start])
                     .collect();
@@ -976,8 +1163,8 @@ impl DatasetReader for NpyIrReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::*;
     use crate::dtype::*;
+    use crate::ir::*;
 
     fn synthetic_dataset() -> SingleCellDataset {
         let x = SparseMatrixCSR {
@@ -989,13 +1176,29 @@ mod tests {
         let obs = ObsTable {
             index: vec!["cell1".into(), "cell2".into(), "cell3".into()],
             columns: vec![
-                Column { name: "count".into(),  data: ColumnData::Int(vec![10, 20, 30]) },
-                Column { name: "score".into(),  data: ColumnData::Float(vec![1.1, 2.2, 3.3]) },
-                Column { name: "active".into(), data: ColumnData::Bool(vec![true, false, true]) },
-                Column { name: "label".into(),  data: ColumnData::Categorical {
-                    codes: vec![0, 1, 0], levels: vec!["A".into(), "B".into()],
-                }},
-                Column { name: "notes".into(),  data: ColumnData::String(vec!["x".into(), "y".into(), "z".into()]) },
+                Column {
+                    name: "count".into(),
+                    data: ColumnData::Int(vec![10, 20, 30]),
+                },
+                Column {
+                    name: "score".into(),
+                    data: ColumnData::Float(vec![1.1, 2.2, 3.3]),
+                },
+                Column {
+                    name: "active".into(),
+                    data: ColumnData::Bool(vec![true, false, true]),
+                },
+                Column {
+                    name: "label".into(),
+                    data: ColumnData::Categorical {
+                        codes: vec![0, 1, 0],
+                        levels: vec!["A".into(), "B".into()],
+                    },
+                },
+                Column {
+                    name: "notes".into(),
+                    data: ColumnData::String(vec!["x".into(), "y".into(), "z".into()]),
+                },
             ],
         };
         let var = VarTable {
@@ -1006,25 +1209,51 @@ mod tests {
             }],
         };
         let obsm = Embeddings {
-            map: [("X_pca".to_string(), DenseMatrix {
-                shape: (3, 2), data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            })].into_iter().collect(),
+            map: [(
+                "X_pca".to_string(),
+                DenseMatrix {
+                    shape: (3, 2),
+                    data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                },
+            )]
+            .into_iter()
+            .collect(),
         };
         let varm = Varm {
-            map: [("PCs".to_string(), DenseMatrix {
-                shape: (4, 2), data: vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-            })].into_iter().collect(),
+            map: [(
+                "PCs".to_string(),
+                DenseMatrix {
+                    shape: (4, 2),
+                    data: vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                },
+            )]
+            .into_iter()
+            .collect(),
         };
         let layers = Layers {
-            map: [("spliced".to_string(), SparseMatrixCSR {
-                shape: (3, 4), indptr: vec![0, 1, 2, 3],
-                indices: vec![1, 2, 3], data: TypedVec::F32(vec![9.0, 8.0, 7.0]),
-            })].into_iter().collect(),
+            map: [(
+                "spliced".to_string(),
+                SparseMatrixCSR {
+                    shape: (3, 4),
+                    indptr: vec![0, 1, 2, 3],
+                    indices: vec![1, 2, 3],
+                    data: TypedVec::F32(vec![9.0, 8.0, 7.0]),
+                },
+            )]
+            .into_iter()
+            .collect(),
         };
         SingleCellDataset {
-            x, x_dtype: DataType::F32, obs, var, obsm,
-            uns: UnsTable::default(), layers,
-            obsp: Obsp::default(), varp: Varp::default(), varm,
+            x,
+            x_dtype: DataType::F32,
+            obs,
+            var,
+            obsm,
+            uns: UnsTable::default(),
+            layers,
+            obsp: Obsp::default(),
+            varp: Varp::default(),
+            varm,
         }
     }
 
@@ -1067,7 +1296,7 @@ mod tests {
             _ => panic!("dtype mismatch"),
         }
         assert_eq!(got.x.indices, ds.x.indices);
-        assert_eq!(got.x.indptr,  ds.x.indptr);
+        assert_eq!(got.x.indptr, ds.x.indptr);
         assert_eq!(got.obs.index, ds.obs.index);
         assert_eq!(got.var.index, ds.var.index);
         assert_eq!(got.obs.columns.len(), ds.obs.columns.len());
@@ -1075,22 +1304,36 @@ mod tests {
         for (g, e) in got.obs.columns.iter().zip(ds.obs.columns.iter()) {
             assert_eq!(g.name, e.name);
             match (&g.data, &e.data) {
-                (ColumnData::Int(a),   ColumnData::Int(b))   => assert_eq!(a, b),
+                (ColumnData::Int(a), ColumnData::Int(b)) => assert_eq!(a, b),
                 (ColumnData::Float(a), ColumnData::Float(b)) => {
-                    for (x, y) in a.iter().zip(b.iter()) { assert!((x - y).abs() < 1e-10); }
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        assert!((x - y).abs() < 1e-10);
+                    }
                 }
-                (ColumnData::Bool(a),  ColumnData::Bool(b))  => assert_eq!(a, b),
-                (ColumnData::String(a),ColumnData::String(b)) => assert_eq!(a, b),
-                (ColumnData::Categorical { codes: ca, levels: la },
-                 ColumnData::Categorical { codes: cb, levels: lb }) => {
-                    assert_eq!(ca, cb); assert_eq!(la, lb);
+                (ColumnData::Bool(a), ColumnData::Bool(b)) => assert_eq!(a, b),
+                (ColumnData::String(a), ColumnData::String(b)) => assert_eq!(a, b),
+                (
+                    ColumnData::Categorical {
+                        codes: ca,
+                        levels: la,
+                    },
+                    ColumnData::Categorical {
+                        codes: cb,
+                        levels: lb,
+                    },
+                ) => {
+                    assert_eq!(ca, cb);
+                    assert_eq!(la, lb);
                 }
                 _ => panic!("column kind mismatch for '{}'", g.name),
             }
         }
         assert_eq!(got.obsm.map["X_pca"].data, ds.obsm.map["X_pca"].data);
-        assert_eq!(got.varm.map["PCs"].data,   ds.varm.map["PCs"].data);
-        assert_eq!(got.layers.map["spliced"].indices, ds.layers.map["spliced"].indices);
+        assert_eq!(got.varm.map["PCs"].data, ds.varm.map["PCs"].data);
+        assert_eq!(
+            got.layers.map["spliced"].indices,
+            ds.layers.map["spliced"].indices
+        );
     }
 
     #[test]
@@ -1150,7 +1393,12 @@ mod tests {
     fn test_selective_exclude() {
         let dir = tempfile::tempdir().unwrap();
         let ds = synthetic_dataset();
-        NpyIrWriter::write(dir.path(), &ds, &SlotFilter::from_exclude("layers,obsp,varp")).unwrap();
+        NpyIrWriter::write(
+            dir.path(),
+            &ds,
+            &SlotFilter::from_exclude("layers,obsp,varp"),
+        )
+        .unwrap();
 
         assert!(dir.path().join("X/data.npy").exists());
         assert!(dir.path().join("obsm/X_pca.npy").exists());
@@ -1167,11 +1415,15 @@ mod tests {
         let mut reader = NpyIrReader::open(dir.path(), 2).unwrap();
         let mut chunks = Vec::new();
         let mut stream = reader.x_stream();
-        while let Some(c) = stream.next().await { chunks.push(c.unwrap()); }
+        while let Some(c) = stream.next().await {
+            chunks.push(c.unwrap());
+        }
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].row_offset, 0); assert_eq!(chunks[0].nrows, 2);
-        assert_eq!(chunks[1].row_offset, 2); assert_eq!(chunks[1].nrows, 1);
+        assert_eq!(chunks[0].row_offset, 0);
+        assert_eq!(chunks[0].nrows, 2);
+        assert_eq!(chunks[1].row_offset, 2);
+        assert_eq!(chunks[1].nrows, 1);
         let total_nnz: usize = chunks.iter().map(|c| c.data.indices.len()).sum();
         assert_eq!(total_nnz, ds.x.indices.len());
     }

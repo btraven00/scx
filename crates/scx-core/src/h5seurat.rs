@@ -7,15 +7,17 @@ use serde_json;
 
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
+use hdf5::types::{FloatSize, TypeDescriptor, VarLenUnicode};
 use hdf5::{File, Group, SimpleExtents};
-use hdf5::types::{TypeDescriptor, FloatSize, VarLenUnicode};
 use ndarray::{s, Array1, Array2};
 
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
-         SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm},
+    ir::{
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+        SparseMatrixMeta, UnsTable, VarTable, Varm,
+    },
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -69,7 +71,7 @@ impl H5SeuratReader {
 
         let file = File::open(&path)?;
         let dims_path = format!("assays/{assay}/{layer}");
-        let dims_grp  = file.group(&dims_path)?;
+        let dims_grp = file.group(&dims_path)?;
 
         // Standard dgCMatrix groups carry a `dims` attribute [ngenes, ncells].
         // BPCells-backed groups instead store a `shape` dataset [nrow, ncol],
@@ -105,7 +107,8 @@ impl H5SeuratReader {
             if indptr.len() != n_obs + 1 {
                 return Err(ScxError::InvalidFormat(format!(
                     "indptr length {} != n_obs+1 {}",
-                    indptr.len(), n_obs + 1
+                    indptr.len(),
+                    n_obs + 1
                 )));
             }
 
@@ -114,7 +117,15 @@ impl H5SeuratReader {
             XBackend::DgCMatrix { indptr, dtype }
         };
 
-        Ok(Self { path, assay, layer, n_obs, n_vars, chunk_size, x_backend })
+        Ok(Self {
+            path,
+            assay,
+            layer,
+            n_obs,
+            n_vars,
+            chunk_size,
+            x_backend,
+        })
     }
 }
 
@@ -125,14 +136,11 @@ impl H5SeuratReader {
 fn read_indptr_from(file: &File, path: &str) -> Result<Vec<u64>> {
     let ds = file.dataset(path)?;
     match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(_) => {
-            Ok(ds.read_1d::<f64>()?.iter().map(|&x| x as u64).collect())
-        }
-        TypeDescriptor::Integer(_) => {
-            Ok(ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect())
-        }
+        TypeDescriptor::Float(_) => Ok(ds.read_1d::<f64>()?.iter().map(|&x| x as u64).collect()),
+        TypeDescriptor::Integer(_) => Ok(ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect()),
         other => Err(ScxError::InvalidFormat(format!(
-            "unexpected indptr type at {path}: {:?}", other
+            "unexpected indptr type at {path}: {:?}",
+            other
         ))),
     }
 }
@@ -140,10 +148,14 @@ fn read_indptr_from(file: &File, path: &str) -> Result<Vec<u64>> {
 fn read_indices_at(file: &File, path: &str, start: usize, end: usize) -> Result<Vec<u32>> {
     let ds = file.dataset(path)?;
     match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(_) => {
-            Ok(ds.read_slice_1d::<i32, _>(s![start..end])?.iter().map(|&x| x as u32).collect())
-        }
-        _ => Err(ScxError::InvalidFormat(format!("unexpected indices type at {path}"))),
+        TypeDescriptor::Integer(_) => Ok(ds
+            .read_slice_1d::<i32, _>(s![start..end])?
+            .iter()
+            .map(|&x| x as u32)
+            .collect()),
+        _ => Err(ScxError::InvalidFormat(format!(
+            "unexpected indices type at {path}"
+        ))),
     }
 }
 
@@ -151,9 +163,9 @@ fn detect_dtype(file: &File, path: &str) -> Result<DataType> {
     let ds = file.dataset(path)?;
     Ok(match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-        TypeDescriptor::Float(_)             => DataType::F64,
-        TypeDescriptor::Integer(_)           => DataType::I32,
-        _                                    => DataType::F32,
+        TypeDescriptor::Float(_) => DataType::F64,
+        TypeDescriptor::Integer(_) => DataType::I32,
+        _ => DataType::F32,
     })
 }
 
@@ -169,7 +181,8 @@ fn read_strings(file: &File, path: &str) -> Result<Vec<String>> {
             Ok(raw.into_iter().map(|s| s.to_string()).collect())
         }
         other => Err(ScxError::InvalidFormat(format!(
-            "unsupported string type {:?} at '{path}'", other
+            "unsupported string type {:?} at '{path}'",
+            other
         ))),
     }
 }
@@ -187,7 +200,7 @@ fn read_chunk_sync(
     let file = File::open(path)?;
     let chunk_cells = cell_end - cell_start;
     let nnz_start = indptr[cell_start] as usize;
-    let nnz_end   = indptr[cell_end]   as usize;
+    let nnz_end = indptr[cell_end] as usize;
     let nnz = nnz_end - nnz_start;
 
     let base = format!("assays/{assay}/{layer}");
@@ -201,10 +214,18 @@ fn read_chunk_sync(
     let data: TypedVec = if nnz > 0 {
         let ds = file.dataset(&format!("{base}/data"))?;
         match dtype {
-            DataType::F32 => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            DataType::F64 => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec()),
-            DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            DataType::F32 => {
+                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            DataType::F64 => {
+                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            DataType::I32 => {
+                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            DataType::U32 => {
+                TypedVec::U32(ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
         }
     } else {
         TypedVec::F32(Vec::new())
@@ -256,7 +277,10 @@ fn read_obs_sync(path: &Path) -> Result<ObsTable> {
             // Factor: group with values (1-indexed int) + levels (string)
             match read_factor_column(&file, &format!("meta.data/{name}")) {
                 Ok(cd) => cd,
-                Err(e) => { tracing::warn!("skipping factor column '{name}': {e}"); continue; }
+                Err(e) => {
+                    tracing::warn!("skipping factor column '{name}': {e}");
+                    continue;
+                }
             }
         } else if logicals.contains(name.as_str()) {
             // Logical: int32 (0=F, 1=T, 2=NA) → Bool (NA → false for now)
@@ -267,11 +291,17 @@ fn read_obs_sync(path: &Path) -> Result<ObsTable> {
             // Numeric or string dataset
             match read_meta_column(&file, &format!("meta.data/{name}")) {
                 Ok(cd) => cd,
-                Err(e) => { tracing::warn!("skipping obs column '{name}': {e}"); continue; }
+                Err(e) => {
+                    tracing::warn!("skipping obs column '{name}': {e}");
+                    continue;
+                }
             }
         };
 
-        columns.push(Column { name: name.clone(), data: col_data });
+        columns.push(Column {
+            name: name.clone(),
+            data: col_data,
+        });
     }
 
     Ok(ObsTable { index, columns })
@@ -280,10 +310,11 @@ fn read_obs_sync(path: &Path) -> Result<ObsTable> {
 fn read_factor_column(file: &File, grp_path: &str) -> Result<ColumnData> {
     let values_path = format!("{grp_path}/values");
     let levels_path = format!("{grp_path}/levels");
-    let codes: Vec<u32> = file.dataset(&values_path)?
+    let codes: Vec<u32> = file
+        .dataset(&values_path)?
         .read_1d::<i32>()?
         .iter()
-        .map(|&v| (v - 1).max(0) as u32)   // 1-indexed → 0-indexed
+        .map(|&v| (v - 1).max(0) as u32) // 1-indexed → 0-indexed
         .collect();
     let levels = read_strings(file, &levels_path)?;
     Ok(ColumnData::Categorical { codes, levels })
@@ -296,17 +327,14 @@ fn read_meta_column(file: &File, ds_path: &str) -> Result<ColumnData> {
             let v: Vec<f32> = ds.read_1d::<f32>()?.to_vec();
             Ok(ColumnData::Float(v.into_iter().map(|x| x as f64).collect()))
         }
-        TypeDescriptor::Float(_) => {
-            Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec()))
-        }
-        TypeDescriptor::Integer(_) => {
-            Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec()))
-        }
+        TypeDescriptor::Float(_) => Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec())),
+        TypeDescriptor::Integer(_) => Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec())),
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
             Ok(ColumnData::String(read_strings(file, ds_path)?))
         }
         other => Err(ScxError::InvalidFormat(format!(
-            "unsupported column type {:?} at {ds_path}", other
+            "unsupported column type {:?} at {ds_path}",
+            other
         ))),
     }
 }
@@ -332,27 +360,38 @@ fn read_var_sync(path: &Path, assay: &str) -> Result<VarTable> {
             let mut cols = Vec::new();
             for name in grp.member_names().unwrap_or_default() {
                 let ds_path = format!("{mf_grp_path}/{name}");
-                let is_group = file.group(&ds_path).is_ok()
-                    && file.dataset(&ds_path).is_err();
+                let is_group = file.group(&ds_path).is_ok() && file.dataset(&ds_path).is_err();
                 let col_data = if is_group {
                     match read_factor_column(&file, &ds_path) {
                         Ok(cd) => cd,
-                        Err(e) => { tracing::warn!("skipping var factor '{name}': {e}"); continue; }
+                        Err(e) => {
+                            tracing::warn!("skipping var factor '{name}': {e}");
+                            continue;
+                        }
                     }
                 } else if logicals.contains(name.as_str()) {
                     let ds = match file.dataset(&ds_path) {
                         Ok(d) => d,
-                        Err(e) => { tracing::warn!("skipping var logical '{name}': {e}"); continue; }
+                        Err(e) => {
+                            tracing::warn!("skipping var logical '{name}': {e}");
+                            continue;
+                        }
                     };
                     let vals: Vec<i32> = ds.read_1d::<i32>()?.to_vec();
                     ColumnData::Bool(vals.into_iter().map(|v| v == 1).collect())
                 } else {
                     match read_meta_column(&file, &ds_path) {
                         Ok(cd) => cd,
-                        Err(e) => { tracing::warn!("skipping var column '{name}': {e}"); continue; }
+                        Err(e) => {
+                            tracing::warn!("skipping var column '{name}': {e}");
+                            continue;
+                        }
                     }
                 };
-                cols.push(Column { name, data: col_data });
+                cols.push(Column {
+                    name,
+                    data: col_data,
+                });
             }
             cols
         }
@@ -364,19 +403,22 @@ fn read_var_sync(path: &Path, assay: &str) -> Result<VarTable> {
 fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
     let file = File::open(path)?;
     let reds_grp = match file.group("reductions") {
-        Ok(g)  => g,
+        Ok(g) => g,
         Err(_) => return Ok(Embeddings::default()),
     };
     let mut map = HashMap::new();
     for red_name in reds_grp.member_names()? {
         let ds_path = format!("reductions/{red_name}/cell.embeddings");
         let ds = match file.dataset(&ds_path) {
-            Ok(d)  => d,
+            Ok(d) => d,
             Err(_) => continue,
         };
         let arr: ndarray::Array2<f64> = match ds.read::<f64, ndarray::Ix2>() {
-            Ok(a)  => a,
-            Err(e) => { tracing::warn!("skipping reduction '{red_name}': {e}"); continue; }
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("skipping reduction '{red_name}': {e}");
+                continue;
+            }
         };
         // SeuratDisk stores cell.embeddings column-major as (n_components, n_obs).
         // After HDF5 read in row-major, we get shape (n_components, n_obs) unless
@@ -389,7 +431,13 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
         // Map reduction name to AnnData obsm key convention
         let obsm_key = format!("X_{}", red_name.to_lowercase());
         let shape = (arr.shape()[0], arr.shape()[1]);
-        map.insert(obsm_key, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
+        map.insert(
+            obsm_key,
+            DenseMatrix {
+                shape,
+                data: arr.into_raw_vec_and_offset().0,
+            },
+        );
     }
     Ok(Embeddings { map })
 }
@@ -402,7 +450,7 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
 /// Unreadable or unsupported nodes are silently replaced with `null`.
 fn seurat_walk_group(file: &File, group_path: &str) -> serde_json::Value {
     let grp = match file.group(group_path) {
-        Ok(g)  => g,
+        Ok(g) => g,
         Err(_) => return serde_json::Value::Null,
     };
     let members = grp.member_names().unwrap_or_default();
@@ -410,7 +458,7 @@ fn seurat_walk_group(file: &File, group_path: &str) -> serde_json::Value {
     for name in members {
         let child = format!("{group_path}/{name}");
         let is_grp = file.group(&child).is_ok() && file.dataset(&child).is_err();
-        let value  = if is_grp {
+        let value = if is_grp {
             seurat_walk_group(file, &child)
         } else {
             seurat_ds_to_json(file, &child).unwrap_or(serde_json::Value::Null)
@@ -421,7 +469,7 @@ fn seurat_walk_group(file: &File, group_path: &str) -> serde_json::Value {
 }
 
 fn seurat_ds_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
-    let ds        = file.dataset(path)?;
+    let ds = file.dataset(path)?;
     let is_scalar = ds.ndim() == 0;
     match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Float(_) => {
@@ -444,7 +492,7 @@ fn seurat_ds_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
             let strings = read_strings(file, path)?;
             if is_scalar || strings.len() == 1 {
                 Ok(serde_json::Value::String(
-                    strings.into_iter().next().unwrap_or_default()
+                    strings.into_iter().next().unwrap_or_default(),
                 ))
             } else {
                 Ok(serde_json::json!(strings))
@@ -459,7 +507,9 @@ fn read_uns_sync(path: &Path) -> Result<UnsTable> {
     if file.group("misc").is_err() {
         return Ok(UnsTable::default());
     }
-    Ok(UnsTable { raw: seurat_walk_group(&file, "misc") })
+    Ok(UnsTable {
+        raw: seurat_walk_group(&file, "misc"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +543,10 @@ fn detect_sparse_group_kind(file: &File, group_path: &str) -> Option<SparseGroup
 fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
 
-    if matches!(detect_sparse_group_kind(file, group_path), Some(SparseGroupKind::BpCells)) {
+    if matches!(
+        detect_sparse_group_kind(file, group_path),
+        Some(SparseGroupKind::BpCells)
+    ) {
         let shape_ds = file.dataset(&format!("{group_path}/shape"))?;
         let shape: Vec<u32> = shape_ds.read_1d::<u32>()?.to_vec();
         if shape.len() < 2 {
@@ -509,12 +562,17 @@ fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<
                 if idxptr_ds.dtype()?.size() == 8 {
                     idxptr_ds.read_1d::<u64>()?.to_vec()
                 } else {
-                    idxptr_ds.read_1d::<u32>()?.iter().map(|&x| x as u64).collect()
+                    idxptr_ds
+                        .read_1d::<u32>()?
+                        .iter()
+                        .map(|&x| x as u64)
+                        .collect()
                 }
             }
             other => {
                 return Err(ScxError::InvalidFormat(format!(
-                    "unexpected BPCells idxptr type at {group_path}: {:?}", other
+                    "unexpected BPCells idxptr type at {group_path}: {:?}",
+                    other
                 )))
             }
         };
@@ -530,7 +588,11 @@ fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<
     // H5Seurat dims attr is [n_rows, n_cols] where columns = CSC dimension
     let (nrows, ncols) = (dims[0] as usize, dims[1] as usize);
     let indptr = read_indptr_from(file, &format!("{group_path}/indptr"))?;
-    Ok(SparseMatrixMeta { name: name.to_string(), shape: (nrows, ncols), indptr })
+    Ok(SparseMatrixMeta {
+        name: name.to_string(),
+        shape: (nrows, ncols),
+        indptr,
+    })
 }
 
 /// Read a row-slice of an H5Seurat CSC sparse group as a CSR `MatrixChunk`.
@@ -546,7 +608,7 @@ fn seurat_read_sparse_chunk(
     let chunk_rows = row_end - row_start;
 
     let nnz_start = meta.indptr[row_start] as usize;
-    let nnz_end   = meta.indptr[row_end]   as usize;
+    let nnz_end = meta.indptr[row_end] as usize;
     let nnz = nnz_end - nnz_start;
 
     let indices: Vec<u32> = if nnz > 0 {
@@ -558,14 +620,16 @@ fn seurat_read_sparse_chunk(
     let data: TypedVec = if nnz > 0 {
         let ds = file.dataset(&format!("{group_path}/data"))?;
         match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Float(FloatSize::U4) => TypedVec::F32(
-                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            TypeDescriptor::Float(_) => TypedVec::F64(
-                ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec()),
-            TypeDescriptor::Integer(_) => TypedVec::I32(
-                ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec()),
-            _ => TypedVec::F32(
-                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
+            TypeDescriptor::Float(FloatSize::U4) => {
+                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            TypeDescriptor::Float(_) => {
+                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            TypeDescriptor::Integer(_) => {
+                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            _ => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
         }
     } else {
         TypedVec::F32(Vec::new())
@@ -589,21 +653,29 @@ fn seurat_read_sparse_chunk(
     })
 }
 
-fn read_layer_metas_sync(path: &Path, assay: &str, primary_layer: &str) -> Result<Vec<SparseMatrixMeta>> {
+fn read_layer_metas_sync(
+    path: &Path,
+    assay: &str,
+    primary_layer: &str,
+) -> Result<Vec<SparseMatrixMeta>> {
     let file = File::open(path)?;
     let assay_grp = match file.group(&format!("assays/{assay}")) {
         Err(_) => return Ok(Vec::new()),
-        Ok(g)  => g,
+        Ok(g) => g,
     };
     let mut metas = Vec::new();
     for name in assay_grp.member_names().unwrap_or_default() {
-        if name == primary_layer { continue; }
+        if name == primary_layer {
+            continue;
+        }
         let grp_path = format!("assays/{assay}/{name}");
 
-        if detect_sparse_group_kind(&file, &grp_path).is_none() { continue; }
+        if detect_sparse_group_kind(&file, &grp_path).is_none() {
+            continue;
+        }
 
         match seurat_read_sparse_meta(&file, &name, &grp_path) {
-            Ok(m)  => metas.push(m),
+            Ok(m) => metas.push(m),
             Err(e) => tracing::warn!("skipping assay layer '{name}': {e}"),
         }
     }
@@ -614,14 +686,16 @@ fn read_obsp_metas_sync(path: &Path) -> Result<Vec<SparseMatrixMeta>> {
     let file = File::open(path)?;
     let grp = match file.group("graphs") {
         Err(_) => return Ok(Vec::new()),
-        Ok(g)  => g,
+        Ok(g) => g,
     };
     let mut metas = Vec::new();
     for name in grp.member_names().unwrap_or_default() {
         let grp_path = format!("graphs/{name}");
-        if detect_sparse_group_kind(&file, &grp_path).is_none() { continue; }
+        if detect_sparse_group_kind(&file, &grp_path).is_none() {
+            continue;
+        }
         match seurat_read_sparse_meta(&file, &name, &grp_path) {
-            Ok(m)  => metas.push(m),
+            Ok(m) => metas.push(m),
             Err(e) => tracing::warn!("skipping graph '{name}': {e}"),
         }
     }
@@ -632,18 +706,21 @@ fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
     let file = File::open(path)?;
     let reds_grp = match file.group("reductions") {
         Err(_) => return Ok(Varm::default()),
-        Ok(g)  => g,
+        Ok(g) => g,
     };
     let mut map = HashMap::new();
     for red_name in reds_grp.member_names().unwrap_or_default() {
         let ds_path = format!("reductions/{red_name}/feature.loadings");
         let ds = match file.dataset(&ds_path) {
-            Ok(d)  => d,
+            Ok(d) => d,
             Err(_) => continue,
         };
         let arr: ndarray::Array2<f64> = match ds.read::<f64, ndarray::Ix2>() {
-            Ok(a)  => a,
-            Err(e) => { tracing::warn!("skipping varm '{red_name}': {e}"); continue; }
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("skipping varm '{red_name}': {e}");
+                continue;
+            }
         };
         // feature.loadings stored as (k, n_vars) — transpose to (n_vars, k)
         let arr = if arr.shape()[1] == n_vars && arr.shape()[0] != n_vars {
@@ -653,7 +730,13 @@ fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
         };
         let shape = (arr.shape()[0], arr.shape()[1]);
         let varm_key = format!("X_{}", red_name.to_lowercase());
-        map.insert(varm_key, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
+        map.insert(
+            varm_key,
+            DenseMatrix {
+                shape,
+                data: arr.into_raw_vec_and_offset().0,
+            },
+        );
     }
     Ok(Varm { map })
 }
@@ -686,7 +769,12 @@ pub fn open_h5seurat<P: AsRef<Path>>(
     let path = path.as_ref();
     let assay = assay.unwrap_or("RNA");
     let layer = layer.unwrap_or("counts");
-    Ok(Box::new(H5SeuratReader::open(path, chunk_size, Some(assay), Some(layer))?))
+    Ok(Box::new(H5SeuratReader::open(
+        path,
+        chunk_size,
+        Some(assay),
+        Some(layer),
+    )?))
 }
 
 // ---------------------------------------------------------------------------
@@ -739,15 +827,18 @@ impl DatasetReader for H5SeuratReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        let path      = self.path.clone();
-        let assay     = self.assay.clone();
-        let grp_path  = format!("assays/{}/{}", assay, meta.name);
-        let n_rows    = meta.shape.0;
+        let path = self.path.clone();
+        let assay = self.assay.clone();
+        let grp_path = format!("assays/{}/{}", assay, meta.name);
+        let n_rows = meta.shape.0;
 
         let is_bpcells = {
             let file = File::open(&path);
             match file {
-                Ok(file) => matches!(detect_sparse_group_kind(&file, &grp_path), Some(SparseGroupKind::BpCells)),
+                Ok(file) => matches!(
+                    detect_sparse_group_kind(&file, &grp_path),
+                    Some(SparseGroupKind::BpCells)
+                ),
                 Err(_) => false,
             }
         };
@@ -769,7 +860,9 @@ impl DatasetReader for H5SeuratReader {
             Box::pin(stream::unfold(0usize, move |row_start| {
                 let reader = bp_reader.clone();
                 async move {
-                    if row_start >= n_rows { return None; }
+                    if row_start >= n_rows {
+                        return None;
+                    }
                     let row_end = (row_start + chunk_size).min(n_rows);
                     let chunk = reader.read_chunk(row_start, row_end);
                     Some((chunk, row_end))
@@ -777,12 +870,15 @@ impl DatasetReader for H5SeuratReader {
             }))
         } else {
             Box::pin(stream::unfold(0usize, move |row_start| {
-                let path     = path.clone();
+                let path = path.clone();
                 let grp_path = grp_path.clone();
                 async move {
-                    if row_start >= n_rows { return None; }
+                    if row_start >= n_rows {
+                        return None;
+                    }
                     let row_end = (row_start + chunk_size).min(n_rows);
-                    let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                    let chunk =
+                        seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
                     Some((chunk, row_end))
                 }
             }))
@@ -794,14 +890,17 @@ impl DatasetReader for H5SeuratReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        let path     = self.path.clone();
+        let path = self.path.clone();
         let grp_path = format!("graphs/{}", meta.name);
-        let n_rows   = meta.shape.0;
+        let n_rows = meta.shape.0;
 
         let is_bpcells = {
             let file = File::open(&path);
             match file {
-                Ok(file) => matches!(detect_sparse_group_kind(&file, &grp_path), Some(SparseGroupKind::BpCells)),
+                Ok(file) => matches!(
+                    detect_sparse_group_kind(&file, &grp_path),
+                    Some(SparseGroupKind::BpCells)
+                ),
                 Err(_) => false,
             }
         };
@@ -823,7 +922,9 @@ impl DatasetReader for H5SeuratReader {
             Box::pin(stream::unfold(0usize, move |row_start| {
                 let reader = bp_reader.clone();
                 async move {
-                    if row_start >= n_rows { return None; }
+                    if row_start >= n_rows {
+                        return None;
+                    }
                     let row_end = (row_start + chunk_size).min(n_rows);
                     let chunk = reader.read_chunk(row_start, row_end);
                     Some((chunk, row_end))
@@ -831,12 +932,15 @@ impl DatasetReader for H5SeuratReader {
             }))
         } else {
             Box::pin(stream::unfold(0usize, move |row_start| {
-                let path     = path.clone();
+                let path = path.clone();
                 let grp_path = grp_path.clone();
                 async move {
-                    if row_start >= n_rows { return None; }
+                    if row_start >= n_rows {
+                        return None;
+                    }
                     let row_end = (row_start + chunk_size).min(n_rows);
-                    let chunk = seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
+                    let chunk =
+                        seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
                     Some((chunk, row_end))
                 }
             }))
@@ -846,40 +950,42 @@ impl DatasetReader for H5SeuratReader {
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
         match &self.x_backend {
             XBackend::DgCMatrix { indptr, dtype } => {
-                let path       = self.path.clone();
-                let assay      = self.assay.clone();
-                let layer      = self.layer.clone();
-                let n_obs      = self.n_obs;
-                let n_vars     = self.n_vars;
+                let path = self.path.clone();
+                let assay = self.assay.clone();
+                let layer = self.layer.clone();
+                let n_obs = self.n_obs;
+                let n_vars = self.n_vars;
                 let chunk_size = self.chunk_size;
-                let indptr     = indptr.clone();
-                let dtype      = *dtype;
+                let indptr = indptr.clone();
+                let dtype = *dtype;
 
                 Box::pin(stream::unfold(0usize, move |cell_start| {
-                    let path   = path.clone();
-                    let assay  = assay.clone();
-                    let layer  = layer.clone();
+                    let path = path.clone();
+                    let assay = assay.clone();
+                    let layer = layer.clone();
                     let indptr = indptr.clone();
                     async move {
-                        if cell_start >= n_obs { return None; }
+                        if cell_start >= n_obs {
+                            return None;
+                        }
                         let cell_end = (cell_start + chunk_size).min(n_obs);
                         let chunk = read_chunk_sync(
-                            &path, &assay, &layer, &indptr,
-                            cell_start, cell_end, n_vars, dtype,
+                            &path, &assay, &layer, &indptr, cell_start, cell_end, n_vars, dtype,
                         );
                         Some((chunk, cell_end))
                     }
                 }))
             }
             XBackend::BpCells => {
-                let path       = self.path.clone();
-                let assay      = self.assay.clone();
-                let layer      = self.layer.clone();
-                let n_obs      = self.n_obs;
+                let path = self.path.clone();
+                let assay = self.assay.clone();
+                let layer = self.layer.clone();
+                let n_obs = self.n_obs;
                 let chunk_size = self.chunk_size;
 
                 let bp_reader = {
-                    let file = File::open(&path).expect("failed to open H5Seurat file for BPCells backend");
+                    let file = File::open(&path)
+                        .expect("failed to open H5Seurat file for BPCells backend");
                     let grp_path = candidate_group_paths(&assay, &layer)
                         .into_iter()
                         .find(|p| file.group(p).is_ok())
@@ -891,7 +997,9 @@ impl DatasetReader for H5SeuratReader {
                 Box::pin(stream::unfold(0usize, move |cell_start| {
                     let reader = bp_reader.clone();
                     async move {
-                        if cell_start >= n_obs { return None; }
+                        if cell_start >= n_obs {
+                            return None;
+                        }
                         let cell_end = (cell_start + chunk_size).min(n_obs);
                         let chunk = reader.read_chunk(cell_start, cell_end);
                         Some((chunk, cell_end))
@@ -968,8 +1076,8 @@ impl H5SeuratWriter {
         project: Option<&str>,
         seuratdisk_compat: bool,
     ) -> Result<Self> {
-        let assay   = assay.unwrap_or("RNA").to_string();
-        let layer   = layer.unwrap_or("counts").to_string();
+        let assay = assay.unwrap_or("RNA").to_string();
+        let layer = layer.unwrap_or("counts").to_string();
         let project = project.unwrap_or("SeuratProject");
 
         let file = File::create(path.as_ref())?;
@@ -978,14 +1086,24 @@ impl H5SeuratWriter {
             // Root-level attributes and empty groups required by SeuratDisk::LoadH5Seurat.
             let root = file.group("/")?;
             for (name, value) in [
-                ("version",      "3.1.5.9900"),
+                ("version", "3.1.5.9900"),
                 ("active.assay", assay.as_str()),
-                ("project",      project),
+                ("project", project),
             ] {
                 let v = VarLenUnicode::from_str(value).unwrap_or_default();
-                root.new_attr::<VarLenUnicode>().create(name)?.write_scalar(&v)?;
+                root.new_attr::<VarLenUnicode>()
+                    .create(name)?
+                    .write_scalar(&v)?;
             }
-            for grp in &["commands", "graphs", "images", "misc", "neighbors", "reductions", "tools"] {
+            for grp in &[
+                "commands",
+                "graphs",
+                "images",
+                "misc",
+                "neighbors",
+                "reductions",
+                "tools",
+            ] {
                 file.create_group(grp)?;
             }
         }
@@ -993,13 +1111,17 @@ impl H5SeuratWriter {
         file.create_group("assays")?;
         let assay_grp = file.create_group(&format!("assays/{assay}"))?;
         if seuratdisk_compat {
-            let key = VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
-            assay_grp.new_attr::<VarLenUnicode>().create("key")?.write_scalar(&key)?;
+            let key =
+                VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
+            assay_grp
+                .new_attr::<VarLenUnicode>()
+                .create("key")?
+                .write_scalar(&key)?;
         }
         file.create_group(&format!("assays/{assay}/{layer}"))?;
 
         // Resizable datasets for streaming x-chunk writes.
-        let data_path    = format!("assays/{assay}/{layer}/data");
+        let data_path = format!("assays/{assay}/{layer}/data");
         let indices_path = format!("assays/{assay}/{layer}/indices");
         match dtype {
             DataType::F32 => seurat_init_resizable::<f32>(&file, &data_path)?,
@@ -1009,7 +1131,16 @@ impl H5SeuratWriter {
         }
         seurat_init_resizable::<i32>(&file, &indices_path)?;
 
-        Ok(Self { file, assay, layer, n_obs, n_vars, dtype, x_indptr: vec![0u64], sparse_state: None })
+        Ok(Self {
+            file,
+            assay,
+            layer,
+            n_obs,
+            n_vars,
+            dtype,
+            x_indptr: vec![0u64],
+            sparse_state: None,
+        })
     }
 }
 
@@ -1030,7 +1161,10 @@ fn seurat_write_strings(grp: &Group, name: &str, strings: &[String]) -> Result<(
         .iter()
         .map(|s| VarLenUnicode::from_str(s).unwrap_or_default())
         .collect();
-    let ds = grp.new_dataset::<VarLenUnicode>().shape(vals.len()).create(name)?;
+    let ds = grp
+        .new_dataset::<VarLenUnicode>()
+        .shape(vals.len())
+        .create(name)?;
     ds.write(&Array1::from_vec(vals))?;
     Ok(())
 }
@@ -1044,7 +1178,8 @@ fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
         .map(|c| VarLenUnicode::from_str(&c.name).unwrap_or_default())
         .collect();
     if !logical_names.is_empty() {
-        let attr = grp.new_attr::<VarLenUnicode>()
+        let attr = grp
+            .new_attr::<VarLenUnicode>()
             .shape(logical_names.len())
             .create("logicals")?;
         attr.write(&Array1::from_vec(logical_names))?;
@@ -1054,8 +1189,6 @@ fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
     }
     Ok(())
 }
-
-
 
 fn seurat_write_col(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
     match data {
@@ -1080,7 +1213,10 @@ fn seurat_write_col(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
             let col_grp = grp.create_group(name)?;
             // 0-indexed codes → 1-indexed values (R dgCMatrix convention)
             let values: Vec<i32> = codes.iter().map(|&c| c as i32 + 1).collect();
-            let ds = col_grp.new_dataset::<i32>().shape(values.len()).create("values")?;
+            let ds = col_grp
+                .new_dataset::<i32>()
+                .shape(values.len())
+                .create("values")?;
             ds.write(&Array1::from_vec(values))?;
             seurat_write_strings(&col_grp, "levels", levels)?;
         }
@@ -1123,7 +1259,7 @@ impl DatasetWriter for H5SeuratWriter {
     async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
         // reductions is pre-created in create(); open or create defensively.
         let reds_grp = match self.file.group("reductions") {
-            Ok(g)  => g,
+            Ok(g) => g,
             Err(_) => self.file.create_group("reductions")?,
         };
         if obsm.map.is_empty() {
@@ -1131,7 +1267,7 @@ impl DatasetWriter for H5SeuratWriter {
         }
         for (key, mat) in &obsm.map {
             let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
-            let red_grp  = reds_grp.create_group(red_name)?;
+            let red_grp = reds_grp.create_group(red_name)?;
 
             let (n_obs, n_comps) = mat.shape;
             // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs)
@@ -1197,8 +1333,9 @@ impl DatasetWriter for H5SeuratWriter {
     }
 
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
-        let state = self.sparse_state.as_mut()
-            .ok_or_else(|| ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into()))?;
+        let state = self.sparse_state.as_mut().ok_or_else(|| {
+            ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into())
+        })?;
 
         let csr = &chunk.data;
         let nnz = csr.indices.len();
@@ -1211,7 +1348,9 @@ impl DatasetWriter for H5SeuratWriter {
             let vals: Vec<f64> = csr.data.to_f64();
             data_ds.write_slice(&Array1::from_vec(vals), s![old_len..new_len])?;
 
-            let idx_ds = self.file.dataset(&format!("{}/indices", state.group_path))?;
+            let idx_ds = self
+                .file
+                .dataset(&format!("{}/indices", state.group_path))?;
             idx_ds.resize(new_len)?;
             let genes_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
             idx_ds.write_slice(&Array1::from_vec(genes_i32), s![old_len..new_len])?;
@@ -1226,8 +1365,9 @@ impl DatasetWriter for H5SeuratWriter {
     }
 
     async fn end_sparse(&mut self) -> Result<()> {
-        let state = self.sparse_state.take()
-            .ok_or_else(|| ScxError::InvalidFormat("end_sparse called without begin_sparse".into()))?;
+        let state = self.sparse_state.take().ok_or_else(|| {
+            ScxError::InvalidFormat("end_sparse called without begin_sparse".into())
+        })?;
 
         let grp = self.file.group(&state.group_path)?;
 
@@ -1258,14 +1398,14 @@ impl DatasetWriter for H5SeuratWriter {
         }
         // reductions/ may already exist (write_obsm creates it)
         let reds_grp = match self.file.group("reductions") {
-            Ok(g)  => g,
+            Ok(g) => g,
             Err(_) => self.file.create_group("reductions")?,
         };
         for (key, mat) in &varm.map {
             let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
             // reduction sub-group may already exist from write_obsm
             let red_grp = match reds_grp.group(red_name) {
-                Ok(g)  => g,
+                Ok(g) => g,
                 Err(_) => reds_grp.create_group(red_name)?,
             };
             let (n_vars, k) = mat.shape;
@@ -1292,7 +1432,7 @@ impl DatasetWriter for H5SeuratWriter {
         let nnz = csr.indices.len();
 
         if nnz > 0 {
-            let data_path    = format!("assays/{}/{}/data",    self.assay, self.layer);
+            let data_path = format!("assays/{}/{}/data", self.assay, self.layer);
             let indices_path = format!("assays/{}/{}/indices", self.assay, self.layer);
 
             // Append values
@@ -1306,7 +1446,8 @@ impl DatasetWriter for H5SeuratWriter {
                     data_ds.write_slice(&Array1::from_vec(v), s![old_len..new_len])?;
                 }
                 DataType::F64 => {
-                    data_ds.write_slice(&Array1::from_vec(csr.data.to_f64()), s![old_len..new_len])?;
+                    data_ds
+                        .write_slice(&Array1::from_vec(csr.data.to_f64()), s![old_len..new_len])?;
                 }
                 DataType::I32 => {
                     let v: Vec<i32> = csr.data.to_f64().into_iter().map(|x| x as i32).collect();
@@ -1339,15 +1480,23 @@ impl DatasetWriter for H5SeuratWriter {
         let layer_path = format!("assays/{}/{}", self.assay, self.layer);
 
         // Write indptr (i32 if nnz fits, i64 otherwise)
-        let max_ptr     = self.x_indptr.iter().copied().max().unwrap_or(0);
+        let max_ptr = self.x_indptr.iter().copied().max().unwrap_or(0);
         let indptr_path = format!("{layer_path}/indptr");
         if max_ptr > i32::MAX as u64 {
             let v: Vec<i64> = self.x_indptr.iter().map(|&x| x as i64).collect();
-            let ds = self.file.new_dataset::<i64>().shape(v.len()).create(indptr_path.as_str())?;
+            let ds = self
+                .file
+                .new_dataset::<i64>()
+                .shape(v.len())
+                .create(indptr_path.as_str())?;
             ds.write(&Array1::from_vec(v))?;
         } else {
             let v: Vec<i32> = self.x_indptr.iter().map(|&x| x as i32).collect();
-            let ds = self.file.new_dataset::<i32>().shape(v.len()).create(indptr_path.as_str())?;
+            let ds = self
+                .file
+                .new_dataset::<i32>()
+                .shape(v.len())
+                .create(indptr_path.as_str())?;
             ds.write(&Array1::from_vec(v))?;
         }
 
@@ -1401,16 +1550,28 @@ mod tests {
         let grp = file.create_group("assays/RNA/data").unwrap();
 
         let version = VarLenUnicode::from_str("packed-uint-matrix-v2").unwrap_or_default();
-        let attr = grp.new_attr::<VarLenUnicode>().shape(()).create("version").unwrap();
+        let attr = grp
+            .new_attr::<VarLenUnicode>()
+            .shape(())
+            .create("version")
+            .unwrap();
         attr.write_scalar(&version).unwrap();
 
         let shape = Array1::from_vec(vec![4u32, 3u32]);
-        grp.new_dataset::<u32>().shape(shape.len()).create("shape").unwrap()
-            .write(&shape).unwrap();
+        grp.new_dataset::<u32>()
+            .shape(shape.len())
+            .create("shape")
+            .unwrap()
+            .write(&shape)
+            .unwrap();
 
         let idxptr = Array1::from_vec(vec![0u64, 1, 3, 4, 4]);
-        grp.new_dataset::<u64>().shape(idxptr.len()).create("idxptr").unwrap()
-            .write(&idxptr).unwrap();
+        grp.new_dataset::<u64>()
+            .shape(idxptr.len())
+            .create("idxptr")
+            .unwrap()
+            .write(&idxptr)
+            .unwrap();
 
         drop(file);
 
@@ -1423,16 +1584,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_shape() {
-        if !golden_exists() { return; }
+        if !golden_exists() {
+            return;
+        }
         let reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
         let (n_obs, n_vars) = reader.shape();
-        assert_eq!(n_obs,  2700,  "expected 2700 cells");
+        assert_eq!(n_obs, 2700, "expected 2700 cells");
         assert_eq!(n_vars, 13714, "expected 13714 genes");
     }
 
     #[tokio::test]
     async fn test_obs() {
-        if !golden_exists() { return; }
+        if !golden_exists() {
+            return;
+        }
         let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
         let obs = reader.obs().await.unwrap();
         assert_eq!(obs.index.len(), 2700);
@@ -1442,7 +1607,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_var() {
-        if !golden_exists() { return; }
+        if !golden_exists() {
+            return;
+        }
         let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
         let var = reader.var().await.unwrap();
         assert_eq!(var.index.len(), 13714);
@@ -1450,53 +1617,65 @@ mod tests {
         assert!(var.columns.iter().any(|c| c.name == "vf.vst.mean"));
         assert!(var.columns.iter().any(|c| c.name == "vf.vst.variable"));
         // vf.vst.variable should be Bool
-        let hvg_col = var.columns.iter().find(|c| c.name == "vf.vst.variable").unwrap();
+        let hvg_col = var
+            .columns
+            .iter()
+            .find(|c| c.name == "vf.vst.variable")
+            .unwrap();
         assert!(matches!(hvg_col.data, crate::ir::ColumnData::Bool(_)));
     }
 
     #[tokio::test]
     async fn test_obsm() {
-        if !golden_exists() { return; }
+        if !golden_exists() {
+            return;
+        }
         let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
         let obsm = reader.obsm().await.unwrap();
-        assert!(obsm.map.contains_key("X_pca"),  "missing X_pca");
+        assert!(obsm.map.contains_key("X_pca"), "missing X_pca");
         assert!(obsm.map.contains_key("X_umap"), "missing X_umap");
-        assert_eq!(obsm.map["X_pca"].shape,  (2700, 30));
+        assert_eq!(obsm.map["X_pca"].shape, (2700, 30));
         assert_eq!(obsm.map["X_umap"].shape, (2700, 2));
     }
 
     #[tokio::test]
     async fn test_stream_coverage() {
-        if !golden_exists() { return; }
+        if !golden_exists() {
+            return;
+        }
         let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
         let mut total_cells = 0usize;
-        let mut total_nnz   = 0usize;
+        let mut total_nnz = 0usize;
         let mut stream = reader.x_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
             total_cells += chunk.nrows;
-            total_nnz   += chunk.data.indices.len();
+            total_nnz += chunk.data.indices.len();
         }
         assert_eq!(total_cells, 2700);
-        assert_eq!(total_nnz,   2282976);
+        assert_eq!(total_nnz, 2282976);
     }
 
     #[tokio::test]
     async fn test_h5seurat_roundtrip() {
-        if !golden_exists() { return; }
+        if !golden_exists() {
+            return;
+        }
 
         let mut reader = H5SeuratReader::open(GOLDEN, 500, None, None).unwrap();
         let (n_obs, n_vars) = reader.shape();
 
-        let obs  = reader.obs().await.unwrap();
-        let var  = reader.var().await.unwrap();
+        let obs = reader.obs().await.unwrap();
+        let var = reader.var().await.unwrap();
         let obsm = reader.obsm().await.unwrap();
-        let uns  = reader.uns().await.unwrap();
+        let uns = reader.uns().await.unwrap();
 
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, None, None, false).unwrap();
+        let mut writer =
+            H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, None, None, false)
+                .unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&obsm).await.unwrap();
@@ -1523,7 +1702,10 @@ mod tests {
         assert_eq!(rt_var.index[0], var.index[0]);
 
         let rt_obsm = rt.obsm().await.unwrap();
-        assert!(rt_obsm.map.contains_key("X_pca"), "X_pca missing after roundtrip");
+        assert!(
+            rt_obsm.map.contains_key("X_pca"),
+            "X_pca missing after roundtrip"
+        );
         assert_eq!(rt_obsm.map["X_pca"].shape, obsm.map["X_pca"].shape);
 
         let mut total_nnz = 0usize;
@@ -1558,16 +1740,26 @@ mod tests {
             nrows: n_obs,
             data: SparseMatrixCSR {
                 shape: (n_obs, n_vars),
-                indptr:  vec![0, 2, 4, 6],
+                indptr: vec![0, 2, 4, 6],
                 indices: vec![0, 2, 1, 3, 0, 3],
-                data:    TypedVec::F32(vec![1.1, 2.2, 3.3, 4.4, 5.5, 6.6]),
+                data: TypedVec::F32(vec![1.1, 2.2, 3.3, 4.4, 5.5, 6.6]),
             },
         };
 
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, DataType::F32, None, Some("data"), None, false).unwrap();
+        let mut writer = H5SeuratWriter::create(
+            &out,
+            n_obs,
+            n_vars,
+            DataType::F32,
+            None,
+            Some("data"),
+            None,
+            false,
+        )
+        .unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1595,23 +1787,30 @@ mod tests {
     async fn test_uns_misc_passthrough() {
         // Create a minimal valid H5Seurat with H5SeuratWriter, then inject a
         // misc/ group.  Verify that uns() surfaces it as JSON.
-        let obs = ObsTable { index: vec!["c0".into()], columns: vec![] };
-        let var = VarTable { index: vec!["g0".into()], columns: vec![] };
+        let obs = ObsTable {
+            index: vec!["c0".into()],
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: vec!["g0".into()],
+            columns: vec![],
+        };
         let chunk = MatrixChunk {
             row_offset: 0,
             nrows: 1,
             data: SparseMatrixCSR {
                 shape: (1, 1),
-                indptr:  vec![0, 1],
+                indptr: vec![0, 1],
                 indices: vec![0],
-                data:    TypedVec::F32(vec![1.0]),
+                data: TypedVec::F32(vec![1.0]),
             },
         };
 
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&path, 1, 1, DataType::F32, None, None, None, false).unwrap();
+        let mut writer =
+            H5SeuratWriter::create(&path, 1, 1, DataType::F32, None, None, None, false).unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
@@ -1623,8 +1822,15 @@ mod tests {
         // Inject misc/ with a scalar dataset and a numeric array
         {
             let file = File::open_rw(&path).unwrap();
-            let misc  = file.group("misc").or_else(|_| file.create_group("misc")).unwrap();
-            let ds    = misc.new_dataset::<f64>().shape(3).create("weights").unwrap();
+            let misc = file
+                .group("misc")
+                .or_else(|_| file.create_group("misc"))
+                .unwrap();
+            let ds = misc
+                .new_dataset::<f64>()
+                .shape(3)
+                .create("weights")
+                .unwrap();
             ds.write(&Array1::from_vec(vec![0.1f64, 0.2, 0.3])).unwrap();
         }
 
@@ -1632,7 +1838,10 @@ mod tests {
         let uns = reader.uns().await.unwrap();
 
         assert!(uns.raw.is_object(), "uns.raw should be a JSON object");
-        assert!(uns.raw.get("weights").is_some(), "misc/weights missing from uns");
+        assert!(
+            uns.raw.get("weights").is_some(),
+            "misc/weights missing from uns"
+        );
         assert_eq!(uns.raw["weights"], serde_json::json!([0.1, 0.2, 0.3]));
     }
 
@@ -1643,10 +1852,13 @@ mod tests {
     #[tokio::test]
     async fn test_slot_parity_roundtrip() {
         // 3 cells × 4 genes synthetic dataset.
-        let n_obs  = 3usize;
+        let n_obs = 3usize;
         let n_vars = 4usize;
 
-        let obs = ObsTable { index: vec!["c0".into(), "c1".into(), "c2".into()], columns: vec![] };
+        let obs = ObsTable {
+            index: vec!["c0".into(), "c1".into(), "c2".into()],
+            columns: vec![],
+        };
         let var = VarTable {
             index: vec!["g0".into(), "g1".into(), "g2".into(), "g3".into()],
             columns: vec![],
@@ -1657,10 +1869,10 @@ mod tests {
             row_offset: 0,
             nrows: n_obs,
             data: SparseMatrixCSR {
-                shape:   (n_obs, n_vars),
-                indptr:  vec![0, 2, 3, 4],
+                shape: (n_obs, n_vars),
+                indptr: vec![0, 2, 3, 4],
                 indices: vec![0, 2, 1, 3],
-                data:    TypedVec::F32(vec![1.0, 2.0, 3.0, 4.0]),
+                data: TypedVec::F32(vec![1.0, 2.0, 3.0, 4.0]),
             },
         };
 
@@ -1669,15 +1881,15 @@ mod tests {
             row_offset: 0,
             nrows: n_vars,
             data: SparseMatrixCSR {
-                shape:   (n_vars, n_obs),
-                indptr:  vec![0, 1, 2, 3, 3],
+                shape: (n_vars, n_obs),
+                indptr: vec![0, 1, 2, 3, 3],
                 indices: vec![1, 0, 2],
-                data:    TypedVec::F32(vec![10.0, 20.0, 30.0]),
+                data: TypedVec::F32(vec![10.0, 20.0, 30.0]),
             },
         };
         let layer_meta = SparseMatrixMeta {
-            name:   "data".into(),
-            shape:  (n_vars, n_obs),
+            name: "data".into(),
+            shape: (n_vars, n_obs),
             indptr: vec![0, 1, 2, 3, 3],
         };
 
@@ -1686,22 +1898,22 @@ mod tests {
             row_offset: 0,
             nrows: n_obs,
             data: SparseMatrixCSR {
-                shape:   (n_obs, n_obs),
-                indptr:  vec![0, 1, 2, 3],
+                shape: (n_obs, n_obs),
+                indptr: vec![0, 1, 2, 3],
                 indices: vec![1, 2, 0],
-                data:    TypedVec::F32(vec![0.5, 0.6, 0.7]),
+                data: TypedVec::F32(vec![0.5, 0.6, 0.7]),
             },
         };
         let obsp_meta = SparseMatrixMeta {
-            name:   "knn".into(),
-            shape:  (n_obs, n_obs),
+            name: "knn".into(),
+            shape: (n_obs, n_obs),
             indptr: vec![0, 1, 2, 3],
         };
 
         // varm["X_pca"]: 4 genes × 2 PCs
         let varm_mat = DenseMatrix {
             shape: (n_vars, 2),
-            data:  vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
         };
         let mut varm = Varm::default();
         varm.map.insert("X_pca".into(), varm_mat.clone());
@@ -1709,19 +1921,27 @@ mod tests {
         let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
         let path = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None, None, false).unwrap();
+        let mut writer =
+            H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None, None, false)
+                .unwrap();
         writer.write_obs(&obs).await.unwrap();
         writer.write_var(&var).await.unwrap();
         writer.write_obsm(&Embeddings::default()).await.unwrap();
         writer.write_uns(&UnsTable::default()).await.unwrap();
 
         // Stream layer "data"
-        writer.begin_sparse("layers", "data", &layer_meta).await.unwrap();
+        writer
+            .begin_sparse("layers", "data", &layer_meta)
+            .await
+            .unwrap();
         writer.write_sparse_chunk(&layer_chunk).await.unwrap();
         writer.end_sparse().await.unwrap();
 
         // Stream obsp "knn"
-        writer.begin_sparse("obsp", "knn", &obsp_meta).await.unwrap();
+        writer
+            .begin_sparse("obsp", "knn", &obsp_meta)
+            .await
+            .unwrap();
         writer.write_sparse_chunk(&obsp_chunk).await.unwrap();
         writer.end_sparse().await.unwrap();
 
@@ -1735,12 +1955,15 @@ mod tests {
         assert_eq!(reader.shape(), (n_obs, n_vars));
 
         let layer_metas = reader.layer_metas().await.unwrap();
-        assert!(layer_metas.iter().any(|m| m.name == "data"), "layers['data'] missing");
+        assert!(
+            layer_metas.iter().any(|m| m.name == "data"),
+            "layers['data'] missing"
+        );
         // Stream the layer in its own block so the borrow on `reader` ends before
         // the next `&mut self` call.
         let all_indices: Vec<u32> = {
             let lm = layer_metas.iter().find(|m| m.name == "data").unwrap();
-            assert_eq!(lm.shape,  layer_meta.shape);
+            assert_eq!(lm.shape, layer_meta.shape);
             assert_eq!(lm.indptr, layer_meta.indptr);
             let mut indices = Vec::new();
             let mut stream = reader.layer_stream(lm, 100);
@@ -1753,7 +1976,10 @@ mod tests {
         assert_eq!(all_indices, layer_chunk.data.indices);
 
         let obsp_metas = reader.obsp_metas().await.unwrap();
-        assert!(obsp_metas.iter().any(|m| m.name == "knn"), "obsp['knn'] missing");
+        assert!(
+            obsp_metas.iter().any(|m| m.name == "knn"),
+            "obsp['knn'] missing"
+        );
         let om = obsp_metas.iter().find(|m| m.name == "knn").unwrap();
         assert_eq!(om.shape, obsp_meta.shape);
 
@@ -1773,16 +1999,18 @@ mod tests {
         use crate::h5ad::H5AdReader;
         use tempfile::NamedTempFile;
 
-        if !norman_exists() { return; }
+        if !norman_exists() {
+            return;
+        }
 
         // Read the Norman subset H5AD.
         let fixture = std::path::Path::new(NORMAN_FIXTURE);
         let mut src = H5AdReader::open(fixture, 500).unwrap();
         let (n_obs, n_vars) = src.shape();
-        let src_obs  = src.obs().await.unwrap();
-        let src_var  = src.var().await.unwrap();
+        let src_obs = src.obs().await.unwrap();
+        let src_var = src.var().await.unwrap();
         let src_obsm = src.obsm().await.unwrap();
-        let src_uns  = src.uns().await.unwrap();
+        let src_uns = src.uns().await.unwrap();
 
         let src_col_names: Vec<&str> = src_obs.columns.iter().map(|c| c.name.as_str()).collect();
         eprintln!("source obs columns: {src_col_names:?}");
@@ -1791,7 +2019,9 @@ mod tests {
         let tmp = NamedTempFile::with_suffix(".h5seurat").unwrap();
         let out = tmp.path().to_path_buf();
 
-        let mut writer = H5SeuratWriter::create(&out, n_obs, n_vars, src.dtype(), None, None, None, false).unwrap();
+        let mut writer =
+            H5SeuratWriter::create(&out, n_obs, n_vars, src.dtype(), None, None, None, false)
+                .unwrap();
         writer.write_obs(&src_obs).await.unwrap();
         writer.write_var(&src_var).await.unwrap();
         writer.write_obsm(&src_obsm).await.unwrap();
@@ -1809,24 +2039,38 @@ mod tests {
 
         // Read back via H5SeuratReader and check obs fidelity.
         let mut rt = H5SeuratReader::open(&out, 500, None, None).unwrap();
-        assert_eq!(rt.shape(), (n_obs, n_vars), "shape mismatch after round-trip");
+        assert_eq!(
+            rt.shape(),
+            (n_obs, n_vars),
+            "shape mismatch after round-trip"
+        );
 
         let rt_obs = rt.obs().await.unwrap();
         assert_eq!(rt_obs.index.len(), n_obs, "obs index length mismatch");
 
         // Every source column must survive the round-trip.
         for src_col in &src_obs.columns {
-            let rt_col = rt_obs.columns.iter().find(|c| c.name == src_col.name)
-                .unwrap_or_else(|| panic!("obs column '{}' missing after round-trip", src_col.name));
+            let rt_col = rt_obs
+                .columns
+                .iter()
+                .find(|c| c.name == src_col.name)
+                .unwrap_or_else(|| {
+                    panic!("obs column '{}' missing after round-trip", src_col.name)
+                });
 
             // Dtype class must be preserved.
             let src_kind = std::mem::discriminant(&src_col.data);
-            let rt_kind  = std::mem::discriminant(&rt_col.data);
-            assert_eq!(src_kind, rt_kind,
-                "obs column '{}' changed dtype after round-trip", src_col.name);
+            let rt_kind = std::mem::discriminant(&rt_col.data);
+            assert_eq!(
+                src_kind, rt_kind,
+                "obs column '{}' changed dtype after round-trip",
+                src_col.name
+            );
         }
 
-        eprintln!("norman obs round-trip OK: {n_obs} cells, {} columns",
-                  rt_obs.columns.len());
+        eprintln!(
+            "norman obs round-trip OK: {n_obs} cells, {} columns",
+            rt_obs.columns.len()
+        );
     }
 }

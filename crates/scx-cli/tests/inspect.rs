@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/scx")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/scx")
 }
 
 fn golden_path(filename: &str) -> PathBuf {
@@ -32,13 +31,37 @@ fn test_inspect_h5seurat() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("Format : H5Seurat"), "missing 'Format : H5Seurat'\n{}", stdout);
-    assert!(stdout.contains("Shape  : 2700 obs × 13714 vars"), "missing shape\n{}", stdout);
-    assert!(stdout.contains("nCount_RNA"), "missing 'nCount_RNA'\n{}", stdout);
-    assert!(stdout.contains("orig.ident"), "missing 'orig.ident'\n{}", stdout);
-    assert!(stdout.contains("categorical"), "missing 'categorical'\n{}", stdout);
+    assert!(
+        stdout.contains("Format : H5Seurat"),
+        "missing 'Format : H5Seurat'\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Shape  : 2700 obs × 13714 vars"),
+        "missing shape\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("nCount_RNA"),
+        "missing 'nCount_RNA'\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("orig.ident"),
+        "missing 'orig.ident'\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("categorical"),
+        "missing 'categorical'\n{}",
+        stdout
+    );
     assert!(stdout.contains("X_pca"), "missing 'X_pca'\n{}", stdout);
-    assert!(stdout.contains("(2700, 30)"), "missing '(2700, 30)'\n{}", stdout);
+    assert!(
+        stdout.contains("(2700, 30)"),
+        "missing '(2700, 30)'\n{}",
+        stdout
+    );
 }
 
 #[test]
@@ -57,9 +80,21 @@ fn test_inspect_h5ad() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("Format : H5AD"), "missing 'Format : H5AD'\n{}", stdout);
-    assert!(stdout.contains("Shape  : 2700 obs × 13714 vars"), "missing shape\n{}", stdout);
-    assert!(stdout.contains("nCount_RNA"), "missing 'nCount_RNA'\n{}", stdout);
+    assert!(
+        stdout.contains("Format : H5AD"),
+        "missing 'Format : H5AD'\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Shape  : 2700 obs × 13714 vars"),
+        "missing shape\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("nCount_RNA"),
+        "missing 'nCount_RNA'\n{}",
+        stdout
+    );
     assert!(stdout.contains("X_pca"), "missing 'X_pca'\n{}", stdout);
 }
 
@@ -79,6 +114,14 @@ fn test_inspect_hlca() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("Format : H5AD"), "missing 'Format : H5AD'\n{}", stdout);
-    assert!(stdout.contains("584944 obs"), "missing '584944 obs'\n{}", stdout);
+    assert!(
+        stdout.contains("Format : H5AD"),
+        "missing 'Format : H5AD'\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("584944 obs"),
+        "missing '584944 obs'\n{}",
+        stdout
+    );
 }

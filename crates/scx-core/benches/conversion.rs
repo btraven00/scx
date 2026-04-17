@@ -7,7 +7,7 @@ use scx_core::{
     dtype::{DataType, TypedVec},
     h5::ScxH5Reader,
     h5ad::H5AdWriter,
-    ir::{SparseMatrixCSR, SingleCellDataset},
+    ir::{SingleCellDataset, SparseMatrixCSR},
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     stream::{DatasetReader, DatasetWriter},
 };
@@ -91,30 +91,38 @@ fn bench_roundtrip(c: &mut Criterion) {
                     let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
 
                     let mut reader = ScxH5Reader::open(GOLDEN, chunk_size).unwrap();
-                    let obs  = reader.obs().await.unwrap();
-                    let var  = reader.var().await.unwrap();
+                    let obs = reader.obs().await.unwrap();
+                    let var = reader.var().await.unwrap();
                     let obsm = reader.obsm().await.unwrap();
-                    let uns  = reader.uns().await.unwrap();
+                    let uns = reader.uns().await.unwrap();
                     let varm = reader.varm().await.unwrap();
                     let layer_metas = reader.layer_metas().await.unwrap();
-                    let obsp_metas  = reader.obsp_metas().await.unwrap();
+                    let obsp_metas = reader.obsp_metas().await.unwrap();
 
-                    let mut writer = H5AdWriter::create(tmp.path(), n_obs, n_vars, DataType::F32).unwrap();
+                    let mut writer =
+                        H5AdWriter::create(tmp.path(), n_obs, n_vars, DataType::F32).unwrap();
                     writer.write_obs(&obs).await.unwrap();
                     writer.write_var(&var).await.unwrap();
                     writer.write_obsm(&obsm).await.unwrap();
                     writer.write_uns(&uns).await.unwrap();
                     writer.write_varm(&varm).await.unwrap();
                     for meta in &layer_metas {
-                        writer.begin_sparse("layers", &meta.name, meta).await.unwrap();
+                        writer
+                            .begin_sparse("layers", &meta.name, meta)
+                            .await
+                            .unwrap();
                         let mut s = reader.layer_stream(meta, chunk_size);
-                        while let Some(c) = s.next().await { writer.write_sparse_chunk(&c.unwrap()).await.unwrap(); }
+                        while let Some(c) = s.next().await {
+                            writer.write_sparse_chunk(&c.unwrap()).await.unwrap();
+                        }
                         writer.end_sparse().await.unwrap();
                     }
                     for meta in &obsp_metas {
                         writer.begin_sparse("obsp", &meta.name, meta).await.unwrap();
                         let mut s = reader.obsp_stream(meta, chunk_size);
-                        while let Some(c) = s.next().await { writer.write_sparse_chunk(&c.unwrap()).await.unwrap(); }
+                        while let Some(c) = s.next().await {
+                            writer.write_sparse_chunk(&c.unwrap()).await.unwrap();
+                        }
                         writer.end_sparse().await.unwrap();
                     }
 
@@ -160,15 +168,15 @@ async fn materialise_golden() -> (SingleCellDataset, usize) {
     let mut reader = ScxH5Reader::open(GOLDEN, 5000).unwrap();
     let (n_obs, n_vars) = reader.shape();
     let x_dtype = reader.dtype();
-    let obs  = reader.obs().await.unwrap();
-    let var  = reader.var().await.unwrap();
+    let obs = reader.obs().await.unwrap();
+    let var = reader.var().await.unwrap();
     let obsm = reader.obsm().await.unwrap();
-    let uns  = reader.uns().await.unwrap();
+    let uns = reader.uns().await.unwrap();
     let varm = reader.varm().await.unwrap();
     // ScxH5 has no layers/obsp; default to empty.
     let layers = scx_core::ir::Layers::default();
-    let obsp   = scx_core::ir::Obsp::default();
-    let varp   = scx_core::ir::Varp::default();
+    let obsp = scx_core::ir::Obsp::default();
+    let varp = scx_core::ir::Varp::default();
 
     let mut x_indptr: Vec<u64> = vec![0];
     let mut x_indices: Vec<u32> = Vec::new();
@@ -203,9 +211,21 @@ async fn materialise_golden() -> (SingleCellDataset, usize) {
     };
 
     let dataset = SingleCellDataset {
-        x: SparseMatrixCSR { shape: (n_obs, n_vars), indptr: x_indptr, indices: x_indices, data: x_data },
+        x: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr: x_indptr,
+            indices: x_indices,
+            data: x_data,
+        },
         x_dtype,
-        obs, var, obsm, uns, layers, obsp, varp, varm,
+        obs,
+        var,
+        obsm,
+        uns,
+        layers,
+        obsp,
+        varp,
+        varm,
     };
     (dataset, total_nnz)
 }
@@ -260,9 +280,7 @@ fn bench_npy_read(c: &mut Criterion) {
     group.sample_size(10);
 
     group.bench_function("read_snapshot", |b| {
-        b.iter(|| {
-            NpyIrReader::open(&snap_path, 5000).unwrap().into_dataset()
-        });
+        b.iter(|| NpyIrReader::open(&snap_path, 5000).unwrap().into_dataset());
     });
 
     group.finish();
@@ -305,46 +323,54 @@ fn bench_npy_to_h5ad(c: &mut Criterion) {
                 b.to_async(&rt).iter(move || {
                     let snap_path = snap_path.clone();
                     async move {
-                    let snap_path = &snap_path;
-                    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+                        let snap_path = &snap_path;
+                        let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
 
-                    let mut reader = NpyIrReader::open(snap_path, chunk_size).unwrap();
-                    let obs  = reader.obs().await.unwrap();
-                    let var  = reader.var().await.unwrap();
-                    let obsm = reader.obsm().await.unwrap();
-                    let uns  = reader.uns().await.unwrap();
-                    let varm = reader.varm().await.unwrap();
-                    let layer_metas = reader.layer_metas().await.unwrap();
-                    let obsp_metas  = reader.obsp_metas().await.unwrap();
+                        let mut reader = NpyIrReader::open(snap_path, chunk_size).unwrap();
+                        let obs = reader.obs().await.unwrap();
+                        let var = reader.var().await.unwrap();
+                        let obsm = reader.obsm().await.unwrap();
+                        let uns = reader.uns().await.unwrap();
+                        let varm = reader.varm().await.unwrap();
+                        let layer_metas = reader.layer_metas().await.unwrap();
+                        let obsp_metas = reader.obsp_metas().await.unwrap();
 
-                    let mut writer = H5AdWriter::create(tmp.path(), n_obs, n_vars, x_dtype).unwrap();
-                    writer.write_obs(&obs).await.unwrap();
-                    writer.write_var(&var).await.unwrap();
-                    writer.write_obsm(&obsm).await.unwrap();
-                    writer.write_uns(&uns).await.unwrap();
-                    writer.write_varm(&varm).await.unwrap();
-                    for meta in &layer_metas {
-                        writer.begin_sparse("layers", &meta.name, meta).await.unwrap();
-                        let mut s = reader.layer_stream(meta, chunk_size);
-                        while let Some(c) = s.next().await { writer.write_sparse_chunk(&c.unwrap()).await.unwrap(); }
-                        writer.end_sparse().await.unwrap();
-                    }
-                    for meta in &obsp_metas {
-                        writer.begin_sparse("obsp", &meta.name, meta).await.unwrap();
-                        let mut s = reader.obsp_stream(meta, chunk_size);
-                        while let Some(c) = s.next().await { writer.write_sparse_chunk(&c.unwrap()).await.unwrap(); }
-                        writer.end_sparse().await.unwrap();
-                    }
+                        let mut writer =
+                            H5AdWriter::create(tmp.path(), n_obs, n_vars, x_dtype).unwrap();
+                        writer.write_obs(&obs).await.unwrap();
+                        writer.write_var(&var).await.unwrap();
+                        writer.write_obsm(&obsm).await.unwrap();
+                        writer.write_uns(&uns).await.unwrap();
+                        writer.write_varm(&varm).await.unwrap();
+                        for meta in &layer_metas {
+                            writer
+                                .begin_sparse("layers", &meta.name, meta)
+                                .await
+                                .unwrap();
+                            let mut s = reader.layer_stream(meta, chunk_size);
+                            while let Some(c) = s.next().await {
+                                writer.write_sparse_chunk(&c.unwrap()).await.unwrap();
+                            }
+                            writer.end_sparse().await.unwrap();
+                        }
+                        for meta in &obsp_metas {
+                            writer.begin_sparse("obsp", &meta.name, meta).await.unwrap();
+                            let mut s = reader.obsp_stream(meta, chunk_size);
+                            while let Some(c) = s.next().await {
+                                writer.write_sparse_chunk(&c.unwrap()).await.unwrap();
+                            }
+                            writer.end_sparse().await.unwrap();
+                        }
 
-                    let mut stream = reader.x_stream();
-                    let mut nnz = 0usize;
-                    while let Some(chunk) = stream.next().await {
-                        let chunk = chunk.unwrap();
-                        nnz += chunk.data.indices.len();
-                        writer.write_x_chunk(&chunk).await.unwrap();
-                    }
-                    writer.finalize().await.unwrap();
-                    assert_eq!(nnz, total_nnz);
+                        let mut stream = reader.x_stream();
+                        let mut nnz = 0usize;
+                        while let Some(chunk) = stream.next().await {
+                            let chunk = chunk.unwrap();
+                            nnz += chunk.data.indices.len();
+                            writer.write_x_chunk(&chunk).await.unwrap();
+                        }
+                        writer.finalize().await.unwrap();
+                        assert_eq!(nnz, total_nnz);
                     }
                 });
             },
@@ -385,13 +411,13 @@ fn bench_npy_stream(c: &mut Criterion) {
                 b.to_async(&rt).iter(move || {
                     let snap_path = snap_path.clone();
                     async move {
-                    let mut reader = NpyIrReader::open(&snap_path, chunk_size).unwrap();
-                    let mut stream = reader.x_stream();
-                    let mut n = 0usize;
-                    while let Some(chunk) = stream.next().await {
-                        n += chunk.unwrap().data.indices.len();
-                    }
-                    assert_eq!(n, total_nnz);
+                        let mut reader = NpyIrReader::open(&snap_path, chunk_size).unwrap();
+                        let mut stream = reader.x_stream();
+                        let mut n = 0usize;
+                        while let Some(chunk) = stream.next().await {
+                            n += chunk.unwrap().data.indices.len();
+                        }
+                        assert_eq!(n, total_nnz);
                     }
                 });
             },

@@ -82,9 +82,9 @@ impl<'de> Deserialize<'de> for Qualifier {
                     ">=" => Qualifier::Ge(n),
                     "<=" => Qualifier::Le(n),
                     "==" => Qualifier::Eq(n),
-                    ">"  => Qualifier::Gt(n),
-                    "<"  => Qualifier::Lt(n),
-                    _    => unreachable!(),
+                    ">" => Qualifier::Gt(n),
+                    "<" => Qualifier::Lt(n),
+                    _ => unreachable!(),
                 })
             }
         }
@@ -209,22 +209,45 @@ pub async fn run_validation(
     // --- Lazily read only what is needed ---
 
     let need_layers = schema.layers.is_some();
-    let need_obsm   = schema.obsm.is_some();
-    let need_obsp   = schema.obsp.is_some();
-    let need_var    = schema.var_columns.is_some() || schema.var_index_unique == Some(true);
-    let need_obs    = schema.obs_columns.is_some() || schema.obs_index_unique == Some(true);
+    let need_obsm = schema.obsm.is_some();
+    let need_obsp = schema.obsp.is_some();
+    let need_var = schema.var_columns.is_some() || schema.var_index_unique == Some(true);
+    let need_obs = schema.obs_columns.is_some() || schema.obs_index_unique == Some(true);
 
-    let layer_metas = if need_layers { Some(reader.layer_metas().await?) } else { None };
-    let obsm_data   = if need_obsm   { Some(reader.obsm().await?)        } else { None };
-    let obsp_metas  = if need_obsp   { Some(reader.obsp_metas().await?)  } else { None };
-    let var_data    = if need_var    { Some(reader.var().await?)          } else { None };
-    let obs_data    = if need_obs    { Some(reader.obs().await?)          } else { None };
+    let layer_metas = if need_layers {
+        Some(reader.layer_metas().await?)
+    } else {
+        None
+    };
+    let obsm_data = if need_obsm {
+        Some(reader.obsm().await?)
+    } else {
+        None
+    };
+    let obsp_metas = if need_obsp {
+        Some(reader.obsp_metas().await?)
+    } else {
+        None
+    };
+    let var_data = if need_var {
+        Some(reader.var().await?)
+    } else {
+        None
+    };
+    let obs_data = if need_obs {
+        Some(reader.obs().await?)
+    } else {
+        None
+    };
 
     // --- Layers ---
     if let (Some(required), Some(metas)) = (&schema.layers, &layer_metas) {
         let available: HashSet<&str> = metas.iter().map(|m| m.name.as_str()).collect();
-        let missing: Vec<&str> = required.iter().map(String::as_str)
-            .filter(|s| !available.contains(s)).collect();
+        let missing: Vec<&str> = required
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !available.contains(s))
+            .collect();
         let ok = missing.is_empty();
         report.checks.push(check(
             "layers",
@@ -236,8 +259,11 @@ pub async fn run_validation(
 
     // --- obsm ---
     if let (Some(required), Some(obsm)) = (&schema.obsm, &obsm_data) {
-        let missing: Vec<&str> = required.iter().map(String::as_str)
-            .filter(|s| !obsm.map.contains_key(*s)).collect();
+        let missing: Vec<&str> = required
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !obsm.map.contains_key(*s))
+            .collect();
         let ok = missing.is_empty();
         report.checks.push(check(
             "obsm",
@@ -250,8 +276,11 @@ pub async fn run_validation(
     // --- obsp ---
     if let (Some(required), Some(metas)) = (&schema.obsp, &obsp_metas) {
         let available: HashSet<&str> = metas.iter().map(|m| m.name.as_str()).collect();
-        let missing: Vec<&str> = required.iter().map(String::as_str)
-            .filter(|s| !available.contains(s)).collect();
+        let missing: Vec<&str> = required
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !available.contains(s))
+            .collect();
         let ok = missing.is_empty();
         report.checks.push(check(
             "obsp",
@@ -264,8 +293,11 @@ pub async fn run_validation(
     // --- var columns ---
     if let (Some(required), Some(var)) = (&schema.var_columns, &var_data) {
         let available: HashSet<&str> = var.columns.iter().map(|c| c.name.as_str()).collect();
-        let missing: Vec<&str> = required.iter().map(String::as_str)
-            .filter(|s| !available.contains(s)).collect();
+        let missing: Vec<&str> = required
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !available.contains(s))
+            .collect();
         let ok = missing.is_empty();
         report.checks.push(check(
             "var_columns",
@@ -278,8 +310,11 @@ pub async fn run_validation(
     // --- obs columns ---
     if let (Some(required), Some(obs)) = (&schema.obs_columns, &obs_data) {
         let available: HashSet<&str> = obs.columns.iter().map(|c| c.name.as_str()).collect();
-        let missing: Vec<&str> = required.iter().map(String::as_str)
-            .filter(|s| !available.contains(s)).collect();
+        let missing: Vec<&str> = required
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !available.contains(s))
+            .collect();
         let ok = missing.is_empty();
         report.checks.push(check(
             "obs_columns",
@@ -424,37 +459,52 @@ mod tests {
     fn norman_path() -> Option<std::path::PathBuf> {
         if let Ok(p) = std::env::var("NORMAN_H5AD") {
             let pb = std::path::PathBuf::from(&p);
-            if pb.exists() { return Some(pb); }
+            if pb.exists() {
+                return Some(pb);
+            }
         }
         let pb = std::path::PathBuf::from(NORMAN_SUBSET);
-        if pb.exists() { Some(pb) } else { None }
+        if pb.exists() {
+            Some(pb)
+        } else {
+            None
+        }
     }
 
     #[tokio::test]
     async fn test_run_validation_shape_pass() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let (n_obs, n_vars) = crate::h5ad::H5AdReader::open(&path, 500).unwrap().shape();
 
         let mut reader = crate::h5ad::H5AdReader::open(&path, 500).unwrap();
-        let schema: ValidationSchema = serde_yaml::from_str(&format!(
-            "obs: \">= {n_obs}\"\nvars: \">= {n_vars}\""
-        )).unwrap();
-        let report = run_validation(&mut reader, &schema, "test", "test").await.unwrap();
-        assert!(report.passed(), "shape checks should pass with exact counts");
+        let schema: ValidationSchema =
+            serde_yaml::from_str(&format!("obs: \">= {n_obs}\"\nvars: \">= {n_vars}\"")).unwrap();
+        let report = run_validation(&mut reader, &schema, "test", "test")
+            .await
+            .unwrap();
+        assert!(
+            report.passed(),
+            "shape checks should pass with exact counts"
+        );
         assert_eq!(report.n_failed(), 0);
     }
 
     #[tokio::test]
     async fn test_run_validation_shape_fail() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let (n_obs, _) = crate::h5ad::H5AdReader::open(&path, 500).unwrap().shape();
 
         let mut reader = crate::h5ad::H5AdReader::open(&path, 500).unwrap();
         // Require more obs than the file has
-        let schema: ValidationSchema = serde_yaml::from_str(&format!(
-            "obs: \"> {}\"\n", n_obs
-        )).unwrap();
-        let report = run_validation(&mut reader, &schema, "test", "test").await.unwrap();
+        let schema: ValidationSchema =
+            serde_yaml::from_str(&format!("obs: \"> {}\"\n", n_obs)).unwrap();
+        let report = run_validation(&mut reader, &schema, "test", "test")
+            .await
+            .unwrap();
         assert!(!report.passed());
         assert_eq!(report.n_failed(), 1);
         assert_eq!(report.checks[0].name, "obs");
@@ -462,12 +512,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_validation_missing_layer() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let mut reader = crate::h5ad::H5AdReader::open(&path, 500).unwrap();
-        let schema: ValidationSchema = serde_yaml::from_str(
-            "layers:\n  - does_not_exist\n"
-        ).unwrap();
-        let report = run_validation(&mut reader, &schema, "test", "test").await.unwrap();
+        let schema: ValidationSchema =
+            serde_yaml::from_str("layers:\n  - does_not_exist\n").unwrap();
+        let report = run_validation(&mut reader, &schema, "test", "test")
+            .await
+            .unwrap();
         assert!(!report.passed());
         let layer_check = report.checks.iter().find(|c| c.name == "layers").unwrap();
         assert!(layer_check.detail.contains("does_not_exist"));
@@ -475,12 +528,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_validation_index_unique() {
-        let Some(path) = norman_path() else { return; };
+        let Some(path) = norman_path() else {
+            return;
+        };
         let mut reader = crate::h5ad::H5AdReader::open(&path, 500).unwrap();
-        let schema: ValidationSchema = serde_yaml::from_str(
-            "obs_index_unique: true\nvar_index_unique: true\n"
-        ).unwrap();
-        let report = run_validation(&mut reader, &schema, "test", "test").await.unwrap();
+        let schema: ValidationSchema =
+            serde_yaml::from_str("obs_index_unique: true\nvar_index_unique: true\n").unwrap();
+        let report = run_validation(&mut reader, &schema, "test", "test")
+            .await
+            .unwrap();
         // Norman subset has unique indices
         assert!(report.passed(), "Norman indices should be unique");
     }

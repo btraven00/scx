@@ -10,8 +10,8 @@
 
 use std::path::Path;
 
-use hdf5::File;
 use hdf5::types::VarLenUnicode;
+use hdf5::File;
 
 /// The detected on-disk format of an HDF5 file or NPY directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,8 +66,9 @@ pub fn sniff(path: &Path) -> Option<Format> {
     // --- H5Seurat ---
     // SeuratDisk always writes /cell.names (string dataset) and sets
     // active.assay as a root-level HDF5 attribute.
-    let has_cell_names   = file.dataset("cell.names").is_ok();
-    let has_active_assay = file.group("/")
+    let has_cell_names = file.dataset("cell.names").is_ok();
+    let has_active_assay = file
+        .group("/")
         .ok()
         .map(|g| g.attr("active.assay").is_ok())
         .unwrap_or(false);
@@ -90,24 +91,30 @@ mod tests {
     use super::*;
 
     const H5SEURAT: &str = "../../tests/golden/pbmc3k.h5seurat";
-    const SCX_H5:   &str = "../../tests/golden/pbmc3k.h5";
+    const SCX_H5: &str = "../../tests/golden/pbmc3k.h5";
     const H5AD_REF: &str = "../../tests/golden/pbmc3k_reference.h5ad";
 
     #[test]
     fn test_sniff_h5seurat() {
-        if !Path::new(H5SEURAT).exists() { return; }
+        if !Path::new(H5SEURAT).exists() {
+            return;
+        }
         assert_eq!(sniff(Path::new(H5SEURAT)), Some(Format::H5Seurat));
     }
 
     #[test]
     fn test_sniff_scx_h5() {
-        if !Path::new(SCX_H5).exists() { return; }
+        if !Path::new(SCX_H5).exists() {
+            return;
+        }
         assert_eq!(sniff(Path::new(SCX_H5)), Some(Format::ScxH5));
     }
 
     #[test]
     fn test_sniff_h5ad() {
-        if !Path::new(H5AD_REF).exists() { return; }
+        if !Path::new(H5AD_REF).exists() {
+            return;
+        }
         assert_eq!(sniff(Path::new(H5AD_REF)), Some(Format::H5Ad));
     }
 }
