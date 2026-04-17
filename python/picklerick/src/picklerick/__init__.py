@@ -2,6 +2,7 @@
 
 from ._api import (
     convert,
+    inspect,
     read,
     read_dataset,
     read_h5ad,
@@ -17,6 +18,7 @@ __all__ = [
     "ScxCommandError",
     "ScxNotFoundError",
     "convert",
+    "inspect",
     "native_available",
     "read",
     "read_dataset",
