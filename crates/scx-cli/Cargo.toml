@@ -2,6 +2,10 @@
 name = "scx-cli"
 version = "0.1.0"
 edition = "2021"
+description = "Swiss-army knife for single-cell data formats"
+authors = ["btraven <ben.uzh@pm.me>"]
+license = "GPL-3.0"
+repository = "https://github.com/btraven00/scx"
 
 [[bin]]
 name = "scx"
