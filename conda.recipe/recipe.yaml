@@ -16,10 +16,12 @@ build:
     - if: unix
       then:
         - export HDF5_DIR="$PREFIX"
+        - export CARGO_TARGET_DIR="/tmp/scx-build"
         - cargo install --path crates/scx-cli --root "$PREFIX" --locked
     - if: win
       then:
         - set "HDF5_DIR=%LIBRARY_PREFIX%"
+        - set "CARGO_TARGET_DIR=%TEMP%\scx-build"
         - cargo install --path crates/scx-cli --root "%PREFIX%" --locked
 
 requirements:
