@@ -9,6 +9,8 @@ package:
 
 source:
   path: ../
+  exclude:
+    - "**/target/**"
 
 build:
   number: 0
