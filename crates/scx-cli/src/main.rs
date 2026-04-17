@@ -1066,7 +1066,11 @@ async fn inspect(
     let mut sorted_layers = layer_metas.clone();
     sorted_layers.sort_by(|a, b| a.name.cmp(&b.name));
     for m in &sorted_layers {
-        let stats = indptr_row_stats(&m.indptr, m.shape.0, m.shape.1);
+        let stats = if m.indptr.is_empty() {
+            "(dense)".to_string()
+        } else {
+            indptr_row_stats(&m.indptr, m.shape.0, m.shape.1)
+        };
         println!(
             "  {:<30} {} × {}  {}",
             m.name,
@@ -1086,7 +1090,11 @@ async fn inspect(
     let mut sorted_obsp = obsp_metas.clone();
     sorted_obsp.sort_by(|a, b| a.name.cmp(&b.name));
     for m in &sorted_obsp {
-        let stats = indptr_row_stats(&m.indptr, m.shape.0, m.shape.1);
+        let stats = if m.indptr.is_empty() {
+            "(dense)".to_string()
+        } else {
+            indptr_row_stats(&m.indptr, m.shape.0, m.shape.1)
+        };
         println!(
             "  {:<30} {} × {}  {}",
             m.name,
