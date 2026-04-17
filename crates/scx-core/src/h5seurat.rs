@@ -784,6 +784,13 @@ pub fn open_h5seurat<P: AsRef<Path>>(
 
 #[async_trait]
 impl DatasetReader for H5SeuratReader {
+    fn x_indptr(&self) -> &[u64] {
+        match &self.x_backend {
+            XBackend::DgCMatrix { indptr, .. } => indptr.as_slice(),
+            XBackend::BpCells => &[],
+        }
+    }
+
     fn shape(&self) -> (usize, usize) {
         (self.n_obs, self.n_vars)
     }
