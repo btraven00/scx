@@ -5,6 +5,7 @@ tests/golden/*.json
 # tests/fixtures/ is tracked — committed test vectors live there
 tests/benchmark_results/*
 python/picklerick/target/
+r/picklerick/src/rust/target/
 *.pyc
 *.swp
 *.swo
