@@ -92,7 +92,7 @@ scipy    = "*"
 pytest   = "*"
 
 [feature.py313.tasks]
-install-picklerick-py-native = { cmd = "python -m ensurepip && python -m pip install maturin && python -m maturin develop --manifest-path python/picklerick/rust/Cargo.toml", description = "Build and install the picklerick native PyO3 extension into the Python 3.13 env" }
+install-picklerick-py-native = { cmd = "python -m ensurepip && python -m pip install maturin && cd python/picklerick && python -m maturin develop", description = "Build and install the picklerick native PyO3 extension into the Python 3.13 env" }
 verify-picklerick-py-native  = { cmd = "python -m pytest python/picklerick/tests/test_native.py -q", description = "Run native-backend smoke tests for the picklerick Python package" }
 
 # ---------------------------------------------------------------------------

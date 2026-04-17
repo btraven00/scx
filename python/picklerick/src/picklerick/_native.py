@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 
-_NATIVE_MODULE_NAME = "picklerick_py_native"
+_NATIVE_MODULE_NAME = "picklerick.picklerick_py_native"
 
 
 def _load_native_module() -> Any | None:

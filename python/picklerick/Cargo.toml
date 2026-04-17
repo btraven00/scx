@@ -4,19 +4,16 @@ version = "0.0.10"
 edition = "2021"
 description = "Optional PyO3 native bindings for the picklerick Python package"
 
-# This crate is intentionally kept outside the top-level Cargo workspace so it
-# can be built independently by Python packaging tools.
-[workspace]
-
 [lib]
 name = "picklerick_py_native"
 crate-type = ["cdylib"]
+path = "rust/src/lib.rs"
 
 [dependencies]
 anyhow = "1"
 futures = "0.3"
 pyo3 = { version = "0.22", features = ["extension-module"] }
-scx-core = { path = "../../../crates/scx-core" }
+scx-core = { path = "../../crates/scx-core" }
 tokio = { version = "1", features = ["rt"] }
 
 [profile.release]
