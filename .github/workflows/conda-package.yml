@@ -58,14 +58,14 @@ jobs:
         shell: bash
         run: |
           rattler-build build --recipe conda.recipe/recipe.yaml \
-            --output-dir output \
+            --output-dir /tmp/rattler-output \
             --target-platform ${{ matrix.platform.target }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.platform.target }}
-          path: output/
+          path: /tmp/rattler-output/
           retention-days: 7
           if-no-files-found: error
 
