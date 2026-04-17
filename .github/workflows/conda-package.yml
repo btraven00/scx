@@ -58,7 +58,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          fetch-tags: true  # required for git describe to find version tags
+
+      - name: Fetch tags
+        run: git fetch --tags --force
 
       - name: Compute version
         shell: bash
