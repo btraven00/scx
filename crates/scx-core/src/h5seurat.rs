@@ -389,7 +389,7 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
         // Map reduction name to AnnData obsm key convention
         let obsm_key = format!("X_{}", red_name.to_lowercase());
         let shape = (arr.shape()[0], arr.shape()[1]);
-        map.insert(obsm_key, DenseMatrix { shape, data: arr.into_raw_vec() });
+        map.insert(obsm_key, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
     }
     Ok(Embeddings { map })
 }
@@ -653,7 +653,7 @@ fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
         };
         let shape = (arr.shape()[0], arr.shape()[1]);
         let varm_key = format!("X_{}", red_name.to_lowercase());
-        map.insert(varm_key, DenseMatrix { shape, data: arr.into_raw_vec() });
+        map.insert(varm_key, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
     }
     Ok(Varm { map })
 }

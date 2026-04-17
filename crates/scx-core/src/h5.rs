@@ -278,7 +278,7 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
             arr
         };
         let shape = (arr.shape()[0], arr.shape()[1]);
-        map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec() });
+        map.insert(name, DenseMatrix { shape, data: arr.into_raw_vec_and_offset().0 });
     }
     Ok(Embeddings { map })
 }
