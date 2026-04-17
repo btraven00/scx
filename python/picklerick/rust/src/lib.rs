@@ -293,7 +293,7 @@ fn scx_write_h5seurat_native(
 }
 
 #[pyfunction]
-fn scx_inspect_native(py: Python<'_>, input: &str, chunk_size: usize) -> PyResult<PyObject> {
+fn scx_inspect_native(py: Python<'_>, input: &str, _chunk_size: usize) -> PyResult<PyObject> {
     let input_path = Path::new(input);
     let fmt = detect_format(input_path);
     let format_name = match fmt {
