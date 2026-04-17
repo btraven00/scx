@@ -666,7 +666,26 @@ where nnz > ~500M; the 0.0.4 writer handles everything smaller.
 
 ---
 
-## 0.1.1 — Internal NPY snapshot path for benchmarking
+## 0.1.1 — R-universe distribution for picklerick
+
+**Goal:** make `picklerick` installable via `install.packages()` without conda.
+
+- Set up `btraven.r-universe.dev` (GitHub repo `btraven/universe` with `packages.json`)
+- Add `src/install.libs.R` to picklerick — installs `libhdf5-dev` on R-universe's
+  Ubuntu build runners before compilation
+- Verify binary packages build for Linux and macOS on R-universe infra
+- Document install one-liner in README:
+  ```r
+  install.packages("picklerick", repos = c("https://btraven.r-universe.dev", "https://cloud.r-project.org"))
+  ```
+- Note: static HDF5 is currently blocked (see `docs/roadmap.md` static-linking
+  notes and project memory). Binary packages depend on dynamic libhdf5 at build
+  time; end users do not need it installed separately (R-universe bundles the `.so`
+  in the binary package).
+
+---
+
+## 0.1.2 — Internal NPY snapshot path for benchmarking
 
 **Goal:** keep an internal, low-overhead checkpoint format that helps isolate
 benchmark components and reduce measurement noise.
