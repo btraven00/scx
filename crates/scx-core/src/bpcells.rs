@@ -235,8 +235,8 @@ pub fn decode_d1z(data: &[u32], chunk_offsets: &[u32], starts: &[u32], count: us
             let raw = bp128_unpack(b, &data[ws..we]);
             let take = remaining.min(128);
             let mut prev = starts[k];
-            for i in 0..take {
-                let delta = zigzag_decode(raw[i]);
+            for &encoded in &raw[..take] {
+                let delta = zigzag_decode(encoded);
                 prev = (prev as i64 + delta as i64) as u32;
                 out.push(prev);
             }
@@ -293,8 +293,8 @@ pub fn decode_for(data: &[u32], chunk_offsets: &[u32], count: usize) -> Vec<u32>
             let b = ((we - ws) / 4) as u8;
             let raw = bp128_unpack(b, &data[ws..we]);
             let take = remaining.min(128);
-            for i in 0..take {
-                out.push(raw[i].wrapping_add(1));
+            for &v in &raw[..take] {
+                out.push(v.wrapping_add(1));
             }
             remaining -= take;
         }
@@ -543,6 +543,7 @@ pub struct BpcellsDatasetReader {
 
 impl BpcellsDatasetReader {
     /// Construct from already-decoded parts (used by the HDF5 backend).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         n_obs: usize,
         n_vars: usize,

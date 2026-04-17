@@ -602,6 +602,7 @@ async fn materialise_dataset(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn convert_with_reader(
     reader: &mut dyn DatasetReader,
     output: &Path,

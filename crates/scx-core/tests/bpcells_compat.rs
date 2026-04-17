@@ -363,7 +363,7 @@ fn parallel_d1z_matches_sequential() {
 
     // chunk k → 128 copies of k
     let expected: Vec<u32> = (0..N_CHUNKS as u32)
-        .flat_map(|k| std::iter::repeat(k).take(128))
+        .flat_map(|k| std::iter::repeat_n(k, 128))
         .collect();
 
     for n_threads in [1, 2, 4, rayon::current_num_threads()] {
@@ -575,13 +575,13 @@ fn roundtrip_synth_large_vals_exact() {
     let r = BpcellsDirReader::open(&fixture("synth_large_vals")).unwrap();
     let dense = r.to_dense_u32();
     // Diagonal: [2147483647, 1073741824, 1, 1000000]
-    assert_eq!(dense[0 * 4 + 0], 2147483647u32, "2^31-1");
-    assert_eq!(dense[1 * 4 + 1], 1073741824u32, "2^30");
-    assert_eq!(dense[2 * 4 + 2], 1u32);
-    assert_eq!(dense[3 * 4 + 3], 1000000u32);
+    assert_eq!(dense[0],  2147483647u32, "2^31-1"); // [0][0]
+    assert_eq!(dense[5],  1073741824u32, "2^30");   // [1][1]
+    assert_eq!(dense[10], 1u32);                    // [2][2]
+    assert_eq!(dense[15], 1000000u32);              // [3][3]
     // Off-diagonal must be 0
-    assert_eq!(dense[0 * 4 + 1], 0);
-    assert_eq!(dense[1 * 4 + 0], 0);
+    assert_eq!(dense[1], 0); // [0][1]
+    assert_eq!(dense[4], 0); // [1][0]
 }
 
 // ─── 4. DATASET READER TESTS ────────────────────────────────────────────────
