@@ -27,11 +27,14 @@ pub fn csc_to_csr(csc: &SparseMatrixCSC) -> SparseMatrixCSR {
     for col in 0..ncols {
         let col_start = csc.indptr[col] as usize;
         let col_end = csc.indptr[col + 1] as usize;
-        for idx in col_start..col_end {
-            let row = csc.indices[idx] as usize;
+        for (&row_idx, &val) in csc.indices[col_start..col_end]
+            .iter()
+            .zip(data_f64[col_start..col_end].iter())
+        {
+            let row = row_idx as usize;
             let dest = cursor[row] as usize;
             csr_indices[dest] = col as u32;
-            csr_data[dest] = data_f64[idx];
+            csr_data[dest] = val;
             cursor[row] += 1;
         }
     }

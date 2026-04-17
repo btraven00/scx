@@ -187,6 +187,7 @@ fn read_strings(file: &File, path: &str) -> Result<Vec<String>> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_chunk_sync(
     path: &Path,
     assay: &str,
@@ -1066,6 +1067,7 @@ pub struct H5SeuratWriter {
 
 impl H5SeuratWriter {
     /// Create a new H5Seurat file for writing.
+    #[allow(clippy::too_many_arguments)]
     pub fn create<P: AsRef<Path>>(
         path: P,
         n_obs: usize,

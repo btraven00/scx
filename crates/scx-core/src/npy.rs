@@ -251,7 +251,7 @@ fn write_npy_header<W: Write>(w: &mut W, descr: &str, shape: &[usize]) -> io::Re
     };
     let dict = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_str}, }}");
     let needed = 10 + dict.len() + 1;
-    let padded = (needed + 63) / 64 * 64;
+    let padded = needed.div_ceil(64) * 64;
     let header_len = padded - 10;
     let n_spaces = header_len - dict.len() - 1;
 
@@ -386,7 +386,7 @@ fn extract_header_shape(header: &str) -> Result<Vec<usize>> {
 // ---------------------------------------------------------------------------
 
 unsafe fn as_bytes<T>(v: &[T]) -> &[u8] {
-    std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * std::mem::size_of::<T>())
+    std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v))
 }
 
 unsafe fn bytes_to_vec<T: Copy>(body: &[u8], n: usize) -> Result<Vec<T>> {
@@ -896,14 +896,14 @@ impl NpyIrReader {
         // --- obsm ---
         let om = obsm_dir(dir);
         let mut obsm_map = HashMap::new();
-        for (key, _dm) in &meta.obsm {
+        for key in meta.obsm.keys() {
             obsm_map.insert(key.clone(), read_2d_f64(&om.join(format!("{key}.npy")))?);
         }
 
         // --- varm ---
         let vm = varm_dir(dir);
         let mut varm_map = HashMap::new();
-        for (key, _dm) in &meta.varm {
+        for key in meta.varm.keys() {
             varm_map.insert(key.clone(), read_2d_f64(&vm.join(format!("{key}.npy")))?);
         }
 

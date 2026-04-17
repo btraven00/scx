@@ -456,6 +456,7 @@ fn write_version_attr(grp: &Group, version: &str) -> Result<()> {
 /// begins within the concatenated `index_idx` / `val_idx` arrays.
 ///
 /// `shape` is stored as `[nrow, ncol]` in BPCells convention.
+#[allow(clippy::too_many_arguments)]
 pub fn write_bpcells_h5(
     file: &File,
     group_path: &str,
@@ -747,6 +748,7 @@ pub struct BpcellsH5Writer {
 }
 
 impl BpcellsH5Writer {
+    #[allow(clippy::too_many_arguments)]
     pub fn create<P: AsRef<Path>>(
         path: P,
         n_obs: usize,
