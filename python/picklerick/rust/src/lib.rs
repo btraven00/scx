@@ -150,7 +150,8 @@ async fn do_convert_h5seurat(
     let uns = reader.uns().await?;
     let varm = reader.varm().await?;
 
-    let mut writer = H5SeuratWriter::create(output, n_obs, n_vars, dtype, Some(assay), None, None, false)?;
+    let mut writer =
+        H5SeuratWriter::create(output, n_obs, n_vars, dtype, Some(assay), None, None, false)?;
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
     writer.write_obsm(&obsm).await?;
