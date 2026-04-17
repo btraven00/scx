@@ -892,6 +892,20 @@ fn numeric_stats(data: &ColumnData) -> String {
     }
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = vals.len();
+
+    // Binary {0, 1} column — show counts instead of quartiles
+    if vals[0] >= 0.0 && vals[n - 1] <= 1.0 {
+        let ones  = vals.iter().filter(|&&v| v == 1.0).count();
+        let zeros = n - ones;
+        if ones + zeros == n {
+            return format!(
+                "bool-like  0: {} ({:.1}%)  1: {} ({:.1}%)",
+                zeros, 100.0 * zeros as f64 / n as f64,
+                ones,  100.0 * ones  as f64 / n as f64,
+            );
+        }
+    }
+
     let q = |p: f64| vals[(p * (n - 1) as f64).round() as usize];
     format!(
         "min={}  Q1={}  med={}  Q3={}  max={}",
