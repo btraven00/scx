@@ -75,6 +75,10 @@ enum Cli {
         /// Default: lean output for Seurat v5 + BPCells direct loading.
         #[arg(long)]
         seuratdisk_compat: bool,
+
+        /// Canonical URL of the source file (baked into uns["scx_provenance"])
+        #[arg(long)]
+        source_url: Option<String>,
     },
 
     /// Inspect a single-cell file
@@ -292,6 +296,7 @@ async fn run() -> anyhow::Result<()> {
             x_slot,
             project,
             seuratdisk_compat,
+            source_url,
         } => {
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
@@ -337,6 +342,7 @@ async fn run() -> anyhow::Result<()> {
                         dgcmatrix,
                         seuratdisk_compat,
                         &input,
+                        source_url.as_deref(),
                         source_sha256.clone(),
                     )
                     .await?
@@ -356,6 +362,7 @@ async fn run() -> anyhow::Result<()> {
                         dgcmatrix,
                         seuratdisk_compat,
                         &input,
+                        source_url.as_deref(),
                         source_sha256.clone(),
                     )
                     .await?
@@ -376,6 +383,7 @@ async fn run() -> anyhow::Result<()> {
                         dgcmatrix,
                         seuratdisk_compat,
                         &input,
+                        source_url.as_deref(),
                         source_sha256.clone(),
                     )
                     .await?
@@ -395,6 +403,7 @@ async fn run() -> anyhow::Result<()> {
                         dgcmatrix,
                         seuratdisk_compat,
                         &input,
+                        source_url.as_deref(),
                         source_sha256.clone(),
                     )
                     .await?
@@ -414,6 +423,7 @@ async fn run() -> anyhow::Result<()> {
                         dgcmatrix,
                         seuratdisk_compat,
                         &input,
+                        source_url.as_deref(),
                         source_sha256.clone(),
                     )
                     .await?
@@ -426,7 +436,7 @@ async fn run() -> anyhow::Result<()> {
             let record = ProvenanceRecord {
                 scx_version: env!("CARGO_PKG_VERSION").to_string(),
                 converted_at: provenance::utc_now_rfc3339(),
-                source: SourceInfo { path: input, sha256: source_sha256 },
+                source: SourceInfo { path: input, url: source_url, sha256: source_sha256 },
                 output: OutputInfo { path: output.clone(), sha256: output_sha256, n_obs, n_vars },
             };
             provenance::write_sidecar(&record, output_path)
@@ -647,6 +657,7 @@ async fn convert_with_reader(
     use_dgcmatrix: bool,
     seuratdisk_compat: bool,
     source_path: &str,
+    source_url: Option<&str>,
     source_sha256: Option<String>,
 ) -> anyhow::Result<(usize, usize)> {
     let t0 = std::time::Instant::now();
@@ -660,7 +671,7 @@ async fn convert_with_reader(
     let mut uns = reader.uns().await?;
     let varm = reader.varm().await?;
 
-    let prov = scx_core::provenance::det_record(source_path, source_sha256.as_deref(), n_obs, n_vars);
+    let prov = scx_core::provenance::det_record(source_path, source_url, source_sha256.as_deref(), n_obs, n_vars);
     match uns.raw.as_object_mut() {
         Some(obj) => { obj.insert("scx_provenance".to_string(), prov); }
         None => { uns.raw = serde_json::json!({ "scx_provenance": prov }); }
