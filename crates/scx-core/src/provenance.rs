@@ -79,7 +79,6 @@ pub fn det_record(
 pub fn write_sidecar(record: &ProvenanceRecord, output: &Path) -> std::io::Result<()> {
     let mut s = output.as_os_str().to_owned();
     s.push(".prov.json");
-    let json = serde_json::to_string_pretty(record)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
     std::fs::write(Path::new(&s), json)
 }
