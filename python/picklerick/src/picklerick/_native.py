@@ -124,8 +124,27 @@ def write_h5seurat_via_native(
     return True
 
 
+def inspect_via_native(
+    input_path: str | Path,
+    chunk_size: int = 5000,
+) -> dict | None:
+    """
+    Return file metadata as a dict using the native backend.
+
+    Returns ``None`` if the native module is unavailable.
+    """
+    if _NATIVE is None:
+        return None
+
+    return _NATIVE.scx_inspect_native(
+        str(Path(input_path).expanduser()),
+        int(chunk_size),
+    )
+
+
 __all__ = [
     "convert_via_native",
+    "inspect_via_native",
     "native_available",
     "write_h5seurat_via_native",
 ]

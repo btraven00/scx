@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from ._cli import convert_via_scx
 from ._io import read_h5ad_file, write_h5ad_file
-from ._native import convert_via_native, write_h5seurat_via_native
+from ._native import convert_via_native, inspect_via_native, write_h5seurat_via_native
 from ._util import ensure_parent_directory, is_h5ad_path, normalize_path
 
 if TYPE_CHECKING:
@@ -183,8 +183,48 @@ def convert(
     return output_path
 
 
+def inspect(
+    path: Pathish,
+    chunk_size: int = 5000,
+) -> dict:
+    """
+    Inspect a single-cell file and return metadata without loading any data.
+
+    Reads only shape, column names, embedding keys, and layer names. The count
+    matrix is never loaded. Memory usage is minimal regardless of dataset size.
+
+    Parameters
+    ----------
+    path:
+        Path to the file (``.h5seurat``, ``.h5ad``, BPCells directory, or ``.h5``).
+    chunk_size:
+        Internal chunk size used for metadata reads. Default ``5000``.
+
+    Returns
+    -------
+    dict
+        Keys: ``format``, ``n_obs``, ``n_vars``, ``obs_cols``, ``obs_dtypes``,
+        ``var_cols``, ``var_dtypes``, ``obsm_keys``, ``layers``, ``uns_keys``,
+        ``obsp_keys``, ``varm_keys``.
+
+    Raises
+    ------
+    RuntimeError
+        If the native backend is not installed. Install ``picklerick`` with
+        the native extras: ``pip install picklerick[native]``.
+    """
+    result = inspect_via_native(normalize_path(path), chunk_size=chunk_size)
+    if result is None:
+        raise RuntimeError(
+            "inspect() requires the native backend. "
+            "Install with: pip install picklerick[native]"
+        )
+    return result
+
+
 __all__ = [
     "convert",
+    "inspect",
     "read",
     "read_dataset",
     "read_h5ad",

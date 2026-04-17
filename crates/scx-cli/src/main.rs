@@ -853,6 +853,37 @@ fn col_type_str(data: &ColumnData) -> &'static str {
     }
 }
 
+fn fmt_stat(v: f64) -> String {
+    let abs = v.abs();
+    if v == 0.0 {
+        "0".to_string()
+    } else if abs >= 0.001 && abs < 100_000.0 {
+        let s = format!("{:.4}", v);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        format!("{:.3e}", v)
+    }
+}
+
+fn numeric_stats(data: &ColumnData) -> String {
+    let mut vals: Vec<f64> = match data {
+        ColumnData::Float(v) => v.clone(),
+        ColumnData::Int(v) => v.iter().map(|&x| x as f64).collect(),
+        _ => return String::new(),
+    };
+    if vals.is_empty() {
+        return String::new();
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = vals.len();
+    let q = |p: f64| vals[(p * (n - 1) as f64).round() as usize];
+    format!(
+        "min={}  Q1={}  med={}  Q3={}  max={}",
+        fmt_stat(vals[0]), fmt_stat(q(0.25)), fmt_stat(q(0.5)),
+        fmt_stat(q(0.75)), fmt_stat(vals[n - 1])
+    )
+}
+
 fn cat_levels_preview(data: &ColumnData) -> String {
     if let ColumnData::Categorical { levels, .. } = data {
         let n = levels.len();
@@ -943,18 +974,16 @@ async fn inspect(
     }
     for col in &obs.columns {
         let extra = cat_levels_preview(&col.data);
+        let stats = numeric_stats(&col.data);
         let type_str = col_type_str(&col.data);
-        if extra.is_empty() {
-            println!("  {:<30} {}", col.name, dim!(&type_str));
+        let annotation = if !extra.is_empty() {
+            format!("  {} {}", dim!("—"), dim!(&extra))
+        } else if !stats.is_empty() {
+            format!("  {} {}", dim!("—"), dim!(&stats))
         } else {
-            println!(
-                "  {:<30} {}  {} {}",
-                col.name,
-                dim!(&type_str),
-                dim!("—"),
-                dim!(&extra)
-            );
-        }
+            String::new()
+        };
+        println!("  {:<30} {}{}", col.name, dim!(&type_str), annotation);
     }
     println!();
 

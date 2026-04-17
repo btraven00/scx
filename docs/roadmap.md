@@ -717,6 +717,101 @@ ambition.
 
 ---
 
+## 0.1.3 — Inspect stats + Python/R parity
+
+**Goal: `inspect` becomes a useful diagnostic tool across all three surfaces.**
+
+### CLI: numeric descriptive stats
+
+For each numeric (`int32`, `float64`) obs/var column, append a one-line
+summary to the inspect output:
+
+```
+  nCount_RNA                     float64   min=201  Q1=1023  med=2105  Q3=4891  max=49832
+  nFeature_RNA                   int32     min=88   Q1=542   med=921   Q3=1642  max=7219
+```
+
+Categorical/string/bool columns unchanged. Implementation: sort + index (exact
+quartiles; data is already fully materialized as `Vec<f64>`/`Vec<i32>`).
+No new dependencies.
+
+R and Python deliberately omit this — they have native summary/describe tools.
+
+### Python: `inspect()` native binding
+
+Add `inspect(path, chunk_size=5000)` to `picklerick-py` via PyO3, returning a
+plain Python `dict` matching the R binding's named list:
+
+```python
+info = pk.inspect("atlas.h5seurat")
+# {'format': 'H5Seurat', 'n_obs': 1200000, 'n_vars': 33538,
+#  'obs_cols': ['cell_type', 'batch', ...], 'obsm_keys': ['X_pca', 'X_umap'], ...}
+```
+
+Reuses the same `scx-core` metadata reads as the R binding. No matrix data
+loaded.
+
+### Polars: optional output from Python inspect
+
+When `polars` is importable, `inspect(path, as_polars=True)` returns obs/var
+columns as a `polars.DataFrame` (copy; our IR is not Arrow-backed). Guarded
+by `try: import polars` so it never becomes a hard dependency. Not exposed in
+CLI or R.
+
+---
+
+## 0.1.4 — Python streaming iterator → numpy
+
+**Goal: expose chunk-by-chunk matrix iteration to Python for benchmark
+and analysis workflows.**
+
+Primary use case: perturbation prediction benchmarks that need to read a
+subset of cells (e.g., "all cells treated with Drug X"), run a metric, and
+discard. Loading the full matrix into RAM is not feasible at atlas scale.
+
+```python
+stream = pk.open_stream("atlas.h5ad", chunk_size=5000)
+for chunk in stream:
+    # chunk.row_offset, chunk.nrows
+    indptr, indices, data = chunk.indptr, chunk.indices, chunk.data  # numpy arrays
+    # process this slice of cells, then GC
+```
+
+### Implementation
+
+- `#[pyclass] PyMatrixStream` — owns `Box<dyn DatasetReader>` + an async
+  `x_stream()` handle; advances it via `block_on` in `__next__`
+- `#[pyclass] PyMatrixChunk` — exposes `row_offset`, `nrows`,
+  `indptr`/`indices`/`data` as numpy arrays (add `pyo3[numpy]` feature;
+  use `PyArray1::from_vec()` for zero-extra-copy conversion)
+- `open_stream(path, chunk_size)` — Python entry point, returns
+  `PyMatrixStream`; format auto-detected by `detect::sniff()`
+
+Note: scx's BPCells reader is **pure Rust** (scalar BP-128 decoder), not a
+wrapper around the C++ BPCells library. There are no C++ pointers to expose.
+The decoded numpy chunks are the equivalent — equally fast once decoded.
+
+### Symmetry
+
+R does not need this: the BPCells R package already provides lazy on-disk
+matrix access. Python lacks an equivalent, so `open_stream` fills the gap.
+
+---
+
+## 0.2.0 — Merge / fusion
+
+Combine multiple per-sample `.h5ad` files into a single atlas-scale file with
+provenance tracking. See `feature_merge.md` in project memory for full design.
+
+Key points:
+- Streaming concatenation (cell-major): never materializes the full combined
+  matrix; peak RSS ~ chunk_size
+- SHA-256 provenance tracking per source file
+- obs metadata merge with configurable conflict resolution
+- CLI: `scx merge sample1.h5ad sample2.h5ad ... -o atlas.h5ad`
+
+---
+
 ## Design notes: bidirectionality
 
 ### Why H5AD reader is easy
