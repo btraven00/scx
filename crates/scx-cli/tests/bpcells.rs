@@ -61,7 +61,7 @@ fn test_convert_h5ad_to_h5seurat_bpcells_default() {
         stdout
     );
     assert!(
-        stdout.contains("Shape  : 2700 × 13714  obs × vars"),
+        stdout.contains("Shape  : 2700 obs × 13714 vars"),
         "missing expected shape\n{}",
         stdout
     );
@@ -130,7 +130,7 @@ fn test_convert_h5seurat_to_h5seurat_bpcells_default() {
         stdout
     );
     assert!(
-        stdout.contains("Shape  : 2700 × 13714  obs × vars"),
+        stdout.contains("Shape  : 2700 obs × 13714 vars"),
         "missing expected shape\n{}",
         stdout
     );
@@ -200,7 +200,7 @@ fn test_convert_h5ad_to_h5seurat_dgcmatrix_opt_out() {
         stdout
     );
     assert!(
-        stdout.contains("Shape  : 2700 × 13714  obs × vars"),
+        stdout.contains("Shape  : 2700 obs × 13714 vars"),
         "missing expected shape\n{}",
         stdout
     );

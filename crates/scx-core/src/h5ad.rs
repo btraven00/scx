@@ -112,6 +112,41 @@ fn write_str_attr_on_ds(ds: &Dataset, name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Recursively write a JSON value into an HDF5 group as an AnnData-compatible entry.
+/// Handles strings, integers, floats, and nested objects (dicts).
+/// Arrays and nulls are silently skipped — sufficient for provenance use.
+fn write_json_value(grp: &Group, name: &str, value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::String(s) => {
+            let v = VarLenUnicode::from_str(s)
+                .map_err(|_| ScxError::InvalidFormat(format!("invalid UTF-8 in uns/{name}")))?;
+            let ds = grp.new_dataset::<VarLenUnicode>().shape(()).create(name)?;
+            ds.write_scalar(&v)?;
+            write_encoding_on_ds(&ds, "string", "0.2.0")?;
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                let ds = grp.new_dataset::<i64>().shape(()).create(name)?;
+                ds.write_scalar(&i)?;
+                write_encoding_on_ds(&ds, "scalar", "0.2.0")?;
+            } else if let Some(f) = n.as_f64() {
+                let ds = grp.new_dataset::<f64>().shape(()).create(name)?;
+                ds.write_scalar(&f)?;
+                write_encoding_on_ds(&ds, "scalar", "0.2.0")?;
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            let sub = grp.create_group(name)?;
+            write_encoding_on_group(&sub, "dict", "0.1.0")?;
+            for (k, v) in obj {
+                write_json_value(&sub, k, v)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn write_encoding_on_group(grp: &Group, enc_type: &str, enc_version: &str) -> Result<()> {
     write_str_attr_on_group(grp, "encoding-type", enc_type)?;
     write_str_attr_on_group(grp, "encoding-version", enc_version)
@@ -253,7 +288,10 @@ impl DatasetWriter for H5AdWriter {
         let grp = self.file.create_group("obsm")?;
         write_encoding_on_group(&grp, "dict", "0.1.0")?;
 
-        for (name, mat) in &obsm.map {
+        let mut keys: Vec<&String> = obsm.map.keys().collect();
+        keys.sort();
+        for name in keys {
+            let mat = &obsm.map[name];
             let (nrows, ncols) = mat.shape;
             let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
                 .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
@@ -268,9 +306,14 @@ impl DatasetWriter for H5AdWriter {
         Ok(())
     }
 
-    async fn write_uns(&mut self, _uns: &UnsTable) -> Result<()> {
+    async fn write_uns(&mut self, uns: &UnsTable) -> Result<()> {
         let grp = self.file.create_group("uns")?;
         write_encoding_on_group(&grp, "dict", "0.1.0")?;
+        if let Some(obj) = uns.raw.as_object() {
+            for (key, val) in obj {
+                write_json_value(&grp, key, val)?;
+            }
+        }
         Ok(())
     }
 
@@ -371,7 +414,10 @@ impl DatasetWriter for H5AdWriter {
     async fn write_varm(&mut self, varm: &Varm) -> Result<()> {
         let grp = self.file.create_group("varm")?;
         write_encoding_on_group(&grp, "dict", "0.1.0")?;
-        for (name, mat) in &varm.map {
+        let mut keys: Vec<&String> = varm.map.keys().collect();
+        keys.sort();
+        for name in keys {
+            let mat = &varm.map[name];
             let (nrows, ncols) = mat.shape;
             let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
                 .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
