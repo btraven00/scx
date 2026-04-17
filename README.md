@@ -1,137 +1,61 @@
 # SCX — Single-Cell format conversion
 
-SCX is a lean interoperability engine for single-cell format conversion,
-designed to support reproducible benchmarking of correctness, throughput,
-and memory use.
+Lean interoperability engine for single-cell format conversion, designed for
+reproducible benchmarking with bounded memory use.
 
-The project currently focuses on a narrow core:
+## Install
 
-- conversion between H5Seurat and H5AD, with attention to correctness and bounded memory use
-- a Rust streaming pipeline intended to keep memory use bounded by `chunk_size`
-- thin language bindings for interop workflows and benchmarking support
+```bash
+cargo install --path crates/scx-cli
+```
 
-Peak memory is intended to scale primarily with `chunk_size` rather than total dataset size.
+Or build from source:
 
-## Components
+```bash
+cargo build --release -p scx-cli
+# binary at target/release/scx
+```
 
-| Path | Description |
-|------|-------------|
-| `crates/scx-core` | Rust core: readers, writers, IR, streaming traits |
-| `crates/scx-cli` | `scx` command-line tool |
-| `r/picklerick` | R package (extendr bindings) |
-| `python/picklerick` | Python package (hybrid bindings: CLI-backed with optional native PyO3 acceleration) |
-| `docs/` | Roadmap and design notes |
+Requires Rust ≥ 1.70 and a system HDF5 installation.
 
-## Scope
+## Usage
 
-SCX is an interop library, not a full analysis framework. The main goal
-is reproducible benchmarking of format conversion.
-
-### In scope
-
-- H5Seurat ↔ H5AD conversion
-- bounded-memory conversion with explicit `chunk_size`
-- correctness checks against reference fixtures
-- CLI and thin language bindings for R/Python
-- internal formats or checkpoints that reduce benchmarking overhead
-
-### Out of scope
-
-- replacing AnnData / Scanpy / Seurat / BPCells
-- broad cloud-native storage support
-- feature parity across language bindings
-- supporting every single-cell format
-
-## Quick start
-
-### CLI
+### Convert
 
 ```bash
 scx convert pbmc.h5seurat pbmc.h5ad
 scx convert pbmc.h5ad pbmc.h5seurat
 ```
 
-### R
+Common options:
 
-```r
-library(picklerick)
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--chunk-size N` | 5000 | Cells per streaming chunk |
+| `--dtype` | f32 | Output matrix dtype (`f32`, `f64`, `i32`, `u32`) |
+| `--assay` | RNA | Seurat assay (H5Seurat input only) |
 
-adata <- read_h5seurat("pbmc.h5seurat")   # → anndataR::InMemoryAnnData
-write_h5ad(adata, "pbmc.h5ad")
-write_h5seurat(adata, "pbmc.h5seurat")
-
-seu <- read_seurat("pbmc.h5seurat")       # → Seurat object (requires Seurat ≥ 5)
-sce <- read_sce("pbmc.h5seurat")          # → SingleCellExperiment
-```
-
-See [`r/picklerick/docs/usage.md`](r/picklerick/docs/usage.md) for the full R API.
-
-## Build
+### Inspect
 
 ```bash
-# Rust CLI
-cargo build --release -p scx-cli
-
-# R package (requires Cargo ≥ 1.70 and system HDF5)
-R CMD INSTALL r/picklerick
-
-# Python package
-pip install -e python/picklerick
-
-# Tests
-cargo test
-Rscript -e "testthat::test_dir('r/picklerick/tests/testthat')"
-python -m pytest python/picklerick/tests -q
+scx inspect pbmc.h5ad
+scx inspect pbmc.h5seurat
 ```
 
-## Pixi workflows
+Prints format, shape, and a summary of every slot (obs, var, obsm, layers,
+obsp, varm, uns) without loading the matrix.
 
-For repo-local testing, pixi provides the most reliable workflows.
+## Provenance
 
-### Python package (CLI-backed path)
+Every `scx convert` run writes a sidecar `<output>.prov.json` with the source
+SHA256, output SHA256, shape, and timestamp. The artifact itself contains a
+deterministic `uns["scx_provenance"]` block (no timestamp) so byte-level
+reproducibility is preserved.
 
-```bash
-pixi run -e test install-picklerick-py
-pixi run -e test verify-picklerick-py
-```
+## Docs
 
-### Python package (optional native PyO3 backend)
-
-```bash
-pixi run -e py313 install-picklerick-py-native
-pixi run -e py313 verify-picklerick-py-native
-```
-
-### Shared test fixtures
-
-If the golden fixtures are missing, generate them with:
-
-```bash
-pixi run -e test fixtures
-```
-
-## Formats
-
-| Format | Read | Write |
-|--------|------|-------|
-| H5Seurat (SeuratDisk) | yes | yes |
-| H5AD (AnnData ≥ 0.8) | yes | yes |
-| SCX internal `.h5` | yes | — |
-
-Dense X/layers and nullable obs columns (anndata `IntNA`/`FloatNA`/`BoolNA`)
-are supported.
-
-## Internal benchmarking format
-
-SCX also has an internal `.npy` snapshot format used as an implementation and
-benchmarking aid. It is intended as an internal, exploratory mechanism and should be understood as:
-
-- an internal checkpoint format for isolating read/write costs in benchmarks
-- a debugging substrate for inspecting the intermediate representation
-- a way to reduce overhead in benchmarking tasks without going through HDF5 each time
-
-It is not currently positioned as a primary public interchange format.
+Design notes, scope, formats, and developer workflows live in [`docs/`](docs/).
 
 ## License
 
-GPL-3. See individual crate `Cargo.toml` files for dependency licenses.
+GPL-3.
