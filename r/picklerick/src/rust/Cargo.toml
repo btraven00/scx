@@ -14,7 +14,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 extendr-api = "0.7"
-scx-core    = { path = "../../../../crates/scx-core" }
+scx-core    = { path = "../../../../crates/scx-core", version = "0.1.0" }
 tokio       = { version = "1", features = ["rt"] }
 futures     = "0.3"
 anyhow      = "1"
