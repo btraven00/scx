@@ -265,10 +265,25 @@ async fn collect_info(
     let layer_list = sparse_stats(&layer_metas);
     let obsp_list  = sparse_stats(&obsp_metas);
 
+    // X nnz stats from indptr (empty for dense/BPCells)
+    let x_indptr = reader.x_indptr();
+    let x_stats: Robj = if x_indptr.len() > 1 {
+        let nnz = *x_indptr.last().unwrap() as i32;
+        let mut per_row: Vec<u64> = x_indptr.windows(2).map(|w| w[1] - w[0]).collect();
+        per_row.sort_unstable();
+        let n = per_row.len();
+        let q = |p: f64| per_row[(p * (n - 1) as f64).round() as usize] as i32;
+        list!(nnz = nnz, nnz_q1 = q(0.25), nnz_med = q(0.5),
+              nnz_q3 = q(0.75), nnz_max = *per_row.last().unwrap() as i32).into_robj()
+    } else {
+        ().into_robj()
+    };
+
     Ok(list!(
         format    = format_name,
         n_obs     = n_obs as i32,
         n_vars    = n_vars as i32,
+        x_stats   = x_stats,
         obs_cols  = obs_cols,
         var_cols  = var_cols,
         obsm_keys = obsm_keys,

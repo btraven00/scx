@@ -968,6 +968,10 @@ async fn inspect(
     );
     let dtype_str = reader.dtype().to_string();
     println!("{} {}", bold!("X dtype:"), cyan!(&dtype_str));
+    let x_stats = indptr_row_stats(reader.x_indptr(), n_obs, n_vars);
+    if !x_stats.is_empty() {
+        println!("{} {}", bold!("X      :"), dim!(&x_stats));
+    }
     println!();
 
     // section header helper
