@@ -1,5 +1,4 @@
 pub mod bpcells;
-pub mod provenance;
 pub mod detect;
 pub mod dtype;
 pub mod error;
@@ -9,6 +8,7 @@ pub mod h5bpcells;
 pub mod h5seurat;
 pub mod ir;
 pub mod npy;
+pub mod provenance;
 pub mod sparse;
 pub mod stream;
 pub mod validate;
