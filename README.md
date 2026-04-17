@@ -1,12 +1,11 @@
 # SCX — Single-Cell format conversion
 
-Lean interoperability engine for single-cell format conversion, designed for
-reproducible benchmarking with bounded memory use.
+Swiss-army knife for single-cell format conversion, designed for reproducible benchmarks.
 
 ## Install
 
 ```bash
-cargo install --path crates/scx-cli
+cargo install --path scx-cli
 ```
 
 Or build from source:
