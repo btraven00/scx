@@ -3,6 +3,9 @@ name = "scx-core"
 version = "0.1.0"
 edition = "2021"
 description = "Streaming interop engine for single-cell data"
+authors = ["btraven <ben.uzh@pm.me>"]
+license = "GPL-3.0"
+repository = "https://github.com/btraven00/scx"
 
 [dependencies]
 async-trait = "0.1"
