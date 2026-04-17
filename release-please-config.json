@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    "crates/scx-core": {
+      "release-type": "rust",
+      "package-name": "scx-core"
+    },
+    "crates/scx-cli": {
+      "release-type": "rust",
+      "package-name": "scx-cli"
+    }
+  },
+  "linked-versions": true
+}

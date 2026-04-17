@@ -12,7 +12,7 @@ name = "scx"
 path = "src/main.rs"
 
 [dependencies]
-scx-core = { path = "../scx-core" }
+scx-core = { path = "../scx-core", version = "0.1.0" }
 anyhow = "1"
 serde_json = "1"
 serde_yaml = "0.9"
