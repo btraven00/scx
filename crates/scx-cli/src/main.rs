@@ -865,6 +865,22 @@ fn fmt_stat(v: f64) -> String {
     }
 }
 
+fn indptr_row_stats(indptr: &[u64], n_rows: usize, n_cols: usize) -> String {
+    if indptr.len() < 2 || n_rows == 0 || n_cols == 0 {
+        return String::new();
+    }
+    let nnz = *indptr.last().unwrap_or(&0) as usize;
+    let sparsity = 100.0 * (1.0 - nnz as f64 / (n_rows as f64 * n_cols as f64));
+    let mut per_row: Vec<u64> = indptr.windows(2).map(|w| w[1] - w[0]).collect();
+    per_row.sort_unstable();
+    let n = per_row.len();
+    let q = |p: f64| per_row[(p * (n - 1) as f64).round() as usize];
+    format!(
+        "nnz={}  sparse={:.1}%  nnz/cell Q1={}  med={}  Q3={}  max={}",
+        nnz, sparsity, q(0.25), q(0.5), q(0.75), per_row[n - 1]
+    )
+}
+
 fn numeric_stats(data: &ColumnData) -> String {
     let mut vals: Vec<f64> = match data {
         ColumnData::Float(v) => v.clone(),
@@ -1046,14 +1062,13 @@ async fn inspect(
     let mut sorted_layers = layer_metas.clone();
     sorted_layers.sort_by(|a, b| a.name.cmp(&b.name));
     for m in &sorted_layers {
-        let nnz = m.indptr.last().copied().unwrap_or(0);
+        let stats = indptr_row_stats(&m.indptr, m.shape.0, m.shape.1);
         println!(
-            "  {:<30} {} × {}  {}{}",
+            "  {:<30} {} × {}  {}",
             m.name,
             yellow!(m.shape.0),
             yellow!(m.shape.1),
-            dim!("nnz="),
-            yellow!(nnz)
+            dim!(&stats),
         );
     }
     if layer_metas.is_empty() {
@@ -1067,14 +1082,13 @@ async fn inspect(
     let mut sorted_obsp = obsp_metas.clone();
     sorted_obsp.sort_by(|a, b| a.name.cmp(&b.name));
     for m in &sorted_obsp {
-        let nnz = m.indptr.last().copied().unwrap_or(0);
+        let stats = indptr_row_stats(&m.indptr, m.shape.0, m.shape.1);
         println!(
-            "  {:<30} {} × {}  {}{}",
+            "  {:<30} {} × {}  {}",
             m.name,
             yellow!(m.shape.0),
             yellow!(m.shape.1),
-            dim!("nnz="),
-            yellow!(nnz)
+            dim!(&stats),
         );
     }
     if obsp_metas.is_empty() {
