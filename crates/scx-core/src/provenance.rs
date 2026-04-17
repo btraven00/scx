@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 pub struct SourceInfo {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
 }
 
@@ -50,11 +52,15 @@ pub fn utc_now_rfc3339() -> String {
 /// Contains only inputs + version; no timestamp so the output is reproducible.
 pub fn det_record(
     source_path: &str,
+    source_url: Option<&str>,
     source_sha256: Option<&str>,
     n_obs: usize,
     n_vars: usize,
 ) -> serde_json::Value {
     let mut src = serde_json::json!({ "path": source_path });
+    if let Some(url) = source_url {
+        src["url"] = serde_json::Value::String(url.to_string());
+    }
     if let Some(sha) = source_sha256 {
         src["sha256"] = serde_json::Value::String(sha.to_string());
     }
