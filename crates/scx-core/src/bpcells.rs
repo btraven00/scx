@@ -498,6 +498,9 @@ use crate::stream::DatasetReader;
 ///   Shape `[n_vars, n_obs]` → `n_obs = ncol`, `n_vars = nrow`.
 /// - CSR (`storage_order = "row"`): outer dim = obs, inner dim = vars.
 ///   Shape `[n_obs, n_vars]` → `n_obs = nrow`, `n_vars = ncol`.
+///
+/// When opened with `open_metadata_only`, matrix fields are empty and
+/// `x_stream` / `read_chunk` will return an error.
 #[derive(Clone)]
 pub struct BpcellsDatasetReader {
     pub n_obs: usize,
@@ -511,6 +514,8 @@ pub struct BpcellsDatasetReader {
     index: Arc<Vec<u32>>,
     values: Arc<ValStore>,
     dtype: DataType,
+    /// True when opened via `open_metadata_only` — matrix fields are unpopulated.
+    metadata_only: bool,
 }
 
 impl BpcellsDatasetReader {
@@ -532,6 +537,7 @@ impl BpcellsDatasetReader {
             index: Arc::new(index),
             values: Arc::new(values),
             dtype,
+            metadata_only: false,
         }
     }
 
@@ -561,6 +567,57 @@ impl BpcellsDatasetReader {
             index: Arc::new(r.index),
             values: Arc::new(r.values),
             dtype,
+            metadata_only: false,
+        })
+    }
+
+    /// Open only shape, names, and dtype — no matrix decoding.
+    ///
+    /// Reads `version`, `storage_order`, `shape`, `row_names`, `col_names`.
+    /// Calling `x_stream()` or `read_chunk()` on this reader returns an error.
+    pub fn open_metadata_only(dir: &Path) -> std::io::Result<Self> {
+        let version = std::fs::read_to_string(dir.join("version"))
+            .map(|s| s.trim().to_owned())?;
+
+        let order_str = std::fs::read_to_string(dir.join("storage_order"))?;
+        let storage_order = match order_str.trim() {
+            "col" => StorageOrder::Col,
+            "row" => StorageOrder::Row,
+            s => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown storage_order: {s}"),
+            )),
+        };
+
+        let shape = read_u32s_file(&dir.join("shape"))?;
+        let (nrow, ncol) = (shape[0] as usize, shape[1] as usize);
+
+        let (n_obs, n_vars, obs_file, var_file) = match storage_order {
+            StorageOrder::Col => (ncol, nrow, "col_names", "row_names"),
+            StorageOrder::Row => (nrow, ncol, "row_names", "col_names"),
+        };
+
+        let obs_names = read_names_file(&dir.join(obs_file)).unwrap_or_default();
+        let var_names = read_names_file(&dir.join(var_file)).unwrap_or_default();
+
+        let dtype = match version.as_str() {
+            "packed-uint-matrix-v2" | "unpacked-uint-matrix-v2" => DataType::U32,
+            "packed-float-matrix-v2"  => DataType::F32,
+            "packed-double-matrix-v2" => DataType::F64,
+            _ => DataType::F32,
+        };
+
+        Ok(Self {
+            n_obs,
+            n_vars,
+            chunk_size: 0,
+            obs_names,
+            var_names,
+            idxptr: Arc::new(Vec::new()),
+            index: Arc::new(Vec::new()),
+            values: Arc::new(ValStore::Uint32(Vec::new())),
+            dtype,
+            metadata_only: true,
         })
     }
 
@@ -569,6 +626,11 @@ impl BpcellsDatasetReader {
     /// This is the low-level helper used by backend adapters that want direct
     /// chunk access without going through `x_stream()`.
     pub fn read_chunk(&self, obs_start: usize, obs_end: usize) -> Result<MatrixChunk> {
+        if self.metadata_only {
+            return Err(crate::error::ScxError::InvalidFormat(
+                "BPCells reader opened in metadata-only mode; call open() to stream matrix data".into(),
+            ));
+        }
         if obs_start > obs_end || obs_end > self.n_obs {
             return Err(crate::error::ScxError::InvalidFormat(format!(
                 "BPCells chunk out of bounds: {obs_start}..{obs_end} for n_obs={}",
@@ -648,6 +710,13 @@ impl DatasetReader for BpcellsDatasetReader {
     }
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+        if self.metadata_only {
+            return Box::pin(stream::once(async {
+                Err(crate::error::ScxError::InvalidFormat(
+                    "BPCells reader opened in metadata-only mode; call open() to stream matrix data".into(),
+                ))
+            }));
+        }
         let n_obs = self.n_obs;
         let chunk_size = self.chunk_size;
         let reader = Self {
@@ -660,6 +729,7 @@ impl DatasetReader for BpcellsDatasetReader {
             index: Arc::clone(&self.index),
             values: Arc::clone(&self.values),
             dtype: self.dtype,
+            metadata_only: self.metadata_only,
         };
 
         Box::pin(stream::unfold(0usize, move |obs_start| {
@@ -673,6 +743,7 @@ impl DatasetReader for BpcellsDatasetReader {
                 index: Arc::clone(&reader.index),
                 values: Arc::clone(&reader.values),
                 dtype: reader.dtype,
+                metadata_only: reader.metadata_only,
             };
             async move {
                 if obs_start >= n_obs { return None; }

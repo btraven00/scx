@@ -8,12 +8,14 @@ use scx_core::{
     detect::Format,
     dtype::DataType,
     ir::ColumnData,
+    bpcells::BpcellsDatasetReader,
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5bpcells::BpcellsH5Writer,
     h5seurat::{H5SeuratWriter, open_h5seurat},
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     stream::{DatasetReader, DatasetWriter},
+    validate::{run_validation, ValidationSchema},
 };
 
 #[derive(Parser)]
@@ -91,6 +93,32 @@ enum Cli {
         layer: String,
     },
 
+    /// Validate a single-cell file against a YAML schema
+    ///
+    /// Checks shape, slot presence, dtypes, and index uniqueness without
+    /// loading any matrix data. Exits 0 on pass, 1 on validation failure,
+    /// 2 on file or schema parse error.
+    ///
+    /// Example schema (schemas/after_normalization.yaml):
+    ///   obs: ">= 1000"
+    ///   vars: ">= 500"
+    ///   layers: [normalized]
+    ///   obsm: [X_pca]
+    ///   x_dtype: f32
+    ///   obs_index_unique: true
+    Validate {
+        /// Input file (.h5ad)
+        input: String,
+
+        /// Path to YAML schema file
+        #[arg(long)]
+        schema: String,
+
+        /// Emit results as JSON instead of the default human-readable report
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Dump a materialised IR snapshot to a directory of NPY files
     ///
     /// Reads the input file and writes raw-binary NPY arrays plus a
@@ -155,6 +183,60 @@ async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli {
+        Cli::Validate { input, schema, json } => {
+            let schema_src = std::fs::read_to_string(&schema)
+                .map_err(|e| anyhow::anyhow!("cannot read schema '{schema}': {e}"))?;
+            let schema_parsed: ValidationSchema = serde_yaml::from_str(&schema_src)
+                .map_err(|e| anyhow::anyhow!("invalid schema '{schema}': {e}"))?;
+
+            let input_path = Path::new(&input);
+            let fmt = detect::sniff_dir(input_path)
+                .or_else(|| detect::sniff(input_path))
+                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
+                    Some("h5seurat") => Some(Format::H5Seurat),
+                    Some("h5ad")     => Some(Format::H5Ad),
+                    _                => Some(Format::ScxH5),
+                });
+
+            let report = match fmt {
+                Some(Format::H5Ad) => {
+                    let mut r = H5AdReader::open(input_path, 1000)
+                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
+                }
+                Some(Format::BPCells) => {
+                    let mut r = BpcellsDatasetReader::open_metadata_only(input_path)
+                        .map_err(|e| anyhow::anyhow!("cannot open BPCells dir '{input}': {e}"))?;
+                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
+                }
+                Some(Format::H5Seurat) => {
+                    let mut r = open_h5seurat(input_path, 1000, None, None)
+                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+                    run_validation(&mut *r, &schema_parsed, &input, &schema).await?
+                }
+                Some(Format::ScxH5) | None => {
+                    let mut r = ScxH5Reader::open(input_path, 1000)
+                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
+                }
+                Some(Format::NpyDir) => {
+                    let mut r = NpyIrReader::open(input_path, 1000)
+                        .map_err(|e| anyhow::anyhow!("cannot open NPY dir '{input}': {e}"))?;
+                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
+                }
+            };
+
+            if json {
+                print_report_json(&report);
+            } else {
+                print_report_human(&report);
+            }
+
+            if !report.passed() {
+                std::process::exit(1);
+            }
+        }
+
         Cli::Inspect { input, assay, layer } => {
             let input_path = Path::new(&input);
             let fmt = detect::sniff_dir(input_path)
@@ -172,6 +254,10 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::NpyDir) => {
                     let mut r = NpyIrReader::open(input_path, chunk)?;
                     inspect(&mut r, &input, "NPY snapshot").await?;
+                }
+                Some(Format::BPCells) => {
+                    let mut r = BpcellsDatasetReader::open(input_path, chunk)?;
+                    inspect(&mut r, &input, "BPCells").await?;
                 }
                 Some(Format::H5Seurat) => {
                     let mut r = open_h5seurat(input_path, chunk, Some(&assay), Some(&layer))?;
@@ -214,6 +300,11 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
+                    convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix, seuratdisk_compat).await?;
+                }
+                Some(Format::BPCells) => {
+                    tracing::info!(path = %input, "detected format: BPCells directory");
+                    let mut reader = BpcellsDatasetReader::open(input_path, chunk_size)?;
                     convert_with_reader(&mut reader, Path::new(&output), out_dtype, &assay, &layer, &x_slot, &project, chunk_size, dgcmatrix, seuratdisk_compat).await?;
                 }
                 Some(Format::H5Seurat) => {
@@ -264,6 +355,9 @@ async fn run() -> anyhow::Result<()> {
             let dataset = match fmt {
                 Some(Format::NpyDir) => {
                     NpyIrReader::open(input_path, chunk_size)?.into_dataset()
+                }
+                Some(Format::BPCells) => {
+                    materialise_dataset(&mut BpcellsDatasetReader::open(input_path, chunk_size)?, chunk_size).await?
                 }
                 Some(Format::H5Seurat) => {
                     let mut r = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
@@ -724,4 +818,52 @@ async fn inspect(reader: &mut dyn DatasetReader, path: &str, format_name: &str) 
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Validation report printers
+// ---------------------------------------------------------------------------
+
+fn print_report_human(report: &scx_core::validate::ValidationReport) {
+    use owo_colors::OwoColorize;
+
+    for c in &report.checks {
+        let status = if c.passed {
+            "PASS".if_supports_color(Stdout, |t| t.green()).to_string()
+        } else {
+            "FAIL".if_supports_color(Stdout, |t| t.red()).to_string()
+        };
+        println!("{status}  {:<20} {}", c.name, c.detail);
+    }
+
+    println!();
+    if report.passed() {
+        println!("All {} checks passed.", report.n_passed());
+    } else {
+        println!(
+            "{} check{} failed.",
+            report.n_failed(),
+            if report.n_failed() == 1 { "" } else { "s" }
+        );
+    }
+}
+
+fn print_report_json(report: &scx_core::validate::ValidationReport) {
+    let checks: Vec<serde_json::Value> = report.checks.iter().map(|c| {
+        serde_json::json!({
+            "name":   c.name,
+            "status": if c.passed { "PASS" } else { "FAIL" },
+            "detail": c.detail,
+        })
+    }).collect();
+
+    let out = serde_json::json!({
+        "file":   report.file,
+        "schema": report.schema,
+        "passed": report.n_passed(),
+        "failed": report.n_failed(),
+        "checks": checks,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }
