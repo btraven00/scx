@@ -24,7 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history so git describe can find tags
+          fetch-depth: 0
+          fetch-tags: true  # required for git describe to find version tags
 
       - name: Compute version
         shell: bash
