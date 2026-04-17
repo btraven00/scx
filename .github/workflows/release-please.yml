@@ -1,0 +1,80 @@
+on:
+  push:
+    branches:
+      - main
+
+name: release-please
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs['crates/scx-cli--tag_name'] }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_PR_CI_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-binaries:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install HDF5 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+
+      - name: Install HDF5 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install hdf5
+
+      - name: Build
+        run: cargo build --release -p scx-cli
+
+      - name: Archive
+        run: |
+          cp target/release/scx scx
+          tar -czf scx-${{ matrix.target }}.tar.gz scx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scx-${{ matrix.target }}
+          path: scx-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  attach-binaries:
+    needs: [release-please, build-binaries]
+    if: ${{ needs.release-please.outputs.releases_created }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
