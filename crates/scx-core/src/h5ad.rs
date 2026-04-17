@@ -1272,6 +1272,10 @@ fn ad_read_sparse_chunk(
 
 #[async_trait]
 impl DatasetReader for H5AdReader {
+    fn x_indptr(&self) -> &[u64] {
+        self.indptr.as_deref().unwrap_or(&[])
+    }
+
     fn shape(&self) -> (usize, usize) {
         (self.n_obs, self.n_vars)
     }
