@@ -93,14 +93,14 @@ jobs:
         shell: bash
         run: |
           rattler-build build --recipe conda.recipe/recipe.yaml \
-            --output-dir /tmp/rattler-output \
+            --output-dir rattler-output \
             --target-platform ${{ matrix.platform.target }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.platform.target }}
-          path: /tmp/rattler-output/
+          path: rattler-output/
           retention-days: 7
           if-no-files-found: error
 
@@ -133,7 +133,13 @@ jobs:
         run: |
           for pkg in $(find artifacts/ -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
             echo "Uploading ${pkg}"
-            rattler-build upload prefix -c edge "${pkg}"
+            if ! output=$(rattler-build upload prefix -c edge "${pkg}" 2>&1); then
+              if echo "$output" | grep -q "409"; then
+                echo "Already exists, skipping: ${pkg}"
+              else
+                echo "$output" && exit 1
+              fi
+            fi
           done
 
       - name: Upload to prefix.dev (stable, tags only)
@@ -141,5 +147,11 @@ jobs:
         run: |
           for pkg in $(find artifacts/ -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
             echo "Uploading ${pkg}"
-            rattler-build upload prefix -c almost-conductor "${pkg}"
+            if ! output=$(rattler-build upload prefix -c almost-conductor "${pkg}" 2>&1); then
+              if echo "$output" | grep -q "409"; then
+                echo "Already exists, skipping: ${pkg}"
+              else
+                echo "$output" && exit 1
+              fi
+            fi
           done
