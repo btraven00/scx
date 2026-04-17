@@ -14,6 +14,7 @@ use scx_core::{
     h5seurat::{open_h5seurat, H5SeuratWriter},
     ir::ColumnData,
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
+    provenance::{self, OutputInfo, ProvenanceRecord, SourceInfo},
     stream::{DatasetReader, DatasetWriter},
     validate::{run_validation, ValidationSchema},
 };
@@ -311,13 +312,22 @@ async fn run() -> anyhow::Result<()> {
                     _ => Some(Format::ScxH5),
                 });
 
-            match fmt {
+            let source_sha256 = if input_path.is_file() {
+                Some(provenance::sha256_file(input_path)
+                    .map_err(|e| anyhow::anyhow!("hashing source '{input}': {e}"))?)
+            } else {
+                None
+            };
+
+            let output_path = Path::new(&output);
+
+            let (n_obs, n_vars) = match fmt {
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
                     convert_with_reader(
                         &mut reader,
-                        Path::new(&output),
+                        output_path,
                         out_dtype,
                         &assay,
                         &layer,
@@ -326,15 +336,17 @@ async fn run() -> anyhow::Result<()> {
                         chunk_size,
                         dgcmatrix,
                         seuratdisk_compat,
+                        &input,
+                        source_sha256.clone(),
                     )
-                    .await?;
+                    .await?
                 }
                 Some(Format::BPCells) => {
                     tracing::info!(path = %input, "detected format: BPCells directory");
                     let mut reader = BpcellsDatasetReader::open(input_path, chunk_size)?;
                     convert_with_reader(
                         &mut reader,
-                        Path::new(&output),
+                        output_path,
                         out_dtype,
                         &assay,
                         &layer,
@@ -343,8 +355,10 @@ async fn run() -> anyhow::Result<()> {
                         chunk_size,
                         dgcmatrix,
                         seuratdisk_compat,
+                        &input,
+                        source_sha256.clone(),
                     )
-                    .await?;
+                    .await?
                 }
                 Some(Format::H5Seurat) => {
                     tracing::info!(path = %input, "detected format: H5Seurat");
@@ -352,7 +366,7 @@ async fn run() -> anyhow::Result<()> {
                         open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
                     convert_with_reader(
                         &mut *reader,
-                        Path::new(&output),
+                        output_path,
                         out_dtype,
                         &assay,
                         &layer,
@@ -361,15 +375,17 @@ async fn run() -> anyhow::Result<()> {
                         chunk_size,
                         dgcmatrix,
                         seuratdisk_compat,
+                        &input,
+                        source_sha256.clone(),
                     )
-                    .await?;
+                    .await?
                 }
                 Some(Format::H5Ad) => {
                     tracing::info!(path = %input, "detected format: H5AD");
                     let mut reader = H5AdReader::open(input_path, chunk_size)?;
                     convert_with_reader(
                         &mut reader,
-                        Path::new(&output),
+                        output_path,
                         out_dtype,
                         &assay,
                         &layer,
@@ -378,15 +394,17 @@ async fn run() -> anyhow::Result<()> {
                         chunk_size,
                         dgcmatrix,
                         seuratdisk_compat,
+                        &input,
+                        source_sha256.clone(),
                     )
-                    .await?;
+                    .await?
                 }
                 Some(Format::ScxH5) | None => {
                     tracing::info!(path = %input, "detected format: SCX H5 (internal)");
                     let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
                     convert_with_reader(
                         &mut reader,
-                        Path::new(&output),
+                        output_path,
                         out_dtype,
                         &assay,
                         &layer,
@@ -395,10 +413,24 @@ async fn run() -> anyhow::Result<()> {
                         chunk_size,
                         dgcmatrix,
                         seuratdisk_compat,
+                        &input,
+                        source_sha256.clone(),
                     )
-                    .await?;
+                    .await?
                 }
-            }
+            };
+
+            let output_sha256 = provenance::sha256_file(output_path)
+                .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?;
+
+            let record = ProvenanceRecord {
+                scx_version: env!("CARGO_PKG_VERSION").to_string(),
+                converted_at: provenance::utc_now_rfc3339(),
+                source: SourceInfo { path: input, sha256: source_sha256 },
+                output: OutputInfo { path: output.clone(), sha256: output_sha256, n_obs, n_vars },
+            };
+            provenance::write_sidecar(&record, output_path)
+                .map_err(|e| anyhow::anyhow!("writing provenance sidecar: {e}"))?;
         }
 
         Cli::Snapshot {
@@ -614,7 +646,9 @@ async fn convert_with_reader(
     chunk_size: usize,
     use_dgcmatrix: bool,
     seuratdisk_compat: bool,
-) -> anyhow::Result<()> {
+    source_path: &str,
+    source_sha256: Option<String>,
+) -> anyhow::Result<(usize, usize)> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
 
@@ -623,8 +657,15 @@ async fn convert_with_reader(
     let obs = reader.obs().await?;
     let var = reader.var().await?;
     let obsm = reader.obsm().await?;
-    let uns = reader.uns().await?;
+    let mut uns = reader.uns().await?;
     let varm = reader.varm().await?;
+
+    let prov = scx_core::provenance::det_record(source_path, source_sha256.as_deref(), n_obs, n_vars);
+    match uns.raw.as_object_mut() {
+        Some(obj) => { obj.insert("scx_provenance".to_string(), prov); }
+        None => { uns.raw = serde_json::json!({ "scx_provenance": prov }); }
+    }
+
     let layer_metas = reader.layer_metas().await?;
     let obsp_metas = reader.obsp_metas().await?;
 
@@ -763,7 +804,7 @@ async fn convert_with_reader(
         "conversion complete"
     );
 
-    Ok(())
+    Ok((n_obs, n_vars))
 }
 
 // ---------------------------------------------------------------------------
@@ -839,11 +880,12 @@ async fn inspect(
     println!("{} {}", bold!("File   :"), green!(path));
     println!("{} {}", bold!("Format :"), cyan!(format_name));
     println!(
-        "{} {} × {}  {}",
+        "{} {} {} × {} {}",
         bold!("Shape  :"),
         yellow!(n_obs),
+        dim!("obs"),
         yellow!(n_vars),
-        dim!("obs × vars"),
+        dim!("vars"),
     );
     let dtype_str = reader.dtype().to_string();
     println!("{} {}", bold!("X dtype:"), cyan!(&dtype_str));
