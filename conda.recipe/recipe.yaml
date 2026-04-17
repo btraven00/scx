@@ -1,7 +1,7 @@
 context:
   name: scx
   # SCX_VERSION is set by CI from `git describe`; fallback for local builds.
-  version: ${{ env.SCX_VERSION | default("0.0.0.dev0") }}
+  version: ${{ env.get("SCX_VERSION", default="0.0.0.dev0") }}
 
 package:
   name: ${{ name }}
