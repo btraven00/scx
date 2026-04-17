@@ -8,15 +8,15 @@ Swiss-army knife for single-cell format conversion, designed for reproducible be
 cargo install scx-cli
 ```
 
-Requires Rust ≥ 1.70 and a system HDF5 installation (`libhdf5-dev` on
-Debian/Ubuntu, `hdf5` via Homebrew on macOS).
-
 Build from source:
 
 ```bash
 cargo build --release -p scx-cli
 # binary at target/release/scx
 ```
+
+Requires Rust ≥ 1.70 and a system HDF5 library (`libhdf5-dev` on
+Debian/Ubuntu, `hdf5` via Homebrew on macOS).
 
 ## Usage
 
