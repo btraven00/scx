@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project]
 name = "picklerick"
@@ -20,25 +20,14 @@ dependencies = [
 dev = [
   "pytest>=8",
 ]
-native = [
-  "maturin>=1.7,<2",
-]
 
 [project.urls]
 Homepage = "https://github.com/btraven00/scx"
 Repository = "https://github.com/btraven00/scx"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/picklerick"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-  "src/picklerick",
-  "tests",
-  "README.md",
-  "rust/Cargo.toml",
-  "rust/src",
-]
+[tool.maturin]
+python-source = "src"
+module-name = "picklerick.picklerick_py_native"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
