@@ -9,8 +9,7 @@ package:
 
 source:
   path: ../
-  exclude:
-    - "**/target/**"
+  use_gitignore: true
 
 build:
   number: 0
