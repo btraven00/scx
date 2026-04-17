@@ -183,10 +183,32 @@ async fn collect_inspect_info(
         obsp_stats.append(entry)?;
     }
 
+    // X nnz stats from indptr (empty slice for dense/BPCells)
+    let x_indptr = reader.x_indptr();
+    let x_nnz = x_indptr.last().copied().unwrap_or(0) as i64;
+    let x_nnz_stats: Option<pyo3::Bound<'_, pyo3::types::PyDict>> = if x_indptr.len() > 1 {
+        let mut per_row: Vec<u64> = x_indptr.windows(2).map(|w| w[1] - w[0]).collect();
+        per_row.sort_unstable();
+        let n = per_row.len();
+        let q = |p: f64| per_row[(p * (n - 1) as f64).round() as usize] as i64;
+        let s = pyo3::types::PyDict::new_bound(py);
+        s.set_item("nnz",     x_nnz)?;
+        s.set_item("nnz_q1",  q(0.25))?;
+        s.set_item("nnz_med", q(0.5))?;
+        s.set_item("nnz_q3",  q(0.75))?;
+        s.set_item("nnz_max", *per_row.last().unwrap() as i64)?;
+        Some(s)
+    } else {
+        None
+    };
+
     let d = pyo3::types::PyDict::new_bound(py);
     d.set_item("format",     format_name)?;
     d.set_item("n_obs",      n_obs as i64)?;
     d.set_item("n_vars",     n_vars as i64)?;
+    if let Some(s) = x_nnz_stats {
+        d.set_item("x_stats", s)?;
+    }
     d.set_item("obs_cols",   obs_cols)?;
     d.set_item("obs_dtypes", obs_dtypes)?;
     d.set_item("var_cols",   var_cols)?;
