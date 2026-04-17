@@ -123,15 +123,12 @@ async fn collect_inspect_info(
     let obs_cols:   Vec<&str> = obs.columns.iter().map(|c| c.name.as_str()).collect();
     let var_cols:   Vec<&str> = var.columns.iter().map(|c| c.name.as_str()).collect();
     let obsm_keys:  Vec<&str> = obsm.map.keys().map(|s| s.as_str()).collect();
-    let layer_keys: Vec<&str> = layer_metas.iter().map(|m| m.name.as_str()).collect();
-    let obsp_keys:  Vec<&str> = obsp_metas.iter().map(|m| m.name.as_str()).collect();
     let varm_keys:  Vec<&str> = varm.map.keys().map(|s| s.as_str()).collect();
     let uns_keys:   Vec<String> = uns.raw
         .as_object()
         .map(|o| o.keys().cloned().collect())
         .unwrap_or_default();
 
-    // obs col dtypes
     let obs_dtypes: Vec<&str> = obs.columns.iter().map(|c| match &c.data {
         ColumnData::Float(_)        => "float64",
         ColumnData::Int(_)          => "int32",
@@ -147,6 +144,45 @@ async fn collect_inspect_info(
         ColumnData::Categorical {..}=> "categorical",
     }).collect();
 
+    // per-layer and per-obsp nnz stats (free from indptr, no matrix streaming)
+    let layer_stats = pyo3::types::PyList::empty_bound(py);
+    for m in &layer_metas {
+        let nnz = m.indptr.last().copied().unwrap_or(0) as usize;
+        let mut per_row: Vec<u64> = m.indptr.windows(2).map(|w| w[1] - w[0]).collect();
+        per_row.sort_unstable();
+        let n = per_row.len();
+        let q = |p: f64| if n == 0 { 0u64 } else { per_row[(p * (n - 1) as f64).round() as usize] };
+        let entry = pyo3::types::PyDict::new_bound(py);
+        entry.set_item("name",    m.name.as_str())?;
+        entry.set_item("n_obs",   m.shape.0 as i64)?;
+        entry.set_item("n_vars",  m.shape.1 as i64)?;
+        entry.set_item("nnz",     nnz as i64)?;
+        entry.set_item("nnz_q1",  q(0.25) as i64)?;
+        entry.set_item("nnz_med", q(0.5)  as i64)?;
+        entry.set_item("nnz_q3",  q(0.75) as i64)?;
+        entry.set_item("nnz_max", per_row.last().copied().unwrap_or(0) as i64)?;
+        layer_stats.append(entry)?;
+    }
+
+    let obsp_stats = pyo3::types::PyList::empty_bound(py);
+    for m in &obsp_metas {
+        let nnz = m.indptr.last().copied().unwrap_or(0) as usize;
+        let mut per_row: Vec<u64> = m.indptr.windows(2).map(|w| w[1] - w[0]).collect();
+        per_row.sort_unstable();
+        let n = per_row.len();
+        let q = |p: f64| if n == 0 { 0u64 } else { per_row[(p * (n - 1) as f64).round() as usize] };
+        let entry = pyo3::types::PyDict::new_bound(py);
+        entry.set_item("name",    m.name.as_str())?;
+        entry.set_item("n_obs",   m.shape.0 as i64)?;
+        entry.set_item("n_vars",  m.shape.1 as i64)?;
+        entry.set_item("nnz",     nnz as i64)?;
+        entry.set_item("nnz_q1",  q(0.25) as i64)?;
+        entry.set_item("nnz_med", q(0.5)  as i64)?;
+        entry.set_item("nnz_q3",  q(0.75) as i64)?;
+        entry.set_item("nnz_max", per_row.last().copied().unwrap_or(0) as i64)?;
+        obsp_stats.append(entry)?;
+    }
+
     let d = pyo3::types::PyDict::new_bound(py);
     d.set_item("format",     format_name)?;
     d.set_item("n_obs",      n_obs as i64)?;
@@ -156,9 +192,9 @@ async fn collect_inspect_info(
     d.set_item("var_cols",   var_cols)?;
     d.set_item("var_dtypes", var_dtypes)?;
     d.set_item("obsm_keys",  obsm_keys)?;
-    d.set_item("layers",     layer_keys)?;
+    d.set_item("layers",     layer_stats)?;
     d.set_item("uns_keys",   uns_keys)?;
-    d.set_item("obsp_keys",  obsp_keys)?;
+    d.set_item("obsp",       obsp_stats)?;
     d.set_item("varm_keys",  varm_keys)?;
     Ok(d.unbind().into())
 }

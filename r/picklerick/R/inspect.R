@@ -16,9 +16,11 @@
 #'   \item{obs_cols}{Character vector of cell metadata column names.}
 #'   \item{var_cols}{Character vector of feature metadata column names.}
 #'   \item{obsm_keys}{Character vector of low-dimensional embedding keys.}
-#'   \item{layers}{Character vector of additional count matrix layer names.}
+#'   \item{layers}{Named list with parallel vectors `name`, `nnz`, `nnz_q1`,
+#'     `nnz_med`, `nnz_q3`, `nnz_max` — one entry per layer.}
 #'   \item{uns_keys}{Character vector of unstructured metadata keys.}
-#'   \item{obsp_keys}{Character vector of cell-cell connectivity keys.}
+#'   \item{obsp}{Named list with parallel vectors `name`, `nnz`, `nnz_q1`,
+#'     `nnz_med`, `nnz_q3`, `nnz_max` — one entry per obsp matrix.}
 #'   \item{varm_keys}{Character vector of feature embedding keys.}
 #' }
 #' @export
