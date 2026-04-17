@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "picklerick"
-version = "0.0.10"
+version = "0.1.0"
 description = "Thin Python wrapper over the SCX single-cell interoperability engine"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,8 +25,8 @@ native = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/placeholder/scx"
-Repository = "https://github.com/placeholder/scx"
+Homepage = "https://github.com/btraven00/scx"
+Repository = "https://github.com/btraven00/scx"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/picklerick"]

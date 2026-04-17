@@ -1,6 +1,6 @@
 Package: picklerick
 Title: Fast Single-Cell Format Conversion via SCX
-Version: 0.0.3.9000
+Version: 0.1.0
 Authors@R:
     person("SCX Authors", role = c("aut", "cre"),
            email = "placeholder@example.com")
