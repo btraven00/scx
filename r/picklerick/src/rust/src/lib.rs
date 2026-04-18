@@ -190,7 +190,8 @@ fn scx_inspect(input: &str, chunk_size: i32) -> Result<Robj> {
             Some(Format::H5Seurat) => {
                 let mut r = H5SeuratReader::open(input_path, chunk, None, None)
                     .map_err(anyhow::Error::from)?;
-                collect_info(&mut r, "H5Seurat").await
+                let fmt_name = if r.x_indptr().is_empty() { "H5Seurat (BPCells)" } else { "H5Seurat" };
+                collect_info(&mut r, fmt_name).await
             }
             Some(Format::H5Ad) | None => {
                 let mut r = H5AdReader::open(input_path, chunk)
