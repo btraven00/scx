@@ -272,7 +272,12 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Some(Format::H5Seurat) => {
                     let mut r = open_h5seurat(input_path, chunk, Some(&assay), Some(&layer))?;
-                    inspect(&mut *r, &input, "H5Seurat").await?;
+                    let fmt_name = if r.x_indptr().is_empty() {
+                        "H5Seurat (BPCells)"
+                    } else {
+                        "H5Seurat"
+                    };
+                    inspect(&mut *r, &input, fmt_name).await?;
                 }
                 Some(Format::H5Ad) => {
                     let mut r = H5AdReader::open(input_path, chunk)?;

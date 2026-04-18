@@ -364,7 +364,12 @@ fn scx_inspect_native(py: Python<'_>, input: &str, _chunk_size: usize) -> PyResu
 
     let result = block_on(async {
         let mut reader = open_reader_metadata_only(input_path)?;
-        collect_inspect_info(&mut *reader, format_name, py).await
+        let fmt_name = if matches!(fmt, Some(Format::H5Seurat)) && reader.x_indptr().is_empty() {
+            "H5Seurat (BPCells)"
+        } else {
+            format_name
+        };
+        collect_inspect_info(&mut *reader, fmt_name, py).await
     });
 
     result.map_err(py_err)
