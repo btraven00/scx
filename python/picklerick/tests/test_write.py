@@ -4,11 +4,9 @@ from pathlib import Path
 
 import anndata as ad
 import numpy as np
-import pytest
 from scipy import sparse
 
 import picklerick as pk
-from picklerick import ScxNotFoundError
 
 
 def _toy_adata() -> ad.AnnData:
@@ -67,7 +65,7 @@ def test_write_h5ad_roundtrip_shape(tmp_path: Path) -> None:
     assert "X_pca" in reread.obsm
 
 
-def test_write_h5seurat_creates_file(tmp_path: Path, require_scx: str) -> None:
+def test_write_h5seurat_creates_file(tmp_path: Path, require_native: None) -> None:
     adata = _toy_adata()
     out = tmp_path / "toy.h5seurat"
 
@@ -80,7 +78,7 @@ def test_write_h5seurat_creates_file(tmp_path: Path, require_scx: str) -> None:
 
 def test_write_h5seurat_roundtrip_via_read_h5seurat(
     tmp_path: Path,
-    require_scx: str,
+    require_native: None,
 ) -> None:
     adata = _toy_adata()
     out = tmp_path / "toy_roundtrip.h5seurat"
@@ -95,7 +93,7 @@ def test_write_h5seurat_roundtrip_via_read_h5seurat(
 
 def test_write_h5seurat_respects_assay_argument(
     tmp_path: Path,
-    require_scx: str,
+    require_native: None,
 ) -> None:
     adata = _toy_adata()
     out = tmp_path / "toy_assay.h5seurat"
@@ -106,19 +104,3 @@ def test_write_h5seurat_respects_assay_argument(
     assert out.stat().st_size > 0
 
 
-@pytest.mark.skipif(
-    pk.native_available(),
-    reason="native backend handles write without CLI; CLI-absent path only reachable without native",
-)
-def test_write_h5seurat_requires_scx_binary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    adata = _toy_adata()
-    out = tmp_path / "missing_scx.h5seurat"
-
-    monkeypatch.delenv("SCX_BIN", raising=False)
-    monkeypatch.setenv("PATH", "")
-
-    with pytest.raises(ScxNotFoundError):
-        pk.write_h5seurat(adata, out)

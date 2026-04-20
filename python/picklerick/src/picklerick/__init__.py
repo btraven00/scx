@@ -12,14 +12,13 @@ from ._api import (
     write_h5ad,
     write_h5seurat,
 )
-from ._exceptions import PickleRickError, ScxCommandError, ScxNotFoundError
+from ._exceptions import PickleRickError, ScxCommandError
 from ._native import native_available
 
 __all__ = [
     "MatrixChunk",
     "PickleRickError",
     "ScxCommandError",
-    "ScxNotFoundError",
     "convert",
     "inspect",
     "native_available",

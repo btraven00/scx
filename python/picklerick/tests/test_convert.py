@@ -10,7 +10,7 @@ import picklerick as pk
 
 def test_convert_h5ad_preserves_shape_and_obs_columns(
     require_fixtures: None,
-    require_scx: str,
+    require_native: None,
     h5ad_ref_path: Path,
     tmp_path: Path,
     expected_n_obs: int,
@@ -32,7 +32,7 @@ def test_convert_h5ad_preserves_shape_and_obs_columns(
 
 def test_convert_h5ad_preserves_obsm_embeddings(
     require_fixtures: None,
-    require_scx: str,
+    require_native: None,
     h5ad_ref_path: Path,
     tmp_path: Path,
     expected_n_obs: int,
@@ -50,7 +50,7 @@ def test_convert_h5ad_preserves_obsm_embeddings(
 
 def test_convert_h5ad_dtype_f64_produces_larger_file(
     require_fixtures: None,
-    require_scx: str,
+    require_native: None,
     h5ad_ref_path: Path,
     tmp_path: Path,
 ) -> None:
@@ -67,7 +67,7 @@ def test_convert_h5ad_dtype_f64_produces_larger_file(
 
 def test_convert_h5seurat_preserves_shape(
     require_fixtures: None,
-    require_scx: str,
+    require_native: None,
     h5seurat_path: Path,
     tmp_path: Path,
     expected_n_obs: int,
@@ -83,7 +83,7 @@ def test_convert_h5seurat_preserves_shape(
 
 def test_different_chunk_sizes_produce_equivalent_outputs(
     require_fixtures: None,
-    require_scx: str,
+    require_native: None,
     h5ad_ref_path: Path,
     tmp_path: Path,
 ) -> None:
@@ -102,12 +102,9 @@ def test_different_chunk_sizes_produce_equivalent_outputs(
 
 
 def test_convert_invalid_dtype_raises_error(
-    require_fixtures: None,
-    require_scx: str,
-    h5ad_ref_path: Path,
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "invalid_dtype.h5ad"
 
     with pytest.raises(pk.ScxCommandError):
-        pk.convert(h5ad_ref_path, output, dtype="not_a_dtype")
+        pk.convert("dummy.h5ad", output, dtype="not_a_dtype")

@@ -8,7 +8,7 @@ import picklerick as pk
 def test_read_h5seurat_returns_anndata_with_expected_shape(
     h5seurat_path,
     require_fixtures,
-    require_scx,
+    require_native,
     expected_n_obs,
     expected_n_vars,
 ) -> None:
@@ -21,7 +21,7 @@ def test_read_h5seurat_returns_anndata_with_expected_shape(
 def test_read_h5seurat_x_has_expected_nnz(
     h5seurat_path,
     require_fixtures,
-    require_scx,
+    require_native,
     expected_nnz,
 ) -> None:
     adata = pk.read_h5seurat(h5seurat_path)
@@ -33,7 +33,7 @@ def test_read_h5seurat_x_has_expected_nnz(
 def test_read_h5seurat_preserves_obs_columns(
     h5seurat_path,
     require_fixtures,
-    require_scx,
+    require_native,
 ) -> None:
     adata = pk.read_h5seurat(h5seurat_path)
 
@@ -43,7 +43,7 @@ def test_read_h5seurat_preserves_obs_columns(
 def test_read_h5seurat_preserves_obsm_keys(
     h5seurat_path,
     require_fixtures,
-    require_scx,
+    require_native,
 ) -> None:
     adata = pk.read_h5seurat(h5seurat_path)
 
@@ -67,7 +67,7 @@ def test_read_dataset_dispatches_on_extension(
     h5seurat_path,
     h5ad_ref_path,
     require_fixtures,
-    require_scx,
+    require_native,
     expected_n_obs,
     expected_n_vars,
 ) -> None:
@@ -81,7 +81,7 @@ def test_read_dataset_dispatches_on_extension(
 def test_read_alias_matches_read_dataset(
     h5seurat_path,
     require_fixtures,
-    require_scx,
+    require_native,
 ) -> None:
     adata_alias = pk.read(h5seurat_path)
     adata_explicit = pk.read_dataset(h5seurat_path)
@@ -95,7 +95,7 @@ def test_read_h5seurat_matches_reference_h5ad(
     h5seurat_path,
     h5ad_ref_path,
     require_fixtures,
-    require_scx,
+    require_native,
 ) -> None:
     scx_adata = pk.read_h5seurat(h5seurat_path)
     ref_adata = pk.read_h5ad(h5ad_ref_path)

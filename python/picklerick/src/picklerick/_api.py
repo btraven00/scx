@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Generator
 
 import numpy as np
 
-from ._cli import convert_via_scx
 from ._io import read_h5ad_file, write_h5ad_file
 from ._native import (
     convert_via_native,
     inspect_via_native,
+    native_available,
     open_stream_via_native,
     write_h5seurat_via_native,
 )
@@ -127,31 +127,24 @@ def write_h5seurat(
 ):
     """
     Write an AnnData object to H5Seurat.
-
-    This first writes a temporary H5AD and then converts it through the
-    optional native backend when available, otherwise through the SCX CLI.
     """
+    if not native_available():
+        raise RuntimeError(
+            "write_h5seurat() requires the native backend. "
+            "Install with: pip install picklerick[native]"
+        )
+
     output_path = ensure_parent_directory(path)
 
     with TemporaryDirectory(prefix="picklerick-") as tmpdir:
         tmp_h5ad = Path(tmpdir) / "write_h5seurat_tmp.h5ad"
         write_h5ad_file(adata, tmp_h5ad, compression="gzip")
-
-        used_native = write_h5seurat_via_native(
+        write_h5seurat_via_native(
             input_h5ad=tmp_h5ad,
             output_h5seurat=output_path,
             chunk_size=chunk_size,
             assay=assay,
         )
-        if not used_native:
-            convert_via_scx(
-                input_path=tmp_h5ad,
-                output_path=output_path,
-                chunk_size=chunk_size,
-                dtype="f32",
-                assay=assay,
-                layer="counts",
-            )
 
     return output_path
 
@@ -189,13 +182,9 @@ def convert(
         layer=layer,
     )
     if not used_native:
-        convert_via_scx(
-            input_path=input_path,
-            output_path=output_path,
-            chunk_size=chunk_size,
-            dtype=dtype,
-            assay=assay,
-            layer=layer,
+        raise RuntimeError(
+            "convert() requires the native backend. "
+            "Install with: pip install picklerick[native]"
         )
 
     return output_path
