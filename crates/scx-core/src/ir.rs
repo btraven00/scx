@@ -85,6 +85,16 @@ impl ColumnData {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn dtype_str(&self) -> &'static str {
+        match self {
+            ColumnData::Float(_)         => "float64",
+            ColumnData::Int(_)           => "int32",
+            ColumnData::Bool(_)          => "bool",
+            ColumnData::String(_)        => "string",
+            ColumnData::Categorical {..} => "categorical",
+        }
+    }
 }
 
 /// Named embedding matrices (e.g., PCA, UMAP).

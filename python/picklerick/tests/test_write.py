@@ -106,6 +106,10 @@ def test_write_h5seurat_respects_assay_argument(
     assert out.stat().st_size > 0
 
 
+@pytest.mark.skipif(
+    pk.native_available(),
+    reason="native backend handles write without CLI; CLI-absent path only reachable without native",
+)
 def test_write_h5seurat_requires_scx_binary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
