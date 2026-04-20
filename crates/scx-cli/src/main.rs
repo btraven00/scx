@@ -849,13 +849,7 @@ async fn convert_with_reader(
 // ---------------------------------------------------------------------------
 
 fn col_type_str(data: &ColumnData) -> &'static str {
-    match data {
-        ColumnData::Float(_) => "float64",
-        ColumnData::Int(_) => "int32",
-        ColumnData::Bool(_) => "bool",
-        ColumnData::String(_) => "string",
-        ColumnData::Categorical { .. } => "categorical",
-    }
+    data.dtype_str()
 }
 
 fn fmt_stat(v: f64) -> String {
