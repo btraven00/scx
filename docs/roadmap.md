@@ -147,7 +147,7 @@ session as picklerick native mode — `hdf5r` links against a different
 
 ---
 
-## 0.0.7 — NPY-backed IR snapshots
+## 0.0.7 (done) — NPY-backed IR snapshots
 
 **Goal: near-zero-overhead read/write of materialised IRs for benchmarking
 and debugging.**
@@ -230,6 +230,12 @@ scx snapshot pbmc.h5seurat ir_dir/ --exclude layers,obsp
 - **Debugging**: dump the IR to disk, inspect arrays with `numpy.load()`
 - **Test fixtures**: generate synthetic IRs from Rust, verify readers in
   Python/R without HDF5
+
+### What was delivered
+
+- `NpyIrWriter` / `NpyIrReader` in `crates/scx-core/src/npy.rs`
+- `scx snapshot` CLI subcommand with `--only` / `--exclude` filter flags
+- `Format::NpyDir` in `detect::sniff()` — snapshot dirs read as conversion source
 
 ---
 
@@ -627,7 +633,7 @@ Remaining future work is performance-oriented (`0.1.0` two-pass streaming), not 
 
 ---
 
-## 0.0.10 — Python bindings (`picklerick-py`, pyo3)
+## 0.0.10 (done) — Python bindings (`picklerick-py`, pyo3)
 
 **Goal: AnnData drop-in. Return a real `anndata.AnnData` object so it slots into
 existing scanpy workflows with no API changes.**
@@ -648,44 +654,19 @@ performance paths. Internally, the implementation can follow the same staged
 path as R: start with a thin CLI-backed wrapper, then optionally swap the
 implementation to pyo3/native calls behind the same public API.
 
-Publish to PyPI.
+### What was delivered
+
+- `python/picklerick/` — maturin-based package with pyo3 native backend
+- Public API: `read`, `read_h5ad`, `read_h5seurat`, `read_dataset`, `write_h5ad`,
+  `write_h5seurat`, `convert`, `inspect`
+- CLI fallback when native backend unavailable
+- `inspect()` returns a plain `dict` (Polars optional output deferred)
+- 36+ tests across convert/read/write/native paths
+- PyPI publish: pending
 
 ---
 
-## 0.1.0 — Truly streaming H5Seurat write
-
-The 0.0.4 H5Seurat writer buffers O(nnz) in memory. For genuine atlas-scale
-(>1B nnz), implement a two-pass streaming approach:
-
-1. **Pass 1 (streaming)**: write a temporary H5AD (CSR, memory-bounded). Also
-   accumulate a per-gene nnz count to compute CSC `indptr`.
-2. **Pass 2 (streaming)**: read the temp H5AD column-by-column and write CSC directly.
-
-This keeps peak RSS at O(chunk_size) throughout. Only necessary for datasets
-where nnz > ~500M; the 0.0.4 writer handles everything smaller.
-
----
-
-## 0.1.1 — R-universe distribution for picklerick
-
-**Goal:** make `picklerick` installable via `install.packages()` without conda.
-
-- Set up `btraven.r-universe.dev` (GitHub repo `btraven/universe` with `packages.json`)
-- Add `src/install.libs.R` to picklerick — installs `libhdf5-dev` on R-universe's
-  Ubuntu build runners before compilation
-- Verify binary packages build for Linux and macOS on R-universe infra
-- Document install one-liner in README:
-  ```r
-  install.packages("picklerick", repos = c("https://btraven.r-universe.dev", "https://cloud.r-project.org"))
-  ```
-- Note: static HDF5 is currently blocked (see `docs/roadmap.md` static-linking
-  notes and project memory). Binary packages depend on dynamic libhdf5 at build
-  time; end users do not need it installed separately (R-universe bundles the `.so`
-  in the binary package).
-
----
-
-## 0.1.2 — Internal NPY snapshot path for benchmarking
+## 0.1.2 (done) — Internal NPY snapshot path for benchmarking
 
 **Goal:** keep an internal, low-overhead checkpoint format that helps isolate
 benchmark components and reduce measurement noise.
@@ -713,11 +694,11 @@ debugging.
 - Keep the main product story centered on H5Seurat ↔ H5AD interop.
 
 Future work here should be justified by benchmarking value, not by platform
-ambition.
+ambition. Implemented in 0.0.7; stance codified here.
 
 ---
 
-## 0.1.3 — Inspect stats + Python/R parity
+## 0.1.3 (done) — Inspect stats + Python/R parity
 
 **Goal: `inspect` becomes a useful diagnostic tool across all three surfaces.**
 
@@ -757,6 +738,16 @@ When `polars` is importable, `inspect(path, as_polars=True)` returns obs/var
 columns as a `polars.DataFrame` (copy; our IR is not Arrow-backed). Guarded
 by `try: import polars` so it never becomes a hard dependency. Not exposed in
 CLI or R.
+
+**Status: deferred.** The plain `dict` return is sufficient; Polars output can
+be added when a concrete use case arises.
+
+### What was delivered
+
+- CLI: min/Q1/med/Q3/max stats for numeric columns; nnz/cell quartiles for X,
+  layers, obsp; binary 0/1 columns show counts; BPCells-backed files flagged
+- Python: `inspect()` → plain `dict` via native pyo3 binding
+- R: `inspect()` → named list (added in 0.0.6 consolidation)
 
 ---
 
@@ -798,6 +789,51 @@ matrix access. Python lacks an equivalent, so `open_stream` fills the gap.
 
 ---
 
+## 0.1.5 — Distribution: PyPI + R-universe
+
+**Goal:** ship what's built to the community without requiring conda.
+
+### PyPI (picklerick-py)
+
+- Publish `picklerick` to PyPI via the existing maturin CI job
+- Add `pip install picklerick` install path to README
+- Verify the CLI-fallback path works when the native extension isn't built
+  (i.e., `pip install picklerick` without extras works for pure-CLI use)
+
+### R-universe (picklerick R package)
+
+- Set up `btraven.r-universe.dev` (GitHub repo `btraven/universe` with
+  `packages.json`)
+- Add `src/install.libs.R` to picklerick — installs `libhdf5-dev` on
+  R-universe's Ubuntu build runners before compilation
+- Verify binary packages build for Linux and macOS on R-universe infra
+- Document install one-liner in README:
+  ```r
+  install.packages("picklerick", repos = c("https://btraven.r-universe.dev", "https://cloud.r-project.org"))
+  ```
+- Note: static HDF5 is currently blocked (see 0.0.6 notes). Binary packages
+  depend on dynamic libhdf5 at build time; R-universe bundles the `.so` so
+  end users don't need it installed separately.
+
+---
+
+## 0.1.6 — Truly streaming H5Seurat write
+
+The 0.0.9 BPCells writer and the 0.0.4 dgCMatrix writer both buffer O(nnz)
+entries in RAM. For genuine atlas-scale (>1B nnz), implement a two-pass
+streaming approach:
+
+1. **Pass 1 (streaming)**: write a temporary H5AD (CSR, memory-bounded). Also
+   accumulate a per-gene nnz count to compute CSC `indptr`.
+2. **Pass 2 (streaming)**: read the temp H5AD column-by-column and write CSC
+   directly into the BPCells or dgCMatrix layout.
+
+This keeps peak RSS at O(chunk_size) throughout. Only necessary for datasets
+where nnz > ~500M; the current buffered writers handle everything up to
+~HLCA-scale on a typical compute node (16–32 GB RAM).
+
+---
+
 ## 0.2.0 — Merge / fusion
 
 Combine multiple per-sample `.h5ad` files into a single atlas-scale file with
@@ -809,6 +845,10 @@ Key points:
 - SHA-256 provenance tracking per source file
 - obs metadata merge with configurable conflict resolution
 - CLI: `scx merge sample1.h5ad sample2.h5ad ... -o atlas.h5ad`
+
+**Partial progress:** `crates/scx-core/src/provenance.rs` + `--source-url` flag
+on `scx convert` are implemented (byte-level SHA-256 reproducibility for single
+files). The multi-file merge pipeline is still pending.
 
 ---
 

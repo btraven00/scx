@@ -142,9 +142,30 @@ def inspect_via_native(
     )
 
 
+def open_stream_via_native(
+    input_path: str | Path,
+    chunk_size: int = 5000,
+    assay: str = "RNA",
+    layer: str = "counts",
+) -> Any | None:
+    """
+    Return a native PyMatrixStream iterator, or None if the native backend is unavailable.
+    """
+    if _NATIVE is None:
+        return None
+
+    return _NATIVE.scx_open_stream(
+        str(Path(input_path).expanduser()),
+        int(chunk_size),
+        str(assay),
+        str(layer),
+    )
+
+
 __all__ = [
     "convert_via_native",
     "inspect_via_native",
     "native_available",
+    "open_stream_via_native",
     "write_h5seurat_via_native",
 ]

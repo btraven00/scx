@@ -9,11 +9,11 @@ use scx_core::{
     bpcells::BpcellsDatasetReader,
     detect,
     detect::Format,
-    dtype::DataType,
+    dtype::{DataType, TypedVec},
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5seurat::H5SeuratWriter,
-    ir::ColumnData,
+    ir::{ColumnData, MatrixChunk},
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -375,10 +375,170 @@ fn scx_inspect_native(py: Python<'_>, input: &str, _chunk_size: usize) -> PyResu
     result.map_err(py_err)
 }
 
+// ---------------------------------------------------------------------------
+// Streaming iterator
+// ---------------------------------------------------------------------------
+
+/// Cast a typed slice to its raw byte representation.
+///
+/// Safety: `T` must be a plain-old-data type (no padding, no uninit bytes).
+/// The caller must ensure the slice outlives the returned reference.
+unsafe fn slice_as_bytes<T>(v: &[T]) -> &[u8] {
+    std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * std::mem::size_of::<T>())
+}
+
+/// A single chunk of rows from a streaming matrix read.
+///
+/// Arrays are pre-computed as Python `bytes` objects; use
+/// `numpy.frombuffer(chunk.indptr_bytes, dtype=numpy.uint64)` etc.
+/// to obtain zero-copy numpy views.
+#[pyclass]
+pub struct PyMatrixChunk {
+    #[pyo3(get)]
+    pub row_offset: usize,
+    #[pyo3(get)]
+    pub nrows: usize,
+    #[pyo3(get)]
+    pub n_vars: usize,
+    /// NumPy dtype string for the `data_bytes` array.
+    #[pyo3(get)]
+    pub dtype: &'static str,
+    /// Raw bytes of a `(nrows+1,) uint64` CSR row-pointer array.
+    #[pyo3(get)]
+    pub indptr_bytes: PyObject,
+    /// Raw bytes of a `(nnz,) uint32` column-index array.
+    #[pyo3(get)]
+    pub indices_bytes: PyObject,
+    /// Raw bytes of a `(nnz,) <dtype>` values array.
+    #[pyo3(get)]
+    pub data_bytes: PyObject,
+}
+
+fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyResult<PyMatrixChunk> {
+    let dtype = match &chunk.data.data {
+        TypedVec::F32(_) => "float32",
+        TypedVec::F64(_) => "float64",
+        TypedVec::I32(_) => "int32",
+        TypedVec::U32(_) => "uint32",
+    };
+    // Safety: Vec<u64/u32/f32/f64> are plain-old-data, no padding.
+    let indptr_bytes: PyObject = pyo3::types::PyBytes::new_bound(
+        py,
+        unsafe { slice_as_bytes(&chunk.data.indptr) },
+    )
+    .into_any()
+    .unbind();
+    let indices_bytes: PyObject = pyo3::types::PyBytes::new_bound(
+        py,
+        unsafe { slice_as_bytes(&chunk.data.indices) },
+    )
+    .into_any()
+    .unbind();
+    let data_bytes: PyObject = match &chunk.data.data {
+        TypedVec::F32(v) => {
+            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
+        }
+        TypedVec::F64(v) => {
+            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
+        }
+        TypedVec::I32(v) => {
+            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
+        }
+        TypedVec::U32(v) => {
+            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
+        }
+    }
+    .into_any()
+    .unbind();
+
+    Ok(PyMatrixChunk {
+        row_offset: chunk.row_offset,
+        nrows: chunk.nrows,
+        n_vars,
+        dtype,
+        indptr_bytes,
+        indices_bytes,
+        data_bytes,
+    })
+}
+
+/// An iterator over `PyMatrixChunk` objects backed by a background reader thread.
+///
+/// Obtain via `scx_open_stream`; iterate in Python with a `for` loop.
+#[pyclass]
+pub struct PyMatrixStream {
+    rx: std::sync::Mutex<std::sync::mpsc::Receiver<std::result::Result<MatrixChunk, String>>>,
+    n_vars: usize,
+}
+
+#[pymethods]
+impl PyMatrixStream {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyMatrixChunk>> {
+        // Release the GIL while waiting for the background reader thread.
+        let result = py.allow_threads(|| self.rx.lock().unwrap().recv());
+        match result {
+            Ok(Ok(chunk)) => chunk_to_py(py, chunk, self.n_vars).map(Some),
+            Ok(Err(msg)) => Err(PyRuntimeError::new_err(msg)),
+            Err(_) => Ok(None), // channel closed — stream exhausted
+        }
+    }
+}
+
+/// Open a streaming iterator over the count matrix of a single-cell file.
+///
+/// Returns a `PyMatrixStream` whose `__next__` yields `PyMatrixChunk` objects.
+/// Reading runs on a background thread; the GIL is released between chunks.
+#[pyfunction]
+fn scx_open_stream(
+    path: &str,
+    chunk_size: usize,
+    assay: &str,
+    layer: &str,
+) -> PyResult<PyMatrixStream> {
+    let input_path = std::path::PathBuf::from(path);
+    let assay = assay.to_string();
+    let layer = layer.to_string();
+
+    let reader = open_reader(&input_path, chunk_size, &assay, &layer).map_err(py_err)?;
+    let (_, n_vars) = reader.shape();
+
+    let (tx, rx) =
+        std::sync::mpsc::sync_channel::<std::result::Result<MatrixChunk, String>>(8);
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async move {
+            let mut reader = reader;
+            let mut stream = reader.x_stream();
+            while let Some(chunk) = stream.next().await {
+                let result = chunk.map_err(|e| e.to_string());
+                if tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+    });
+
+    Ok(PyMatrixStream {
+        rx: std::sync::Mutex::new(rx),
+        n_vars,
+    })
+}
+
 #[pymodule]
 fn picklerick_py_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scx_convert_native, m)?)?;
     m.add_function(wrap_pyfunction!(scx_write_h5seurat_native, m)?)?;
     m.add_function(wrap_pyfunction!(scx_inspect_native, m)?)?;
+    m.add_function(wrap_pyfunction!(scx_open_stream, m)?)?;
+    m.add_class::<PyMatrixChunk>()?;
+    m.add_class::<PyMatrixStream>()?;
     Ok(())
 }
