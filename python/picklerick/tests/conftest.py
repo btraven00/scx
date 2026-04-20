@@ -100,7 +100,7 @@ def require_fixtures(h5seurat_path: Path, h5ad_ref_path: Path) -> None:
 
 
 @pytest.fixture
-def require_scx(scx_bin: str | None) -> str:
-    if not scx_bin:
-        pytest.skip("scx not available — set SCX_BIN, put scx on PATH, or build target/release/scx")
-    return scx_bin
+def require_native() -> None:
+    from picklerick._native import native_available
+    if not native_available():
+        pytest.skip("native backend not available — build with maturin develop")
