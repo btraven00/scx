@@ -29,11 +29,11 @@ pub enum Format {
 impl Format {
     pub fn display_name(self) -> &'static str {
         match self {
-            Format::H5Ad     => "H5AD",
+            Format::H5Ad => "H5AD",
             Format::H5Seurat => "H5Seurat",
-            Format::ScxH5    => "ScxH5",
-            Format::NpyDir   => "NpyDir",
-            Format::BPCells  => "BPCells",
+            Format::ScxH5 => "ScxH5",
+            Format::NpyDir => "NpyDir",
+            Format::BPCells => "BPCells",
         }
     }
 }

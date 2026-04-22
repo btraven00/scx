@@ -56,7 +56,9 @@ pub trait DatasetReader: Send {
     /// CSR row-pointer array for the main X matrix (n_obs+1 entries).
     /// Returns an empty slice when not available (dense X, BPCells, etc.).
     /// Free to call — indptr is loaded at open time, not streamed.
-    fn x_indptr(&self) -> &[u64] { &[] }
+    fn x_indptr(&self) -> &[u64] {
+        &[]
+    }
 
     /// Stream the count matrix as row-chunks.
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>>;
