@@ -79,6 +79,12 @@ enum Cli {
         /// Canonical URL of the source file (baked into uns["scx_provenance"])
         #[arg(long)]
         source_url: Option<String>,
+
+        /// Pre-computed SHA-256 of the source file (64 lowercase hex chars).
+        /// Skips rehashing — intended for pipelines like hapiq that already
+        /// compute the hash on download.
+        #[arg(long)]
+        source_sha256: Option<String>,
     },
 
     /// Inspect a single-cell file
@@ -302,6 +308,7 @@ async fn run() -> anyhow::Result<()> {
             project,
             seuratdisk_compat,
             source_url,
+            source_sha256: source_sha256_arg,
         } => {
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
@@ -322,7 +329,15 @@ async fn run() -> anyhow::Result<()> {
                     _ => Some(Format::ScxH5),
                 });
 
-            let source_sha256 = if input_path.is_file() {
+            let source_sha256 = if let Some(hex) = source_sha256_arg {
+                if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    anyhow::bail!(
+                        "--source-sha256 must be 64 hex characters, got {} chars",
+                        hex.len()
+                    );
+                }
+                Some(hex.to_ascii_lowercase())
+            } else if input_path.is_file() {
                 Some(
                     provenance::sha256_file(input_path)
                         .map_err(|e| anyhow::anyhow!("hashing source '{input}': {e}"))?,
@@ -1131,17 +1146,46 @@ async fn inspect(
     }
     println!();
 
-    // ── uns ──────────────────────────────────────────────────────────────────
+    // ── provenance + uns ─────────────────────────────────────────────────────
     let uns = reader.uns().await?;
+    let prov = uns
+        .raw
+        .as_object()
+        .and_then(|o| o.get("scx_provenance"));
+
+    println!("{}", bold_cyan!("provenance"));
+    match prov {
+        Some(serde_json::Value::Object(p)) => {
+            let scx_version = p.get("scx_version").and_then(|v| v.as_str()).unwrap_or("?");
+            println!("  {:<14} {}", "scx_version", dim!(scx_version));
+            if let Some(src) = p.get("source").and_then(|v| v.as_object()) {
+                if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                    println!("  {:<14} {}", "source.url", dim!(url));
+                }
+                if let Some(path) = src.get("path").and_then(|v| v.as_str()) {
+                    println!("  {:<14} {}", "source.path", dim!(path));
+                }
+                if let Some(sha) = src.get("sha256").and_then(|v| v.as_str()) {
+                    println!("  {:<14} {}", "source.sha256", dim!(sha));
+                }
+            }
+        }
+        _ => println!("  {}", dim!("(none)")),
+    }
+    println!();
+
+    let uns_obj_filtered: Option<Vec<(&String, &serde_json::Value)>> = uns
+        .raw
+        .as_object()
+        .map(|o| o.iter().filter(|(k, _)| k.as_str() != "scx_provenance").collect());
+
     if uns.raw.is_null() {
         section("uns", 0, "keys");
         println!("  {}", dim!("(none)"));
-    } else if let Some(obj) = uns.raw.as_object() {
-        section("uns", obj.len(), "keys");
-        let mut keys: Vec<_> = obj.keys().collect();
-        keys.sort();
-        for k in keys {
-            let v = &obj[k];
+    } else if let Some(mut entries) = uns_obj_filtered {
+        section("uns", entries.len(), "keys");
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in entries {
             let summary = match v {
                 serde_json::Value::Array(a) => format!("array [{}]", a.len()),
                 serde_json::Value::Object(o) => format!("dict  ({} keys)", o.len()),
