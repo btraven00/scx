@@ -60,6 +60,7 @@ if baked into the artifact:
 | Flag | Description |
 |------|-------------|
 | `--source-url <url>` | Canonical origin URL of the source file (optional) |
+| `--source-sha256 <hex>` | Pre-computed SHA-256 (64 hex chars). Skips rehashing — intended for pipelines (e.g. hapiq) that already hashed on download. |
 
 ### hapiq integration
 
@@ -72,12 +73,33 @@ hapiq get https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat \
   -o data/pbmc3k.h5seurat
 
 scx convert data/pbmc3k.h5seurat results/pbmc3k.h5ad \
-  --source-url https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat
+  --source-url https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat \
+  --source-sha256 "$(hapiq hash data/pbmc3k.h5seurat)"
 ```
+
+Passing `--source-sha256` from the downloader avoids a second full read of
+the source file during conversion.
 
 The artifact then carries the full lineage: origin URL + source SHA256 +
 scx version. Anyone with the artifact can re-derive the source file
 independently.
+
+### Viewing provenance
+
+`scx inspect <file>` prints the embedded `scx_provenance` block as a
+dedicated section above `uns`:
+
+```
+provenance
+  scx_version    0.1.0
+  source.url     https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat
+  source.path    data/pbmc3k.h5seurat
+  source.sha256  703a1b4a…
+```
+
+Files converted without `--source-url` show `(none)` for the URL line.
+Files produced by other tools (no `scx_provenance` block) show
+`provenance: (none)`.
 
 ---
 

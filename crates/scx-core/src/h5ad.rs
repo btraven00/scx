@@ -1162,13 +1162,23 @@ fn ad_dataset_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
             }
         }
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
-            let strings = ad_read_strings(file, path)?;
-            if is_scalar || strings.len() == 1 {
-                Ok(serde_json::Value::String(
-                    strings.into_iter().next().unwrap_or_default(),
-                ))
+            if is_scalar {
+                let s = match ds.dtype()?.to_descriptor()? {
+                    TypeDescriptor::VarLenUnicode => {
+                        ds.read_scalar::<VarLenUnicode>()?.to_string()
+                    }
+                    _ => ds.read_scalar::<hdf5::types::VarLenAscii>()?.to_string(),
+                };
+                Ok(serde_json::Value::String(s))
             } else {
-                Ok(serde_json::json!(strings))
+                let strings = ad_read_strings(file, path)?;
+                if strings.len() == 1 {
+                    Ok(serde_json::Value::String(
+                        strings.into_iter().next().unwrap_or_default(),
+                    ))
+                } else {
+                    Ok(serde_json::json!(strings))
+                }
             }
         }
         _ => Ok(serde_json::Value::Null),
