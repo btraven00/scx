@@ -161,6 +161,37 @@ impl H5AdWriter {
         Ok(())
     }
 
+    /// Returns true if a dataset or group named `name` exists inside `parent_path`.
+    pub fn child_exists(&self, parent_path: &str, name: &str) -> bool {
+        if let Ok(grp) = self.file.group(parent_path) {
+            grp.group(name).is_ok() || grp.dataset(name).is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// Add a single column to `/obs`, updating the `column-order` attribute.
+    ///
+    /// Safe to call on both Create and Append mode writers.
+    pub fn add_obs_column(&self, name: &str, data: &ColumnData) -> Result<()> {
+        add_dataframe_column(&self.file, "obs", name, data)
+    }
+
+    /// Add a single column to `/var`, updating the `column-order` attribute.
+    pub fn add_var_column(&self, name: &str, data: &ColumnData) -> Result<()> {
+        add_dataframe_column(&self.file, "var", name, data)
+    }
+
+    /// Add a single entry to `/obsm` (creates the group if absent).
+    pub fn add_obsm_entry(&self, name: &str, mat: &DenseMatrix) -> Result<()> {
+        add_dense_dict_entry(&self.file, "obsm", name, mat)
+    }
+
+    /// Add a single entry to `/varm` (creates the group if absent).
+    pub fn add_varm_entry(&self, name: &str, mat: &DenseMatrix) -> Result<()> {
+        add_dense_dict_entry(&self.file, "varm", name, mat)
+    }
+
     /// Write or replace `uns["scx_provenance"]` with `prov`.
     ///
     /// Creates `/uns` if it does not exist. Deletes any existing
@@ -673,6 +704,69 @@ impl DatasetWriter for H5AdWriter {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Append-mode helper primitives
+// ---------------------------------------------------------------------------
+
+/// Append a single column to an existing dataframe group (`/obs` or `/var`),
+/// keeping the `column-order` attribute in sync.
+fn add_dataframe_column(file: &File, group_name: &str, col_name: &str, data: &ColumnData) -> Result<()> {
+    let grp = file.group(group_name)?;
+
+    // Read existing column-order (tolerate missing attr for older files).
+    let (existing, attr_existed) = match grp.attr("column-order") {
+        Ok(attr) => {
+            let raw: ndarray::Array1<VarLenUnicode> = attr.read_1d().unwrap_or_default();
+            let names: Vec<String> = raw.into_iter().map(|s| s.to_string()).collect();
+            (names, true)
+        }
+        Err(_) => (Vec::new(), false),
+    };
+
+    // Only update column-order if this is a new column (not an overwrite).
+    if !existing.contains(&col_name.to_string()) {
+        let mut new_order = existing;
+        new_order.push(col_name.to_string());
+        if attr_existed {
+            grp.delete_attr("column-order")?;
+        }
+        let vals: Vec<VarLenUnicode> = new_order
+            .iter()
+            .map(|s| VarLenUnicode::from_str(s).unwrap_or_default())
+            .collect();
+        let attr = grp
+            .new_attr::<VarLenUnicode>()
+            .shape(vals.len())
+            .create("column-order")?;
+        attr.write(&ndarray::Array1::from_vec(vals))?;
+    }
+
+    write_column(&grp, col_name, data)
+}
+
+/// Add a dense 2-D matrix as a named entry inside `/obsm` or `/varm`.
+/// Creates the parent dict group with encoding attrs if it does not exist.
+fn add_dense_dict_entry(file: &File, group_name: &str, entry_name: &str, mat: &DenseMatrix) -> Result<()> {
+    let grp = match file.group(group_name) {
+        Ok(g) => g,
+        Err(_) => {
+            let g = file.create_group(group_name)?;
+            write_encoding_on_group(&g, "dict", "0.1.0")?;
+            g
+        }
+    };
+    let (nrows, ncols) = mat.shape;
+    let arr = ndarray::Array2::from_shape_vec((nrows, ncols), mat.data.clone())
+        .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+    let ds = grp
+        .new_dataset::<f64>()
+        .shape((nrows, ncols))
+        .create(entry_name)?;
+    ds.write(&arr)?;
+    write_encoding_on_ds(&ds, "array", "0.2.0")?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
