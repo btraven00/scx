@@ -1,3 +1,5 @@
+mod cmd_merge;
+
 use std::path::Path;
 
 use clap::Parser;
@@ -172,6 +174,52 @@ enum Cli {
         /// Seurat layer (H5Seurat only)
         #[arg(long, default_value = "counts")]
         layer: String,
+    },
+
+    /// Assemble slots from multiple files onto a base h5ad (slot-patch merge)
+    ///
+    /// Two modes:
+    ///   Create: --base source.h5ad --patch ... --output merged.h5ad
+    ///   Append: --into merged.h5ad --patch ...
+    ///
+    /// Patch format: file.h5ad:slot/name[,slot/name...]
+    ///   Supported slot groups: layers, obs, var, obsm, varm
+    ///
+    /// Examples:
+    ///   scx merge --base raw.h5ad --patch norm.h5ad:layers/normalized --output merged.h5ad
+    ///   scx merge --config merge.yaml
+    Merge {
+        /// Base file to copy (create mode; mutually exclusive with --into)
+        #[arg(long, conflicts_with = "into")]
+        base: Option<String>,
+
+        /// Output path for the new merged file (create mode)
+        #[arg(long, conflicts_with = "into")]
+        output: Option<String>,
+
+        /// Existing merged file to append into (append mode)
+        #[arg(long, conflicts_with = "base")]
+        into: Option<String>,
+
+        /// Patch spec: file.h5ad:slot/name[,slot/name...]
+        #[arg(long = "patch", value_name = "SPEC")]
+        patches: Vec<String>,
+
+        /// How to handle a slot that already exists [error, skip, overwrite]
+        #[arg(long, default_value = "error")]
+        on_conflict: String,
+
+        /// Embed a tag in the provenance record (key=value)
+        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        tags: Vec<String>,
+
+        /// Path to a YAML config file (supersedes all other flags)
+        #[arg(long)]
+        config: Option<String>,
+
+        /// Cells per streaming chunk
+        #[arg(long, default_value = "5000")]
+        chunk_size: usize,
     },
 }
 
@@ -538,6 +586,29 @@ async fn run() -> anyhow::Result<()> {
                 n_vars = dataset.x.shape.1,
                 "snapshot written"
             );
+        }
+
+        Cli::Merge {
+            base,
+            output,
+            into,
+            patches,
+            on_conflict,
+            tags,
+            config,
+            chunk_size,
+        } => {
+            cmd_merge::run_merge(cmd_merge::MergeArgs {
+                base,
+                output,
+                into,
+                patches,
+                on_conflict,
+                tags,
+                config,
+                chunk_size,
+            })
+            .await?;
         }
     }
 
@@ -1157,16 +1228,73 @@ async fn inspect(
     match prov {
         Some(serde_json::Value::Object(p)) => {
             let scx_version = p.get("scx_version").and_then(|v| v.as_str()).unwrap_or("?");
-            println!("  {:<14} {}", "scx_version", dim!(scx_version));
+            println!("  {:<16} {}", "scx_version", dim!(scx_version));
+
+            // Convert provenance: "source" key
             if let Some(src) = p.get("source").and_then(|v| v.as_object()) {
                 if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
-                    println!("  {:<14} {}", "source.url", dim!(url));
+                    println!("  {:<16} {}", "source.url", dim!(url));
                 }
                 if let Some(path) = src.get("path").and_then(|v| v.as_str()) {
-                    println!("  {:<14} {}", "source.path", dim!(path));
+                    println!("  {:<16} {}", "source.path", dim!(path));
                 }
                 if let Some(sha) = src.get("sha256").and_then(|v| v.as_str()) {
-                    println!("  {:<14} {}", "source.sha256", dim!(sha));
+                    println!("  {:<16} {}", "source.sha256", dim!(sha));
+                }
+            }
+
+            // Merge provenance: "base" anchor
+            if let Some(base) = p.get("base").and_then(|v| v.as_object()) {
+                if let Some(path) = base.get("path").and_then(|v| v.as_str()) {
+                    println!("  {:<16} {}", "base.path", dim!(path));
+                }
+                if let Some(sha) = base.get("sha256").and_then(|v| v.as_str()) {
+                    let short = &sha[..12.min(sha.len())];
+                    println!("  {:<16} {}…", "base.sha256", dim!(short));
+                }
+                if let Some(n) = base.get("n_obs").and_then(|v| v.as_u64()) {
+                    println!("  {:<16} {}", "base.n_obs", dim!(n));
+                }
+            }
+
+            // Tags
+            if let Some(tags) = p.get("tags").and_then(|v| v.as_object()) {
+                for (k, v) in tags {
+                    if let Some(s) = v.as_str() {
+                        println!("  {:<16} {}", format!("tag.{k}"), dim!(s));
+                    }
+                }
+            }
+
+            // Slots map (merge provenance)
+            if let Some(slots) = p.get("slots").and_then(|v| v.as_object()) {
+                if !slots.is_empty() {
+                    println!();
+                    let hdr = format!("provenance slots ({} patched)", slots.len());
+                    println!("{}", bold_cyan!(&hdr));
+                    let mut keys: Vec<&String> = slots.keys().collect();
+                    keys.sort();
+                    for key in keys {
+                        if let Some(entry) = slots[key].as_object() {
+                            let src = entry
+                                .get("source_path")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            let sha = entry.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
+                            let sha_short = &sha[..12.min(sha.len())];
+                            let at = entry
+                                .get("added_at")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            println!(
+                                "  {:<38} {}  {}  {}",
+                                key,
+                                dim!(src),
+                                dim!(&format!("[{sha_short}…]")),
+                                dim!(at),
+                            );
+                        }
+                    }
                 }
             }
         }
