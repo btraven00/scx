@@ -7,6 +7,7 @@ pub mod h5ad;
 pub mod h5bpcells;
 pub mod h5seurat;
 pub mod ir;
+pub mod merge;
 pub mod npy;
 pub mod provenance;
 pub mod sparse;

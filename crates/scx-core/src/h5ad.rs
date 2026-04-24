@@ -22,6 +22,15 @@ use crate::{
 /// Number of elements per HDF5 chunk for the streaming X arrays (resizable datasets require chunks).
 const CHUNK_ELEMS: usize = 65_536;
 
+/// Controls whether /X write paths are active.
+/// Append-mode writers must not call write_x_chunk or finalize — those paths
+/// assume a freshly-created file with an empty resizable /X dataset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriterMode {
+    Create,
+    Append,
+}
+
 /// State kept while streaming a single named sparse matrix (layer or obsp).
 struct SparseWriteState {
     /// Full HDF5 group path being written (e.g. "layers/spliced" or "obsp/nn").
@@ -50,6 +59,7 @@ pub struct H5AdWriter {
     x_indptr: Vec<u64>,
     /// State for the currently open streaming sparse matrix, if any.
     sparse_state: Option<SparseWriteState>,
+    mode: WriterMode,
 }
 
 impl H5AdWriter {
@@ -88,7 +98,53 @@ impl H5AdWriter {
             dtype,
             x_indptr: vec![0u64],
             sparse_state: None,
+            mode: WriterMode::Create,
         })
+    }
+
+    /// Open an existing h5ad file for append (R/W mode).
+    ///
+    /// Recovers n_obs/n_vars from /X shape and dtype from /X/data — same logic
+    /// as H5AdReader::open. write_x_chunk and finalize must NOT be called on
+    /// append-mode writers; they assume an empty resizable /X dataset.
+    pub fn open_for_append<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = File::open_rw(path.as_ref())?;
+
+        let x_grp = file.group("X").map_err(|_| {
+            ScxError::InvalidFormat("missing /X — not a valid H5AD file".into())
+        })?;
+        let shape_attr = x_grp
+            .attr("shape")
+            .map_err(|_| ScxError::InvalidFormat("missing X/shape attribute".into()))?;
+        let (n_obs, n_vars) = match shape_attr.dtype()?.to_descriptor()? {
+            TypeDescriptor::Integer(IntSize::U8) => {
+                let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
+                (s[0] as usize, s[1] as usize)
+            }
+            _ => {
+                let s: Vec<i32> = shape_attr.read_1d::<i32>()?.to_vec();
+                (s[0] as usize, s[1] as usize)
+            }
+        };
+        let dtype = ad_detect_dtype(&file, "X/data")?;
+
+        Ok(Self {
+            file,
+            n_obs,
+            n_vars,
+            dtype,
+            x_indptr: Vec::new(),
+            sparse_state: None,
+            mode: WriterMode::Append,
+        })
+    }
+
+    pub fn n_obs(&self) -> usize {
+        self.n_obs
+    }
+
+    pub fn n_vars(&self) -> usize {
+        self.n_vars
     }
 }
 
@@ -432,6 +488,11 @@ impl DatasetWriter for H5AdWriter {
     }
 
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        if self.mode == WriterMode::Append {
+            return Err(ScxError::InvalidFormat(
+                "write_x_chunk must not be called on an append-mode H5AdWriter".into(),
+            ));
+        }
         let csr = &chunk.data;
         let nnz = csr.indices.len();
 
@@ -546,6 +607,11 @@ impl DatasetWriter for H5AdWriter {
     }
 
     async fn finalize(&mut self) -> Result<()> {
+        if self.mode == WriterMode::Append {
+            return Err(ScxError::InvalidFormat(
+                "finalize must not be called on an append-mode H5AdWriter".into(),
+            ));
+        }
         let x_grp = self.file.group("X")?;
 
         // Write X/indptr — use i32 if small enough, i64 otherwise
