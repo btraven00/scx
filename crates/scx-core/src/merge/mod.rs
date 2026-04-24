@@ -180,9 +180,7 @@ impl SlotPatchManager {
     pub async fn run(&mut self) -> Result<()> {
         match self.mode.clone() {
             MergeMode::Create { base, output } => self.run_create(&base, &output).await,
-            MergeMode::Append { into: _ } => Err(ScxError::InvalidFormat(
-                "append mode is not yet implemented (coming in v0.2.0)".into(),
-            )),
+            MergeMode::Append { into } => self.run_append(&into).await,
         }
     }
 
@@ -205,77 +203,27 @@ impl SlotPatchManager {
             prov.set_tag(k, v);
         }
 
-        for patch in &mut self.patches {
-            let patch_sha256 = match &patch.source_sha256 {
-                Some(s) => s.clone(),
-                None => {
-                    let sha = crate::provenance::sha256_file(&patch.source)?;
-                    patch.source_sha256 = Some(sha.clone());
-                    sha
-                }
-            };
+        apply_patches(&mut writer, &mut self.patches, &base_meta, &mut prov, chunk_size).await?;
 
-            let mut reader = open_patch_reader(&patch.source, chunk_size)?;
+        let prov_json = prov
+            .to_json()
+            .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+        writer.upsert_uns_provenance(&prov_json)?;
 
-            for slot in patch.slots.clone() {
-                let applied = match &slot {
-                    SlotSelector::Layer(name) => {
-                        apply_layer_patch(
-                            &mut writer,
-                            name,
-                            reader.as_mut(),
-                            &base_meta,
-                            patch.conflict,
-                            chunk_size,
-                        )
-                        .await
-                    }
-                    SlotSelector::ObsColumn(name) => {
-                        apply_obs_column_patch(
-                            &mut writer,
-                            name,
-                            reader.as_mut(),
-                            &base_meta,
-                            patch.conflict,
-                        )
-                        .await
-                    }
-                    SlotSelector::VarColumn(name) => {
-                        apply_var_column_patch(
-                            &mut writer,
-                            name,
-                            reader.as_mut(),
-                            &base_meta,
-                            patch.conflict,
-                        )
-                        .await
-                    }
-                    SlotSelector::Obsm(name) => {
-                        apply_obsm_patch(
-                            &mut writer,
-                            name,
-                            reader.as_mut(),
-                            &base_meta,
-                            patch.conflict,
-                        )
-                        .await
-                    }
-                    SlotSelector::Varm(name) => {
-                        apply_varm_patch(
-                            &mut writer,
-                            name,
-                            reader.as_mut(),
-                            &base_meta,
-                            patch.conflict,
-                        )
-                        .await
-                    }
-                };
-                if applied? {
-                    prov.add_slot(slot.hdf5_path(), &patch.source, &patch_sha256);
-                }
-            }
-        }
+        Ok(())
+    }
+
+    async fn run_append(&mut self, into: &Path) -> Result<()> {
+        let chunk_size = self.chunk_size;
+
+        // Read existing provenance + obs/var index before opening R/W.
+        // The reader handle is dropped when read_append_context returns, so
+        // open_for_append below gets an exclusive handle with no concurrent reader.
+        let (base_meta, mut prov) = read_append_context(into)?;
+
+        let mut writer = H5AdWriter::open_for_append(into)?;
+
+        apply_patches(&mut writer, &mut self.patches, &base_meta, &mut prov, chunk_size).await?;
 
         let prov_json = prov
             .to_json()
@@ -310,6 +258,89 @@ fn read_base_meta(path: &Path) -> Result<BaseMeta> {
         obs_index: obs.index,
         var_index: var.index,
     })
+}
+
+/// Read existing provenance + obs/var index from a file that was previously
+/// created by `run_create`.  The reader is dropped before `open_for_append`
+/// is called so HDF5 never has two concurrent handles to the same file.
+fn read_append_context(path: &Path) -> Result<(BaseMeta, SlotProvenance)> {
+    let mut reader = H5AdReader::open(path, 1)?;
+    let (n_obs, n_vars) = reader.shape();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+    let (obs, var, uns) = rt.block_on(async {
+        let obs = reader.obs().await?;
+        let var = reader.var().await?;
+        let uns = reader.uns().await?;
+        Ok::<_, ScxError>((obs, var, uns))
+    })?;
+
+    let base_meta = BaseMeta {
+        n_obs,
+        n_vars,
+        obs_index: obs.index,
+        var_index: var.index,
+    };
+
+    let prov = if let Some(prov_val) = uns.raw.get("scx_provenance") {
+        SlotProvenance::from_json(prov_val)
+            .map_err(|e| ScxError::InvalidFormat(format!("cannot parse scx_provenance: {e}")))?
+    } else {
+        return Err(ScxError::InvalidFormat(
+            "target file has no scx_provenance — it was not created by `scx merge`; \
+             use --base + --output to create a fresh merged file"
+                .into(),
+        ));
+    };
+
+    Ok((base_meta, prov))
+}
+
+/// Apply all patches in `patches` to `writer`, recording provenance for each
+/// written slot into `prov`.
+async fn apply_patches(
+    writer: &mut H5AdWriter,
+    patches: &mut Vec<PatchSpec>,
+    base_meta: &BaseMeta,
+    prov: &mut SlotProvenance,
+    chunk_size: usize,
+) -> Result<()> {
+    for patch in patches.iter_mut() {
+        if patch.source_sha256.is_none() {
+            patch.source_sha256 = Some(crate::provenance::sha256_file(&patch.source)?);
+        }
+        let sha256 = patch.source_sha256.clone().unwrap();
+
+        let mut reader = open_patch_reader(&patch.source, chunk_size)?;
+        let conflict = patch.conflict;
+        let source_str = patch.source.to_string_lossy().into_owned();
+
+        for slot in &patch.slots {
+            let applied = match slot {
+                SlotSelector::Layer(name) => {
+                    apply_layer_patch(writer, name, reader.as_mut(), base_meta, conflict, chunk_size).await?
+                }
+                SlotSelector::ObsColumn(name) => {
+                    apply_obs_column_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
+                }
+                SlotSelector::VarColumn(name) => {
+                    apply_var_column_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
+                }
+                SlotSelector::Obsm(name) => {
+                    apply_obsm_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
+                }
+                SlotSelector::Varm(name) => {
+                    apply_varm_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
+                }
+            };
+            if applied {
+                prov.add_slot(slot.hdf5_path(), source_str.clone(), sha256.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Open a reader for any supported format using content-based detection.
