@@ -194,9 +194,13 @@ impl H5AdWriter {
 
     /// Write or replace `uns["scx_provenance"]` with `prov`.
     ///
-    /// Creates `/uns` if it does not exist. Deletes any existing
-    /// `scx_provenance` sub-group before writing the new one so the call is
-    /// idempotent (safe to call on both create-mode and append-mode writers).
+    /// The value is serialised as a single JSON string scalar rather than a
+    /// nested HDF5 group tree, because slot keys contain "/" which HDF5
+    /// interprets as a path separator — causing silent data corruption when
+    /// stored as nested groups. The reader un-parses the string back to JSON.
+    ///
+    /// Creates `/uns` if it does not exist. Idempotent: deletes any existing
+    /// `scx_provenance` entry (string or group) before writing the new one.
     pub fn upsert_uns_provenance(&self, prov: &serde_json::Value) -> Result<()> {
         let uns_grp = match self.file.group("uns") {
             Ok(g) => g,
@@ -206,10 +210,20 @@ impl H5AdWriter {
                 g
             }
         };
-        if uns_grp.group("scx_provenance").is_ok() {
+        // Remove any pre-existing entry (may be a group or a dataset).
+        if uns_grp.group("scx_provenance").is_ok() || uns_grp.dataset("scx_provenance").is_ok() {
             uns_grp.unlink("scx_provenance")?;
         }
-        write_json_value(&uns_grp, "scx_provenance", prov)?;
+        let json_str = serde_json::to_string(prov)
+            .map_err(|e| ScxError::InvalidFormat(format!("provenance serialize error: {e}")))?;
+        let v = VarLenUnicode::from_str(&json_str)
+            .map_err(|_| ScxError::InvalidFormat("provenance contains invalid UTF-8".into()))?;
+        let ds = uns_grp
+            .new_dataset::<VarLenUnicode>()
+            .shape(())
+            .create("scx_provenance")?;
+        ds.write_scalar(&v)?;
+        write_encoding_on_ds(&ds, "string", "0.2.0")?;
         Ok(())
     }
 }
@@ -1510,7 +1524,17 @@ impl DatasetReader for H5AdReader {
         match file.group("uns") {
             Err(_) => Ok(UnsTable::default()),
             Ok(_) => {
-                let raw = ad_walk_group(&file, "uns")?;
+                let mut raw = ad_walk_group(&file, "uns")?;
+                // scx_provenance is stored as a JSON string to preserve keys
+                // containing "/" without HDF5 path-separator mangling.
+                // Parse it back to an Object so callers get the expected shape.
+                if let Some(obj) = raw.as_object_mut() {
+                    if let Some(serde_json::Value::String(s)) = obj.get("scx_provenance") {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                            obj.insert("scx_provenance".to_string(), parsed);
+                        }
+                    }
+                }
                 Ok(UnsTable { raw })
             }
         }
