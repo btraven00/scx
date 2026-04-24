@@ -1,3 +1,4 @@
+mod cmd_export;
 mod cmd_merge;
 
 use std::path::Path;
@@ -166,6 +167,43 @@ enum Cli {
         /// Cells per streaming chunk (for reading the input)
         #[arg(long, default_value = "5000")]
         chunk_size: usize,
+
+        /// Seurat assay (H5Seurat only)
+        #[arg(long, default_value = "RNA")]
+        assay: String,
+
+        /// Seurat layer (H5Seurat only)
+        #[arg(long, default_value = "counts")]
+        layer: String,
+    },
+
+    /// Export a tabular slot to CSV or Parquet
+    ///
+    /// Reads the specified slot from the input file and writes it as a flat
+    /// table.  The output format is determined by the file extension:
+    ///   .csv      — comma-separated values (default)
+    ///   .parquet  — Apache Parquet
+    ///
+    /// Supported slots:
+    ///   obs           — cell metadata (index + all columns)
+    ///   var           — gene/feature metadata (index + all columns)
+    ///   obsm/<name>   — embedding matrix (index + dim_0, dim_1, …)
+    ///
+    /// Examples:
+    ///   scx export merged.h5ad --slot obs --output cells.csv
+    ///   scx export merged.h5ad --slot var --output genes.parquet
+    ///   scx export merged.h5ad --slot obsm/X_pca --output pca.csv
+    Export {
+        /// Input file (h5ad or h5seurat)
+        input: String,
+
+        /// Slot to export: obs, var, or obsm/<name>
+        #[arg(long, default_value = "obs")]
+        slot: String,
+
+        /// Output path (.csv or .parquet)
+        #[arg(long, short = 'o')]
+        output: String,
 
         /// Seurat assay (H5Seurat only)
         #[arg(long, default_value = "RNA")]
@@ -586,6 +624,23 @@ async fn run() -> anyhow::Result<()> {
                 n_vars = dataset.x.shape.1,
                 "snapshot written"
             );
+        }
+
+        Cli::Export {
+            input,
+            slot,
+            output,
+            assay,
+            layer,
+        } => {
+            cmd_export::run_export(cmd_export::ExportArgs {
+                input,
+                slot,
+                output,
+                assay,
+                layer,
+            })
+            .await?;
         }
 
         Cli::Merge {
