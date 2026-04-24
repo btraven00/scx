@@ -146,6 +146,41 @@ impl H5AdWriter {
     pub fn n_vars(&self) -> usize {
         self.n_vars
     }
+
+    /// Returns true if the HDF5 group at `path` exists in the file.
+    pub fn group_exists(&self, path: &str) -> bool {
+        self.file.group(path).is_ok()
+    }
+
+    /// Deletes the named child link from `parent_path`.
+    ///
+    /// Used by conflict=overwrite to remove a slot before rewriting it.
+    pub fn unlink_child(&self, parent_path: &str, name: &str) -> Result<()> {
+        let parent = self.file.group(parent_path)?;
+        parent.unlink(name)?;
+        Ok(())
+    }
+
+    /// Write or replace `uns["scx_provenance"]` with `prov`.
+    ///
+    /// Creates `/uns` if it does not exist. Deletes any existing
+    /// `scx_provenance` sub-group before writing the new one so the call is
+    /// idempotent (safe to call on both create-mode and append-mode writers).
+    pub fn upsert_uns_provenance(&self, prov: &serde_json::Value) -> Result<()> {
+        let uns_grp = match self.file.group("uns") {
+            Ok(g) => g,
+            Err(_) => {
+                let g = self.file.create_group("uns")?;
+                write_encoding_on_group(&g, "dict", "0.1.0")?;
+                g
+            }
+        };
+        if uns_grp.group("scx_provenance").is_ok() {
+            uns_grp.unlink("scx_provenance")?;
+        }
+        write_json_value(&uns_grp, "scx_provenance", prov)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

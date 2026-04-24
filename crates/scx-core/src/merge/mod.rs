@@ -1,10 +1,21 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::error::{Result, ScxError};
+use futures::StreamExt;
+
+use crate::{
+    bpcells::BpcellsDatasetReader,
+    detect::{sniff, sniff_dir, Format},
+    error::{Result, ScxError},
+    h5ad::{H5AdReader, H5AdWriter},
+    h5seurat::open_h5seurat,
+    stream::{DatasetReader, DatasetWriter},
+};
 
 pub mod align;
 pub mod provenance;
+
+use provenance::{BaseAnchor, SlotProvenance};
 
 // ---------------------------------------------------------------------------
 // SlotSelector + parser (task 3)
@@ -134,6 +145,16 @@ pub struct SlotPatchManager {
     pub mode: MergeMode,
     pub patches: Vec<PatchSpec>,
     pub tags: HashMap<String, String>,
+    pub chunk_size: usize,
+}
+
+/// Obs/var axis metadata loaded from the base file before patching.
+#[derive(Debug, Clone)]
+pub struct BaseMeta {
+    pub n_obs: usize,
+    pub n_vars: usize,
+    pub obs_index: Vec<String>,
+    pub var_index: Vec<String>,
 }
 
 impl SlotPatchManager {
@@ -142,6 +163,7 @@ impl SlotPatchManager {
             mode,
             patches: Vec::new(),
             tags: HashMap::new(),
+            chunk_size: 5000,
         }
     }
 
@@ -152,6 +174,176 @@ impl SlotPatchManager {
     pub fn add_tag(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.tags.insert(key.into(), value.into());
     }
+
+    /// Execute the merge operation.
+    pub async fn run(&mut self) -> Result<()> {
+        match self.mode.clone() {
+            MergeMode::Create { base, output } => self.run_create(&base, &output).await,
+            MergeMode::Append { into: _ } => Err(ScxError::InvalidFormat(
+                "append mode is not yet implemented (coming in v0.2.0)".into(),
+            )),
+        }
+    }
+
+    async fn run_create(&mut self, base: &Path, output: &Path) -> Result<()> {
+        let chunk_size = self.chunk_size;
+        let base_sha256 = crate::provenance::sha256_file(base)?;
+        let base_meta = read_base_meta(base)?;
+
+        std::fs::copy(base, output)?;
+
+        let mut writer = H5AdWriter::open_for_append(output)?;
+
+        let mut prov = SlotProvenance::new(BaseAnchor {
+            path: base.to_string_lossy().into_owned(),
+            sha256: base_sha256,
+            n_obs: base_meta.n_obs,
+            n_vars: base_meta.n_vars,
+        });
+        for (k, v) in &self.tags {
+            prov.set_tag(k, v);
+        }
+
+        for patch in &mut self.patches {
+            let patch_sha256 = match &patch.source_sha256 {
+                Some(s) => s.clone(),
+                None => {
+                    let sha = crate::provenance::sha256_file(&patch.source)?;
+                    patch.source_sha256 = Some(sha.clone());
+                    sha
+                }
+            };
+
+            let mut reader = open_patch_reader(&patch.source, chunk_size)?;
+
+            for slot in patch.slots.clone() {
+                match &slot {
+                    SlotSelector::Layer(name) => {
+                        apply_layer_patch(
+                            &mut writer,
+                            name,
+                            reader.as_mut(),
+                            &base_meta,
+                            patch.conflict,
+                            chunk_size,
+                        )
+                        .await?;
+                        prov.add_slot(slot.hdf5_path(), &patch.source, &patch_sha256);
+                    }
+                    other => {
+                        return Err(ScxError::InvalidFormat(format!(
+                            "slot type '{}' not yet supported (coming in v0.2.0 chunk 3)",
+                            other.hdf5_path()
+                        )));
+                    }
+                }
+            }
+        }
+
+        let prov_json = prov
+            .to_json()
+            .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+        writer.upsert_uns_provenance(&prov_json)?;
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Read obs/var index and shape from an h5ad file without streaming X.
+fn read_base_meta(path: &Path) -> Result<BaseMeta> {
+    let mut reader = H5AdReader::open(path, 1)?;
+    let (n_obs, n_vars) = reader.shape();
+    // Use a tiny runtime just for the metadata reads (obs/var are cheap).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+    let (obs, var) = rt.block_on(async {
+        let obs = reader.obs().await?;
+        let var = reader.var().await?;
+        Ok::<_, ScxError>((obs, var))
+    })?;
+    Ok(BaseMeta {
+        n_obs,
+        n_vars,
+        obs_index: obs.index,
+        var_index: var.index,
+    })
+}
+
+/// Open a reader for any supported format using content-based detection.
+fn open_patch_reader(
+    path: &Path,
+    chunk_size: usize,
+) -> Result<Box<dyn DatasetReader + Send>> {
+    let fmt = sniff_dir(path).or_else(|| sniff(path));
+    Ok(match fmt {
+        Some(Format::BPCells) => Box::new(BpcellsDatasetReader::open(path, chunk_size)?),
+        Some(Format::H5Seurat) => open_h5seurat(path, chunk_size, None, None)?,
+        _ => Box::new(H5AdReader::open(path, chunk_size)?),
+    })
+}
+
+/// Stream one named layer from `reader` into `writer`, with conflict handling.
+///
+/// For Chunk 2 the patch must have the same shape as the base; obs-order
+/// reindexing for mis-ordered patches comes in Chunk 3.
+async fn apply_layer_patch(
+    writer: &mut H5AdWriter,
+    name: &str,
+    reader: &mut dyn DatasetReader,
+    base_meta: &BaseMeta,
+    conflict: ConflictPolicy,
+    chunk_size: usize,
+) -> Result<()> {
+    let (patch_n_obs, patch_n_vars) = reader.shape();
+    if patch_n_obs != base_meta.n_obs || patch_n_vars != base_meta.n_vars {
+        return Err(ScxError::InvalidFormat(format!(
+            "shape mismatch for layer '{name}': patch is {patch_n_obs}×{patch_n_vars}, \
+             base is {}×{}",
+            base_meta.n_obs, base_meta.n_vars
+        )));
+    }
+
+    let slot_path = format!("layers/{name}");
+    if writer.group_exists(&slot_path) {
+        match conflict {
+            ConflictPolicy::Error => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "slot '{slot_path}' already exists (use --on-conflict skip|overwrite)"
+                )));
+            }
+            ConflictPolicy::Skip => {
+                tracing::info!(slot = slot_path, "skipping existing slot (conflict=skip)");
+                return Ok(());
+            }
+            ConflictPolicy::Overwrite => {
+                writer.unlink_child("layers", name)?;
+            }
+        }
+    }
+
+    let layer_metas = reader.layer_metas().await?;
+    let meta = layer_metas
+        .iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| {
+            ScxError::InvalidFormat(format!("layer '{name}' not found in patch source"))
+        })?
+        .clone();
+
+    writer.begin_sparse("layers", name, &meta).await?;
+    let mut stream = Box::pin(reader.layer_stream(&meta, chunk_size));
+    while let Some(chunk) = stream.next().await {
+        writer.write_sparse_chunk(&chunk?).await?;
+    }
+    writer.end_sparse().await?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
