@@ -187,7 +187,7 @@ impl SlotPatchManager {
     async fn run_create(&mut self, base: &Path, output: &Path) -> Result<()> {
         let chunk_size = self.chunk_size;
         let base_sha256 = crate::provenance::sha256_file(base)?;
-        let base_meta = read_base_meta(base)?;
+        let base_meta = read_base_meta(base).await?;
 
         std::fs::copy(base, output)?;
 
@@ -219,7 +219,7 @@ impl SlotPatchManager {
         // Read existing provenance + obs/var index before opening R/W.
         // The reader handle is dropped when read_append_context returns, so
         // open_for_append below gets an exclusive handle with no concurrent reader.
-        let (base_meta, mut prov) = read_append_context(into)?;
+        let (base_meta, mut prov) = read_append_context(into).await?;
 
         let mut writer = H5AdWriter::open_for_append(into)?;
 
@@ -239,19 +239,11 @@ impl SlotPatchManager {
 // ---------------------------------------------------------------------------
 
 /// Read obs/var index and shape from an h5ad file without streaming X.
-fn read_base_meta(path: &Path) -> Result<BaseMeta> {
+async fn read_base_meta(path: &Path) -> Result<BaseMeta> {
     let mut reader = H5AdReader::open(path, 1)?;
     let (n_obs, n_vars) = reader.shape();
-    // Use a tiny runtime just for the metadata reads (obs/var are cheap).
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-    let (obs, var) = rt.block_on(async {
-        let obs = reader.obs().await?;
-        let var = reader.var().await?;
-        Ok::<_, ScxError>((obs, var))
-    })?;
+    let obs = reader.obs().await?;
+    let var = reader.var().await?;
     Ok(BaseMeta {
         n_obs,
         n_vars,
@@ -263,19 +255,12 @@ fn read_base_meta(path: &Path) -> Result<BaseMeta> {
 /// Read existing provenance + obs/var index from a file that was previously
 /// created by `run_create`.  The reader is dropped before `open_for_append`
 /// is called so HDF5 never has two concurrent handles to the same file.
-fn read_append_context(path: &Path) -> Result<(BaseMeta, SlotProvenance)> {
+async fn read_append_context(path: &Path) -> Result<(BaseMeta, SlotProvenance)> {
     let mut reader = H5AdReader::open(path, 1)?;
     let (n_obs, n_vars) = reader.shape();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-    let (obs, var, uns) = rt.block_on(async {
-        let obs = reader.obs().await?;
-        let var = reader.var().await?;
-        let uns = reader.uns().await?;
-        Ok::<_, ScxError>((obs, var, uns))
-    })?;
+    let obs = reader.obs().await?;
+    let var = reader.var().await?;
+    let uns = reader.uns().await?;
 
     let base_meta = BaseMeta {
         n_obs,
