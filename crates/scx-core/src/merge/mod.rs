@@ -9,6 +9,7 @@ use crate::{
     error::{Result, ScxError},
     h5ad::{H5AdReader, H5AdWriter},
     h5seurat::open_h5seurat,
+    ir::DenseMatrix,
     stream::{DatasetReader, DatasetWriter},
 };
 
@@ -217,7 +218,7 @@ impl SlotPatchManager {
             let mut reader = open_patch_reader(&patch.source, chunk_size)?;
 
             for slot in patch.slots.clone() {
-                match &slot {
+                let applied = match &slot {
                     SlotSelector::Layer(name) => {
                         apply_layer_patch(
                             &mut writer,
@@ -227,15 +228,51 @@ impl SlotPatchManager {
                             patch.conflict,
                             chunk_size,
                         )
-                        .await?;
-                        prov.add_slot(slot.hdf5_path(), &patch.source, &patch_sha256);
+                        .await
                     }
-                    other => {
-                        return Err(ScxError::InvalidFormat(format!(
-                            "slot type '{}' not yet supported (coming in v0.2.0 chunk 3)",
-                            other.hdf5_path()
-                        )));
+                    SlotSelector::ObsColumn(name) => {
+                        apply_obs_column_patch(
+                            &mut writer,
+                            name,
+                            reader.as_mut(),
+                            &base_meta,
+                            patch.conflict,
+                        )
+                        .await
                     }
+                    SlotSelector::VarColumn(name) => {
+                        apply_var_column_patch(
+                            &mut writer,
+                            name,
+                            reader.as_mut(),
+                            &base_meta,
+                            patch.conflict,
+                        )
+                        .await
+                    }
+                    SlotSelector::Obsm(name) => {
+                        apply_obsm_patch(
+                            &mut writer,
+                            name,
+                            reader.as_mut(),
+                            &base_meta,
+                            patch.conflict,
+                        )
+                        .await
+                    }
+                    SlotSelector::Varm(name) => {
+                        apply_varm_patch(
+                            &mut writer,
+                            name,
+                            reader.as_mut(),
+                            &base_meta,
+                            patch.conflict,
+                        )
+                        .await
+                    }
+                };
+                if applied? {
+                    prov.add_slot(slot.hdf5_path(), &patch.source, &patch_sha256);
                 }
             }
         }
@@ -289,9 +326,7 @@ fn open_patch_reader(
 }
 
 /// Stream one named layer from `reader` into `writer`, with conflict handling.
-///
-/// For Chunk 2 the patch must have the same shape as the base; obs-order
-/// reindexing for mis-ordered patches comes in Chunk 3.
+/// Returns `Ok(true)` if written, `Ok(false)` if skipped.
 async fn apply_layer_patch(
     writer: &mut H5AdWriter,
     name: &str,
@@ -299,7 +334,7 @@ async fn apply_layer_patch(
     base_meta: &BaseMeta,
     conflict: ConflictPolicy,
     chunk_size: usize,
-) -> Result<()> {
+) -> Result<bool> {
     let (patch_n_obs, patch_n_vars) = reader.shape();
     if patch_n_obs != base_meta.n_obs || patch_n_vars != base_meta.n_vars {
         return Err(ScxError::InvalidFormat(format!(
@@ -319,7 +354,7 @@ async fn apply_layer_patch(
             }
             ConflictPolicy::Skip => {
                 tracing::info!(slot = slot_path, "skipping existing slot (conflict=skip)");
-                return Ok(());
+                return Ok(false);
             }
             ConflictPolicy::Overwrite => {
                 writer.unlink_child("layers", name)?;
@@ -343,7 +378,168 @@ async fn apply_layer_patch(
     }
     writer.end_sparse().await?;
 
-    Ok(())
+    Ok(true)
+}
+
+/// Patch a single obs column; returns `Ok(true)` if written, `Ok(false)` if skipped.
+async fn apply_obs_column_patch(
+    writer: &mut H5AdWriter,
+    name: &str,
+    reader: &mut dyn DatasetReader,
+    base_meta: &BaseMeta,
+    conflict: ConflictPolicy,
+) -> Result<bool> {
+    if !check_column_conflict(writer, "obs", name, conflict)? {
+        return Ok(false);
+    }
+    let patch_obs = reader.obs().await?;
+    let col = patch_obs
+        .columns
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| ScxError::InvalidFormat(format!("column '{name}' not found in patch obs")))?;
+    let reindex = align::build_obs_reindex(&base_meta.obs_index, &patch_obs.index)?;
+    writer.add_obs_column(name, &align::reindex_column(&col.data, &reindex))?;
+    Ok(true)
+}
+
+/// Patch a single var column; returns `Ok(true)` if written, `Ok(false)` if skipped.
+async fn apply_var_column_patch(
+    writer: &mut H5AdWriter,
+    name: &str,
+    reader: &mut dyn DatasetReader,
+    base_meta: &BaseMeta,
+    conflict: ConflictPolicy,
+) -> Result<bool> {
+    if !check_column_conflict(writer, "var", name, conflict)? {
+        return Ok(false);
+    }
+    let patch_var = reader.var().await?;
+    let col = patch_var
+        .columns
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| ScxError::InvalidFormat(format!("column '{name}' not found in patch var")))?;
+    let reindex = align::build_var_reindex(&base_meta.var_index, &patch_var.index)?;
+    writer.add_var_column(name, &align::reindex_column(&col.data, &reindex))?;
+    Ok(true)
+}
+
+/// Patch a single obsm entry; returns `Ok(true)` if written, `Ok(false)` if skipped.
+async fn apply_obsm_patch(
+    writer: &mut H5AdWriter,
+    name: &str,
+    reader: &mut dyn DatasetReader,
+    base_meta: &BaseMeta,
+    conflict: ConflictPolicy,
+) -> Result<bool> {
+    if !check_dict_conflict(writer, "obsm", name, conflict)? {
+        return Ok(false);
+    }
+    let patch_obs = reader.obs().await?;
+    let obsm = reader.obsm().await?;
+    let mat = obsm
+        .map
+        .get(name)
+        .ok_or_else(|| ScxError::InvalidFormat(format!("obsm entry '{name}' not found in patch")))?;
+    let reindex = align::build_obs_reindex(&base_meta.obs_index, &patch_obs.index)?;
+    writer.add_obsm_entry(name, &reindex_dense_rows(mat, &reindex))?;
+    Ok(true)
+}
+
+/// Patch a single varm entry; returns `Ok(true)` if written, `Ok(false)` if skipped.
+async fn apply_varm_patch(
+    writer: &mut H5AdWriter,
+    name: &str,
+    reader: &mut dyn DatasetReader,
+    base_meta: &BaseMeta,
+    conflict: ConflictPolicy,
+) -> Result<bool> {
+    if !check_dict_conflict(writer, "varm", name, conflict)? {
+        return Ok(false);
+    }
+    let patch_var = reader.var().await?;
+    let varm = reader.varm().await?;
+    let mat = varm
+        .map
+        .get(name)
+        .ok_or_else(|| ScxError::InvalidFormat(format!("varm entry '{name}' not found in patch")))?;
+    let reindex = align::build_var_reindex(&base_meta.var_index, &patch_var.index)?;
+    writer.add_varm_entry(name, &reindex_dense_rows(mat, &reindex))?;
+    Ok(true)
+}
+
+/// Conflict-policy gating for obs/var column slots.
+/// Returns `Ok(true)` to proceed, `Ok(false)` to skip, `Err` on conflict=error.
+fn check_column_conflict(
+    writer: &mut H5AdWriter,
+    group: &str,
+    name: &str,
+    conflict: ConflictPolicy,
+) -> Result<bool> {
+    if !writer.child_exists(group, name) {
+        return Ok(true);
+    }
+    match conflict {
+        ConflictPolicy::Error => Err(ScxError::InvalidFormat(format!(
+            "slot '{group}/{name}' already exists (use --on-conflict skip|overwrite)"
+        ))),
+        ConflictPolicy::Skip => {
+            tracing::info!(slot = format!("{group}/{name}"), "skipping existing slot (conflict=skip)");
+            Ok(false)
+        }
+        ConflictPolicy::Overwrite => {
+            writer.unlink_child(group, name)?;
+            Ok(true)
+        }
+    }
+}
+
+/// Conflict-policy gating for dict entries (obsm/varm datasets).
+/// Returns `Ok(true)` to proceed, `Ok(false)` to skip, `Err` on conflict=error.
+fn check_dict_conflict(
+    writer: &mut H5AdWriter,
+    group: &str,
+    name: &str,
+    conflict: ConflictPolicy,
+) -> Result<bool> {
+    let exists = writer.child_exists(group, name);
+    if !exists {
+        return Ok(true);
+    }
+    let slot_path = format!("{group}/{name}");
+    match conflict {
+        ConflictPolicy::Error => Err(ScxError::InvalidFormat(format!(
+            "slot '{slot_path}' already exists (use --on-conflict skip|overwrite)"
+        ))),
+        ConflictPolicy::Skip => {
+            tracing::info!(slot = slot_path, "skipping existing slot (conflict=skip)");
+            Ok(false)
+        }
+        ConflictPolicy::Overwrite => {
+            writer.unlink_child(group, name)?;
+            Ok(true)
+        }
+    }
+}
+
+/// Reindex rows of a dense matrix according to a row-reindex map.
+/// Rows absent from the patch (None entries) are zero-filled.
+fn reindex_dense_rows(mat: &DenseMatrix, reindex: &[Option<usize>]) -> DenseMatrix {
+    let (_, ncols) = mat.shape;
+    let nrows = reindex.len();
+    let mut data = vec![0.0f64; nrows * ncols];
+    for (out_row, src_row) in reindex.iter().enumerate() {
+        if let Some(i) = src_row {
+            let src = i * ncols;
+            let dst = out_row * ncols;
+            data[dst..dst + ncols].copy_from_slice(&mat.data[src..src + ncols]);
+        }
+    }
+    DenseMatrix {
+        shape: (nrows, ncols),
+        data,
+    }
 }
 
 // ---------------------------------------------------------------------------
