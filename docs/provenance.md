@@ -103,92 +103,55 @@ Files produced by other tools (no `scx_provenance` block) show
 
 ---
 
-## Merge provenance (planned)
+## Merge provenance
 
 `scx merge` assembles multiple pipeline stage outputs into a single h5ad.
-The merged file will carry a full audit trail covering the base file and
-every patch applied.
-
-### CLI
-
-```sh
-scx merge \
-  --base source.h5ad \
-  --patch normalized.h5ad:layers/normalized \
-  --patch hvg.h5ad:var/highly_variable,var/dispersions \
-  --patch pca.h5ad:obsm/X_pca,varm/PCs \
-  --patch graph.h5ad:obsp/connectivities,obsp/distances \
-  --patch meta.h5ad:uns/hvg_params \
-  --tag snakemake_rule=merge_stages \
-  --tag pipeline_version=0.4.1 \
-  --tag genome=GRCh38 \
-  --on-conflict error \
-  --output merged.h5ad
-```
-
-### Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--base` | required | Authoritative source — provides X, obs, var |
-| `--patch file:slot[,slot…]` | repeatable | File to pull slots from |
-| `--tag key=value` | repeatable | Free-form pipeline tags written into provenance |
-| `--on-conflict` | `error` | `error`, `skip`, or `overwrite` |
-| `--chunk-size` | `5000` | Rows per streaming chunk |
-| `--output` | required | Output h5ad path |
-
-### Slot specifier syntax
-
-| Prefix | Slot | Notes |
-|--------|------|-------|
-| `layers/` | `Layers` | Sparse matrix (n_obs × n_vars) |
-| `obsm/` | `Embeddings` | Dense embedding (n_obs × k) |
-| `varm/` | `Varm` | Dense gene embedding (n_vars × k) |
-| `obsp/` | `Obsp` | Sparse cell-cell graph (n_obs × n_obs) |
-| `varp/` | `Varp` | Sparse gene-gene matrix (n_vars × n_vars) |
-| `var/col` | `VarTable` column | Single metadata column |
-| `obs/col` | `ObsTable` column | Single metadata column |
-| `uns/key` | `UnsTable` subtree | Recursive JSON subtree |
-
-### Alignment
-
-**obs:** each patch's `obs.index` must be a subset of the base. Rows are
-reindexed to match base order — handles filtered patches.
-
-**var:** each patch's `var.index` must be a subset of the base. Missing
-entries in boolean/float columns are filled with `false` / `NaN` —
-handles HVG-selection patches covering only selected genes.
+The merged file carries a full audit trail: the base file anchor and every
+slot that was patched in. See [merge.md](merge.md) for the full command
+reference.
 
 ### Schema
 
 ```json
 {
-  "scx_version": "0.3.0",
-  "merged_at": "2026-04-17T14:32:00Z",
+  "scx_version": "0.2.0",
   "base": {
     "path": "data/source.h5ad",
     "sha256": "a3f9c1d2…",
-    "n_obs": 8000,
-    "n_vars": 33000
+    "n_obs": 8312,
+    "n_vars": 33694
   },
-  "patches": [
-    { "path": "results/normalized.h5ad", "sha256": "b1c2e3f4…", "slots": ["layers/normalized"] },
-    { "path": "results/hvg.h5ad",        "sha256": "d4e5f6a7…", "slots": ["var/highly_variable", "var/dispersions"] },
-    { "path": "results/pca.h5ad",        "sha256": "c8d9e0f1…", "slots": ["obsm/X_pca", "varm/PCs"] },
-    { "path": "results/graph.h5ad",      "sha256": "e2f3a4b5…", "slots": ["obsp/connectivities", "obsp/distances"] }
-  ],
+  "slots": {
+    "layers/normalized": {
+      "source_path": "results/normalized.h5ad",
+      "sha256": "b1c2e3f4…",
+      "added_at": "2026-04-25T10:04:12Z"
+    },
+    "obsm/X_pca": {
+      "source_path": "results/pca.h5ad",
+      "sha256": "c8d9e0f1…",
+      "added_at": "2026-04-25T10:04:13Z"
+    }
+  },
   "tags": {
-    "snakemake_rule": "merge_stages",
-    "pipeline_version": "0.4.1",
+    "pipeline": "snakemake",
     "genome": "GRCh38"
   }
 }
 ```
 
-| Field | Source |
-|-------|--------|
+| Field | Description |
+|-------|-------------|
 | `scx_version` | `env!("CARGO_PKG_VERSION")` at compile time |
-| `merged_at` | UTC wall-clock at merge start (sidecar only in future) |
 | `base.sha256` | SHA-256 of base file bytes — immutable anchor |
-| `patch.sha256` | SHA-256 of each patch file |
+| `slots.<key>.sha256` | SHA-256 of the patch source file at the time of patching |
+| `slots.<key>.added_at` | UTC timestamp of the patch operation |
 | `tags` | `--tag key=value` flags, verbatim |
+
+### Storage
+
+The provenance block is stored as a single JSON string scalar at
+`uns["scx_provenance"]`. This avoids HDF5 path-separator mangling of slot
+keys that contain `/` (e.g. `layers/normalized`). `H5AdReader.uns()` parses
+the string back to a JSON object transparently, so callers see a normal
+nested structure.
