@@ -80,9 +80,7 @@ fn open_reader(
             let reader = BpcellsDatasetReader::open(input_path, chunk_size)?;
             Ok(Box::new(reader))
         }
-        other => Err(anyhow::anyhow!(
-            "unsupported input format: {other:?}"
-        )),
+        other => Err(anyhow::anyhow!("unsupported input format: {other:?}")),
     }
 }
 
@@ -93,15 +91,11 @@ fn open_reader_metadata_only(input_path: &Path) -> anyhow::Result<Box<dyn Datase
             let reader = scx_core::h5seurat::open_h5seurat(input_path, 1, None, None)?;
             Ok(reader)
         }
-        Some(Format::H5Ad) | None => {
-            Ok(Box::new(H5AdReader::open(input_path, 1)?))
-        }
-        Some(Format::ScxH5) => {
-            Ok(Box::new(ScxH5Reader::open(input_path, 1)?))
-        }
-        Some(Format::BPCells) => {
-            Ok(Box::new(BpcellsDatasetReader::open_metadata_only(input_path)?))
-        }
+        Some(Format::H5Ad) | None => Ok(Box::new(H5AdReader::open(input_path, 1)?)),
+        Some(Format::ScxH5) => Ok(Box::new(ScxH5Reader::open(input_path, 1)?)),
+        Some(Format::BPCells) => Ok(Box::new(BpcellsDatasetReader::open_metadata_only(
+            input_path,
+        )?)),
         other => Err(anyhow::anyhow!("unsupported input format: {other:?}")),
     }
 }
@@ -112,37 +106,46 @@ async fn collect_inspect_info(
     py: Python<'_>,
 ) -> anyhow::Result<PyObject> {
     let (n_obs, n_vars) = reader.shape();
-    let obs         = reader.obs().await?;
-    let var         = reader.var().await?;
-    let obsm        = reader.obsm().await?;
-    let uns         = reader.uns().await?;
+    let obs = reader.obs().await?;
+    let var = reader.var().await?;
+    let obsm = reader.obsm().await?;
+    let uns = reader.uns().await?;
     let layer_metas = reader.layer_metas().await?;
-    let obsp_metas  = reader.obsp_metas().await?;
-    let varm        = reader.varm().await?;
+    let obsp_metas = reader.obsp_metas().await?;
+    let varm = reader.varm().await?;
 
-    let obs_cols:   Vec<&str> = obs.columns.iter().map(|c| c.name.as_str()).collect();
-    let var_cols:   Vec<&str> = var.columns.iter().map(|c| c.name.as_str()).collect();
-    let obsm_keys:  Vec<&str> = obsm.map.keys().map(|s| s.as_str()).collect();
-    let varm_keys:  Vec<&str> = varm.map.keys().map(|s| s.as_str()).collect();
-    let uns_keys:   Vec<String> = uns.raw
+    let obs_cols: Vec<&str> = obs.columns.iter().map(|c| c.name.as_str()).collect();
+    let var_cols: Vec<&str> = var.columns.iter().map(|c| c.name.as_str()).collect();
+    let obsm_keys: Vec<&str> = obsm.map.keys().map(|s| s.as_str()).collect();
+    let varm_keys: Vec<&str> = varm.map.keys().map(|s| s.as_str()).collect();
+    let uns_keys: Vec<String> = uns
+        .raw
         .as_object()
         .map(|o| o.keys().cloned().collect())
         .unwrap_or_default();
 
-    let obs_dtypes: Vec<&str> = obs.columns.iter().map(|c| match &c.data {
-        ColumnData::Float(_)        => "float64",
-        ColumnData::Int(_)          => "int32",
-        ColumnData::Bool(_)         => "bool",
-        ColumnData::String(_)       => "string",
-        ColumnData::Categorical {..}=> "categorical",
-    }).collect();
-    let var_dtypes: Vec<&str> = var.columns.iter().map(|c| match &c.data {
-        ColumnData::Float(_)        => "float64",
-        ColumnData::Int(_)          => "int32",
-        ColumnData::Bool(_)         => "bool",
-        ColumnData::String(_)       => "string",
-        ColumnData::Categorical {..}=> "categorical",
-    }).collect();
+    let obs_dtypes: Vec<&str> = obs
+        .columns
+        .iter()
+        .map(|c| match &c.data {
+            ColumnData::Float(_) => "float64",
+            ColumnData::Int(_) => "int32",
+            ColumnData::Bool(_) => "bool",
+            ColumnData::String(_) => "string",
+            ColumnData::Categorical { .. } => "categorical",
+        })
+        .collect();
+    let var_dtypes: Vec<&str> = var
+        .columns
+        .iter()
+        .map(|c| match &c.data {
+            ColumnData::Float(_) => "float64",
+            ColumnData::Int(_) => "int32",
+            ColumnData::Bool(_) => "bool",
+            ColumnData::String(_) => "string",
+            ColumnData::Categorical { .. } => "categorical",
+        })
+        .collect();
 
     // per-layer and per-obsp nnz stats (free from indptr, no matrix streaming)
     let layer_stats = pyo3::types::PyList::empty_bound(py);
@@ -151,15 +154,21 @@ async fn collect_inspect_info(
         let mut per_row: Vec<u64> = m.indptr.windows(2).map(|w| w[1] - w[0]).collect();
         per_row.sort_unstable();
         let n = per_row.len();
-        let q = |p: f64| if n == 0 { 0u64 } else { per_row[(p * (n - 1) as f64).round() as usize] };
+        let q = |p: f64| {
+            if n == 0 {
+                0u64
+            } else {
+                per_row[(p * (n - 1) as f64).round() as usize]
+            }
+        };
         let entry = pyo3::types::PyDict::new_bound(py);
-        entry.set_item("name",    m.name.as_str())?;
-        entry.set_item("n_obs",   m.shape.0 as i64)?;
-        entry.set_item("n_vars",  m.shape.1 as i64)?;
-        entry.set_item("nnz",     nnz as i64)?;
-        entry.set_item("nnz_q1",  q(0.25) as i64)?;
-        entry.set_item("nnz_med", q(0.5)  as i64)?;
-        entry.set_item("nnz_q3",  q(0.75) as i64)?;
+        entry.set_item("name", m.name.as_str())?;
+        entry.set_item("n_obs", m.shape.0 as i64)?;
+        entry.set_item("n_vars", m.shape.1 as i64)?;
+        entry.set_item("nnz", nnz as i64)?;
+        entry.set_item("nnz_q1", q(0.25) as i64)?;
+        entry.set_item("nnz_med", q(0.5) as i64)?;
+        entry.set_item("nnz_q3", q(0.75) as i64)?;
         entry.set_item("nnz_max", per_row.last().copied().unwrap_or(0) as i64)?;
         layer_stats.append(entry)?;
     }
@@ -170,15 +179,21 @@ async fn collect_inspect_info(
         let mut per_row: Vec<u64> = m.indptr.windows(2).map(|w| w[1] - w[0]).collect();
         per_row.sort_unstable();
         let n = per_row.len();
-        let q = |p: f64| if n == 0 { 0u64 } else { per_row[(p * (n - 1) as f64).round() as usize] };
+        let q = |p: f64| {
+            if n == 0 {
+                0u64
+            } else {
+                per_row[(p * (n - 1) as f64).round() as usize]
+            }
+        };
         let entry = pyo3::types::PyDict::new_bound(py);
-        entry.set_item("name",    m.name.as_str())?;
-        entry.set_item("n_obs",   m.shape.0 as i64)?;
-        entry.set_item("n_vars",  m.shape.1 as i64)?;
-        entry.set_item("nnz",     nnz as i64)?;
-        entry.set_item("nnz_q1",  q(0.25) as i64)?;
-        entry.set_item("nnz_med", q(0.5)  as i64)?;
-        entry.set_item("nnz_q3",  q(0.75) as i64)?;
+        entry.set_item("name", m.name.as_str())?;
+        entry.set_item("n_obs", m.shape.0 as i64)?;
+        entry.set_item("n_vars", m.shape.1 as i64)?;
+        entry.set_item("nnz", nnz as i64)?;
+        entry.set_item("nnz_q1", q(0.25) as i64)?;
+        entry.set_item("nnz_med", q(0.5) as i64)?;
+        entry.set_item("nnz_q3", q(0.75) as i64)?;
         entry.set_item("nnz_max", per_row.last().copied().unwrap_or(0) as i64)?;
         obsp_stats.append(entry)?;
     }
@@ -192,10 +207,10 @@ async fn collect_inspect_info(
         let n = per_row.len();
         let q = |p: f64| per_row[(p * (n - 1) as f64).round() as usize] as i64;
         let s = pyo3::types::PyDict::new_bound(py);
-        s.set_item("nnz",     x_nnz)?;
-        s.set_item("nnz_q1",  q(0.25))?;
+        s.set_item("nnz", x_nnz)?;
+        s.set_item("nnz_q1", q(0.25))?;
         s.set_item("nnz_med", q(0.5))?;
-        s.set_item("nnz_q3",  q(0.75))?;
+        s.set_item("nnz_q3", q(0.75))?;
         s.set_item("nnz_max", *per_row.last().unwrap() as i64)?;
         Some(s)
     } else {
@@ -203,21 +218,21 @@ async fn collect_inspect_info(
     };
 
     let d = pyo3::types::PyDict::new_bound(py);
-    d.set_item("format",     format_name)?;
-    d.set_item("n_obs",      n_obs as i64)?;
-    d.set_item("n_vars",     n_vars as i64)?;
+    d.set_item("format", format_name)?;
+    d.set_item("n_obs", n_obs as i64)?;
+    d.set_item("n_vars", n_vars as i64)?;
     if let Some(s) = x_nnz_stats {
         d.set_item("x_stats", s)?;
     }
-    d.set_item("obs_cols",   obs_cols)?;
+    d.set_item("obs_cols", obs_cols)?;
     d.set_item("obs_dtypes", obs_dtypes)?;
-    d.set_item("var_cols",   var_cols)?;
+    d.set_item("var_cols", var_cols)?;
     d.set_item("var_dtypes", var_dtypes)?;
-    d.set_item("obsm_keys",  obsm_keys)?;
-    d.set_item("layers",     layer_stats)?;
-    d.set_item("uns_keys",   uns_keys)?;
-    d.set_item("obsp",       obsp_stats)?;
-    d.set_item("varm_keys",  varm_keys)?;
+    d.set_item("obsm_keys", obsm_keys)?;
+    d.set_item("layers", layer_stats)?;
+    d.set_item("uns_keys", uns_keys)?;
+    d.set_item("obsp", obsp_stats)?;
+    d.set_item("varm_keys", varm_keys)?;
     Ok(d.unbind().into())
 }
 
@@ -356,10 +371,10 @@ fn scx_inspect_native(py: Python<'_>, input: &str, _chunk_size: usize) -> PyResu
     let fmt = detect_format(input_path);
     let format_name = match fmt {
         Some(Format::H5Seurat) => "H5Seurat",
-        Some(Format::H5Ad)     => "H5AD",
-        Some(Format::ScxH5)    => "ScxH5",
-        Some(Format::BPCells)  => "BPCells",
-        _                      => "unknown",
+        Some(Format::H5Ad) => "H5AD",
+        Some(Format::ScxH5) => "ScxH5",
+        Some(Format::BPCells) => "BPCells",
+        _ => "unknown",
     };
 
     let result = block_on(async {
@@ -384,7 +399,7 @@ fn scx_inspect_native(py: Python<'_>, input: &str, _chunk_size: usize) -> PyResu
 /// Safety: `T` must be a plain-old-data type (no padding, no uninit bytes).
 /// The caller must ensure the slice outlives the returned reference.
 unsafe fn slice_as_bytes<T>(v: &[T]) -> &[u8] {
-    std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * std::mem::size_of::<T>())
+    std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v))
 }
 
 /// A single chunk of rows from a streaming matrix read.
@@ -422,31 +437,19 @@ fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyResult<Py
         TypedVec::U32(_) => "uint32",
     };
     // Safety: Vec<u64/u32/f32/f64> are plain-old-data, no padding.
-    let indptr_bytes: PyObject = pyo3::types::PyBytes::new_bound(
-        py,
-        unsafe { slice_as_bytes(&chunk.data.indptr) },
-    )
-    .into_any()
-    .unbind();
-    let indices_bytes: PyObject = pyo3::types::PyBytes::new_bound(
-        py,
-        unsafe { slice_as_bytes(&chunk.data.indices) },
-    )
-    .into_any()
-    .unbind();
+    let indptr_bytes: PyObject =
+        pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(&chunk.data.indptr) })
+            .into_any()
+            .unbind();
+    let indices_bytes: PyObject =
+        pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(&chunk.data.indices) })
+            .into_any()
+            .unbind();
     let data_bytes: PyObject = match &chunk.data.data {
-        TypedVec::F32(v) => {
-            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
-        }
-        TypedVec::F64(v) => {
-            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
-        }
-        TypedVec::I32(v) => {
-            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
-        }
-        TypedVec::U32(v) => {
-            pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) })
-        }
+        TypedVec::F32(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
+        TypedVec::F64(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
+        TypedVec::I32(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
+        TypedVec::U32(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
     }
     .into_any()
     .unbind();
@@ -506,8 +509,7 @@ fn scx_open_stream(
     let reader = open_reader(&input_path, chunk_size, &assay, &layer).map_err(py_err)?;
     let (_, n_vars) = reader.shape();
 
-    let (tx, rx) =
-        std::sync::mpsc::sync_channel::<std::result::Result<MatrixChunk, String>>(8);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<std::result::Result<MatrixChunk, String>>(8);
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()

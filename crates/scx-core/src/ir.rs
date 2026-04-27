@@ -88,11 +88,11 @@ impl ColumnData {
 
     pub fn dtype_str(&self) -> &'static str {
         match self {
-            ColumnData::Float(_)         => "float64",
-            ColumnData::Int(_)           => "int32",
-            ColumnData::Bool(_)          => "bool",
-            ColumnData::String(_)        => "string",
-            ColumnData::Categorical {..} => "categorical",
+            ColumnData::Float(_) => "float64",
+            ColumnData::Int(_) => "int32",
+            ColumnData::Bool(_) => "bool",
+            ColumnData::String(_) => "string",
+            ColumnData::Categorical { .. } => "categorical",
         }
     }
 }

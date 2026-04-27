@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
+use scx_core::merge::{parse_patch_spec, ConflictPolicy, MergeMode, PatchSpec, SlotPatchManager};
 use serde::Deserialize;
-use scx_core::merge::{ConflictPolicy, MergeMode, PatchSpec, SlotPatchManager, parse_patch_spec};
 
 #[derive(Debug, Deserialize)]
 struct MergeConfig {
@@ -74,7 +74,11 @@ pub async fn run_merge(args: MergeArgs) -> anyhow::Result<()> {
 
 fn build_from_flags(args: &MergeArgs) -> anyhow::Result<SlotPatchManager> {
     let conflict = parse_conflict(&args.on_conflict)?;
-    let mode = resolve_mode(args.base.as_deref(), args.output.as_deref(), args.into.as_deref())?;
+    let mode = resolve_mode(
+        args.base.as_deref(),
+        args.output.as_deref(),
+        args.into.as_deref(),
+    )?;
 
     let mut mgr = SlotPatchManager::new(mode);
     mgr.chunk_size = args.chunk_size;
@@ -86,9 +90,9 @@ fn build_from_flags(args: &MergeArgs) -> anyhow::Result<SlotPatchManager> {
     }
 
     for kv in &args.tags {
-        let (k, v) = kv.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!("--tag must be key=value, got '{kv}'")
-        })?;
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--tag must be key=value, got '{kv}'"))?;
         mgr.add_tag(k, v);
     }
 
@@ -98,11 +102,15 @@ fn build_from_flags(args: &MergeArgs) -> anyhow::Result<SlotPatchManager> {
 fn build_from_config(path: &str, chunk_size: usize) -> anyhow::Result<SlotPatchManager> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("cannot read config '{path}': {e}"))?;
-    let cfg: MergeConfig = serde_yaml::from_str(&src)
-        .map_err(|e| anyhow::anyhow!("invalid config '{path}': {e}"))?;
+    let cfg: MergeConfig =
+        serde_yaml::from_str(&src).map_err(|e| anyhow::anyhow!("invalid config '{path}': {e}"))?;
 
     let conflict: ConflictPolicy = cfg.on_conflict.into();
-    let mode = resolve_mode(cfg.base.as_deref(), cfg.output.as_deref(), cfg.into.as_deref())?;
+    let mode = resolve_mode(
+        cfg.base.as_deref(),
+        cfg.output.as_deref(),
+        cfg.into.as_deref(),
+    )?;
 
     let mut mgr = SlotPatchManager::new(mode);
     mgr.chunk_size = chunk_size;
@@ -155,6 +163,8 @@ fn parse_conflict(s: &str) -> anyhow::Result<ConflictPolicy> {
         "error" => Ok(ConflictPolicy::Error),
         "skip" => Ok(ConflictPolicy::Skip),
         "overwrite" => Ok(ConflictPolicy::Overwrite),
-        other => anyhow::bail!("unknown --on-conflict value '{other}'; use error, skip, or overwrite"),
+        other => {
+            anyhow::bail!("unknown --on-conflict value '{other}'; use error, skip, or overwrite")
+        }
     }
 }

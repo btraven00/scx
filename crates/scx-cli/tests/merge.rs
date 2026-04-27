@@ -110,7 +110,10 @@ fn make_obs_column_h5ad(
             index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
             columns: extra_cols
                 .into_iter()
-                .map(|(name, data)| Column { name: name.to_string(), data })
+                .map(|(name, data)| Column {
+                    name: name.to_string(),
+                    data,
+                })
                 .collect(),
         };
         let var = VarTable {
@@ -162,11 +165,19 @@ fn make_h5ad_with_layer(path: &Path, n_obs: usize, n_vars: usize, layer_name: &s
             shape: (n_obs, n_vars),
             indptr: indptr.clone(),
         };
-        writer.begin_sparse("layers", layer_name, &meta).await.unwrap();
+        writer
+            .begin_sparse("layers", layer_name, &meta)
+            .await
+            .unwrap();
         let layer_chunk = MatrixChunk {
             row_offset: 0,
             nrows: n_obs,
-            data: SparseMatrixCSR { shape: (n_obs, n_vars), indptr, indices, data: TypedVec::F32(data) },
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr,
+                indices,
+                data: TypedVec::F32(data),
+            },
         };
         writer.write_sparse_chunk(&layer_chunk).await.unwrap();
         writer.end_sparse().await.unwrap();
@@ -191,7 +202,10 @@ fn make_h5ad_with_obsm(path: &Path, n_obs: usize, n_vars: usize, obsm_name: &str
         let mat_data: Vec<f64> = (0..n_obs * n_dims).map(|i| i as f64 * 0.1).collect();
         obsm_data.map.insert(
             obsm_name.to_string(),
-            DenseMatrix { shape: (n_obs, n_dims), data: mat_data },
+            DenseMatrix {
+                shape: (n_obs, n_dims),
+                data: mat_data,
+            },
         );
         let mut writer = H5AdWriter::create(path, n_obs, n_vars, DataType::F32).unwrap();
         writer.write_obs(&obs).await.unwrap();
@@ -228,7 +242,12 @@ fn diag_chunk(n_obs: usize, n_vars: usize) -> MatrixChunk {
     MatrixChunk {
         row_offset: 0,
         nrows: n_obs,
-        data: SparseMatrixCSR { shape: (n_obs, n_vars), indptr, indices, data: TypedVec::F32(data) },
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
     }
 }
 
@@ -250,13 +269,19 @@ fn test_merge_create_layer() {
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             assert_eq!(reader.shape(), (10, 8));
@@ -279,23 +304,34 @@ fn test_merge_create_obs_column() {
     with_hdf5(|| {
         make_base_h5ad(&base, 6, 4);
         make_obs_column_h5ad(
-            &patch, 6, 4,
-            vec![("leiden", ColumnData::Categorical {
-                codes: vec![0, 1, 0, 1, 2, 0],
-                levels: vec!["A".into(), "B".into(), "C".into()],
-            })],
+            &patch,
+            6,
+            4,
+            vec![(
+                "leiden",
+                ColumnData::Categorical {
+                    codes: vec![0, 1, 0, 1, 2, 0],
+                    levels: vec!["A".into(), "B".into(), "C".into()],
+                },
+            )],
         );
     });
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:obs/leiden", patch.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:obs/leiden", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let obs = reader.obs().await.unwrap();
@@ -321,13 +357,19 @@ fn test_merge_create_obsm() {
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:obsm/X_pca", patch.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:obsm/X_pca", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let obsm = reader.obsm().await.unwrap();
@@ -356,16 +398,21 @@ fn test_merge_conflict_error_on_existing_layer() {
     // Create-mode: base → output (no layers) + patch "normalized" → success.
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     // Append mode: output now has "normalized"; default policy=error → should fail.
     let second = scx(&[
         "merge",
-        "--into", out.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
+        "--into",
+        out.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
     ]);
     assert_failure(&second);
     let stderr = String::from_utf8_lossy(&second.stderr);
@@ -389,17 +436,23 @@ fn test_merge_conflict_skip() {
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     // Append with skip — output already has "normalized"; should succeed.
     assert_success(&scx(&[
         "merge",
-        "--into", out.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--on-conflict", "skip",
+        "--into",
+        out.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--on-conflict",
+        "skip",
     ]));
 }
 
@@ -417,16 +470,22 @@ fn test_merge_conflict_overwrite() {
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     assert_success(&scx(&[
         "merge",
-        "--into", out.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--on-conflict", "overwrite",
+        "--into",
+        out.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--on-conflict",
+        "overwrite",
     ]));
 }
 
@@ -450,25 +509,39 @@ fn test_merge_append_adds_second_slot() {
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch1.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch1.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     assert_success(&scx(&[
         "merge",
-        "--into", out.to_str().unwrap(),
-        "--patch", &format!("{}:layers/counts", patch2.display()),
+        "--into",
+        out.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/counts", patch2.display()),
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let metas = reader.layer_metas().await.unwrap();
             let names: Vec<&str> = metas.iter().map(|m| m.name.as_str()).collect();
-            assert!(names.contains(&"normalized"), "layer 'normalized' missing after append");
-            assert!(names.contains(&"counts"), "layer 'counts' missing after append");
+            assert!(
+                names.contains(&"normalized"),
+                "layer 'normalized' missing after append"
+            );
+            assert!(
+                names.contains(&"counts"),
+                "layer 'counts' missing after append"
+            );
         });
     });
 }
@@ -491,14 +564,21 @@ fn test_merge_provenance_written_to_uns() {
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--output", out.to_str().unwrap(),
-        "--tag", "pipeline=test",
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
+        "--tag",
+        "pipeline=test",
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let uns = reader.uns().await.unwrap();
@@ -542,17 +622,26 @@ fn test_inspect_shows_merge_provenance() {
 
     assert_success(&scx(&[
         "merge",
-        "--base", base.to_str().unwrap(),
-        "--patch", &format!("{}:layers/normalized", patch.display()),
-        "--output", out.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:layers/normalized", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
     ]));
 
     let inspect_out = scx(&["inspect", out.to_str().unwrap()]);
     assert_success(&inspect_out);
 
     let stdout = String::from_utf8_lossy(&inspect_out.stdout);
-    assert!(stdout.contains("base.path"), "inspect missing 'base.path'\n{stdout}");
-    assert!(stdout.contains("layers/normalized"), "inspect missing slot\n{stdout}");
+    assert!(
+        stdout.contains("base.path"),
+        "inspect missing 'base.path'\n{stdout}"
+    );
+    assert!(
+        stdout.contains("layers/normalized"),
+        "inspect missing slot\n{stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -567,13 +656,21 @@ fn test_export_obs_csv() {
 
     with_hdf5(|| {
         make_obs_column_h5ad(
-            &input, 5, 3,
+            &input,
+            5,
+            3,
             vec![
-                ("n_counts", ColumnData::Float(vec![100.0, 200.0, 150.0, 50.0, 300.0])),
-                ("cell_type", ColumnData::Categorical {
-                    codes: vec![0, 0, 1, 2, 1],
-                    levels: vec!["T".into(), "B".into(), "NK".into()],
-                }),
+                (
+                    "n_counts",
+                    ColumnData::Float(vec![100.0, 200.0, 150.0, 50.0, 300.0]),
+                ),
+                (
+                    "cell_type",
+                    ColumnData::Categorical {
+                        codes: vec![0, 0, 1, 2, 1],
+                        levels: vec!["T".into(), "B".into(), "NK".into()],
+                    },
+                ),
             ],
         );
     });
@@ -581,16 +678,30 @@ fn test_export_obs_csv() {
     assert_success(&scx(&[
         "export",
         input.to_str().unwrap(),
-        "--slot", "obs",
-        "--output", out_csv.to_str().unwrap(),
+        "--slot",
+        "obs",
+        "--output",
+        out_csv.to_str().unwrap(),
     ]));
 
     assert!(out_csv.exists(), "CSV output not created");
     let content = std::fs::read_to_string(&out_csv).unwrap();
-    assert!(content.contains("index"), "CSV missing 'index' column\n{content}");
-    assert!(content.contains("n_counts"), "CSV missing 'n_counts'\n{content}");
-    assert!(content.contains("cell_type"), "CSV missing 'cell_type'\n{content}");
-    assert!(content.contains('T') || content.contains('B'), "CSV missing decoded categories\n{content}");
+    assert!(
+        content.contains("index"),
+        "CSV missing 'index' column\n{content}"
+    );
+    assert!(
+        content.contains("n_counts"),
+        "CSV missing 'n_counts'\n{content}"
+    );
+    assert!(
+        content.contains("cell_type"),
+        "CSV missing 'cell_type'\n{content}"
+    );
+    assert!(
+        content.contains('T') || content.contains('B'),
+        "CSV missing decoded categories\n{content}"
+    );
     let rows: Vec<&str> = content.lines().collect();
     assert_eq!(rows.len(), 6, "expected 6 lines (header + 5 rows)");
 }
@@ -606,8 +717,10 @@ fn test_export_var_csv() {
     assert_success(&scx(&[
         "export",
         input.to_str().unwrap(),
-        "--slot", "var",
-        "--output", out_csv.to_str().unwrap(),
+        "--slot",
+        "var",
+        "--output",
+        out_csv.to_str().unwrap(),
     ]));
 
     let content = std::fs::read_to_string(&out_csv).unwrap();
@@ -627,13 +740,21 @@ fn test_export_obsm_csv() {
     assert_success(&scx(&[
         "export",
         input.to_str().unwrap(),
-        "--slot", "obsm/X_pca",
-        "--output", out_csv.to_str().unwrap(),
+        "--slot",
+        "obsm/X_pca",
+        "--output",
+        out_csv.to_str().unwrap(),
     ]));
 
     let content = std::fs::read_to_string(&out_csv).unwrap();
-    assert!(content.contains("dim_0"), "obsm CSV missing 'dim_0'\n{content}");
-    assert!(content.contains("dim_1"), "obsm CSV missing 'dim_1'\n{content}");
+    assert!(
+        content.contains("dim_0"),
+        "obsm CSV missing 'dim_0'\n{content}"
+    );
+    assert!(
+        content.contains("dim_1"),
+        "obsm CSV missing 'dim_1'\n{content}"
+    );
     let rows: Vec<&str> = content.lines().collect();
     assert_eq!(rows.len(), 7, "expected 7 lines (header + 6 cells)");
 }
@@ -646,7 +767,9 @@ fn test_export_parquet_creates_file() {
 
     with_hdf5(|| {
         make_obs_column_h5ad(
-            &input, 4, 3,
+            &input,
+            4,
+            3,
             vec![("score", ColumnData::Float(vec![0.1, 0.2, 0.3, 0.4]))],
         );
     });
@@ -654,8 +777,10 @@ fn test_export_parquet_creates_file() {
     assert_success(&scx(&[
         "export",
         input.to_str().unwrap(),
-        "--slot", "obs",
-        "--output", out_pq.to_str().unwrap(),
+        "--slot",
+        "obs",
+        "--output",
+        out_pq.to_str().unwrap(),
     ]));
 
     assert!(out_pq.exists(), "Parquet output not created");
@@ -674,7 +799,9 @@ fn test_export_unknown_slot_fails() {
     assert_failure(&scx(&[
         "export",
         input.to_str().unwrap(),
-        "--slot", "obsp/nn",
-        "--output", out_csv.to_str().unwrap(),
+        "--slot",
+        "obsp/nn",
+        "--output",
+        out_csv.to_str().unwrap(),
     ]));
 }

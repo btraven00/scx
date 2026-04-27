@@ -55,10 +55,7 @@ pub async fn run_export(args: ExportArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn build_dataframe(
-    reader: &mut dyn DatasetReader,
-    slot: &str,
-) -> anyhow::Result<DataFrame> {
+async fn build_dataframe(reader: &mut dyn DatasetReader, slot: &str) -> anyhow::Result<DataFrame> {
     match slot {
         "obs" => {
             let obs = reader.obs().await?;
@@ -81,16 +78,11 @@ async fn build_dataframe(
             columns.push(Column::new("index".into(), obs.index.as_slice()));
             for c in 0..ncols {
                 let col_vals: Vec<f64> = (0..nrows).map(|r| mat.data[r * ncols + c]).collect();
-                columns.push(Column::new(
-                    format!("dim_{c}").into(),
-                    col_vals.as_slice(),
-                ));
+                columns.push(Column::new(format!("dim_{c}").into(), col_vals.as_slice()));
             }
             Ok(DataFrame::new(columns)?)
         }
-        other => anyhow::bail!(
-            "unsupported slot '{other}'; use obs, var, or obsm/<name>"
-        ),
+        other => anyhow::bail!("unsupported slot '{other}'; use obs, var, or obsm/<name>"),
     }
 }
 
@@ -122,12 +114,7 @@ fn column_data_to_column(name: &str, data: &ColumnData) -> anyhow::Result<Column
         ColumnData::Categorical { codes, levels } => {
             let decoded: Vec<&str> = codes
                 .iter()
-                .map(|&c| {
-                    levels
-                        .get(c as usize)
-                        .map(|s| s.as_str())
-                        .unwrap_or("")
-                })
+                .map(|&c| levels.get(c as usize).map(|s| s.as_str()).unwrap_or(""))
                 .collect();
             Column::new(name, decoded.as_slice())
         }

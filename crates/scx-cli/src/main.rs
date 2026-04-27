@@ -997,7 +997,7 @@ fn fmt_stat(v: f64) -> String {
     let abs = v.abs();
     if v == 0.0 {
         "0".to_string()
-    } else if abs >= 0.001 && abs < 100_000.0 {
+    } else if (0.001..100_000.0).contains(&abs) {
         let s = format!("{:.4}", v);
         s.trim_end_matches('0').trim_end_matches('.').to_string()
     } else {
@@ -1017,7 +1017,12 @@ fn indptr_row_stats(indptr: &[u64], n_rows: usize, n_cols: usize) -> String {
     let q = |p: f64| per_row[(p * (n - 1) as f64).round() as usize];
     format!(
         "nnz={}  sparse={:.1}%  nnz/cell Q1={}  med={}  Q3={}  max={}",
-        nnz, sparsity, q(0.25), q(0.5), q(0.75), per_row[n - 1]
+        nnz,
+        sparsity,
+        q(0.25),
+        q(0.5),
+        q(0.75),
+        per_row[n - 1]
     )
 }
 
@@ -1035,13 +1040,15 @@ fn numeric_stats(data: &ColumnData) -> String {
 
     // Binary {0, 1} column — show counts instead of quartiles
     if vals[0] >= 0.0 && vals[n - 1] <= 1.0 {
-        let ones  = vals.iter().filter(|&&v| v == 1.0).count();
+        let ones = vals.iter().filter(|&&v| v == 1.0).count();
         let zeros = n - ones;
         if ones + zeros == n {
             return format!(
                 "bool-like  0: {} ({:.1}%)  1: {} ({:.1}%)",
-                zeros, 100.0 * zeros as f64 / n as f64,
-                ones,  100.0 * ones  as f64 / n as f64,
+                zeros,
+                100.0 * zeros as f64 / n as f64,
+                ones,
+                100.0 * ones as f64 / n as f64,
             );
         }
     }
@@ -1049,8 +1056,11 @@ fn numeric_stats(data: &ColumnData) -> String {
     let q = |p: f64| vals[(p * (n - 1) as f64).round() as usize];
     format!(
         "min={}  Q1={}  med={}  Q3={}  max={}",
-        fmt_stat(vals[0]), fmt_stat(q(0.25)), fmt_stat(q(0.5)),
-        fmt_stat(q(0.75)), fmt_stat(vals[n - 1])
+        fmt_stat(vals[0]),
+        fmt_stat(q(0.25)),
+        fmt_stat(q(0.5)),
+        fmt_stat(q(0.75)),
+        fmt_stat(vals[n - 1])
     )
 }
 
@@ -1264,10 +1274,7 @@ async fn inspect(
 
     // ── provenance + uns ─────────────────────────────────────────────────────
     let uns = reader.uns().await?;
-    let prov = uns
-        .raw
-        .as_object()
-        .and_then(|o| o.get("scx_provenance"));
+    let prov = uns.raw.as_object().and_then(|o| o.get("scx_provenance"));
 
     println!("{}", bold_cyan!("provenance"));
     match prov {
@@ -1327,10 +1334,7 @@ async fn inspect(
                                 .unwrap_or("?");
                             let sha = entry.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
                             let sha_short = &sha[..12.min(sha.len())];
-                            let at = entry
-                                .get("added_at")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let at = entry.get("added_at").and_then(|v| v.as_str()).unwrap_or("");
                             println!(
                                 "  {:<38} {}  {}  {}",
                                 key,
@@ -1347,10 +1351,12 @@ async fn inspect(
     }
     println!();
 
-    let uns_obj_filtered: Option<Vec<(&String, &serde_json::Value)>> = uns
-        .raw
-        .as_object()
-        .map(|o| o.iter().filter(|(k, _)| k.as_str() != "scx_provenance").collect());
+    let uns_obj_filtered: Option<Vec<(&String, &serde_json::Value)>> =
+        uns.raw.as_object().map(|o| {
+            o.iter()
+                .filter(|(k, _)| k.as_str() != "scx_provenance")
+                .collect()
+        });
 
     if uns.raw.is_null() {
         section("uns", 0, "keys");
