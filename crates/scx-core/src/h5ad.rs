@@ -110,9 +110,9 @@ impl H5AdWriter {
     pub fn open_for_append<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open_rw(path.as_ref())?;
 
-        let x_grp = file.group("X").map_err(|_| {
-            ScxError::InvalidFormat("missing /X — not a valid H5AD file".into())
-        })?;
+        let x_grp = file
+            .group("X")
+            .map_err(|_| ScxError::InvalidFormat("missing /X — not a valid H5AD file".into()))?;
         let shape_attr = x_grp
             .attr("shape")
             .map_err(|_| ScxError::InvalidFormat("missing X/shape attribute".into()))?;
@@ -726,7 +726,12 @@ impl DatasetWriter for H5AdWriter {
 
 /// Append a single column to an existing dataframe group (`/obs` or `/var`),
 /// keeping the `column-order` attribute in sync.
-fn add_dataframe_column(file: &File, group_name: &str, col_name: &str, data: &ColumnData) -> Result<()> {
+fn add_dataframe_column(
+    file: &File,
+    group_name: &str,
+    col_name: &str,
+    data: &ColumnData,
+) -> Result<()> {
     let grp = file.group(group_name)?;
 
     // Read existing column-order (tolerate missing attr for older files).
@@ -762,7 +767,12 @@ fn add_dataframe_column(file: &File, group_name: &str, col_name: &str, data: &Co
 
 /// Add a dense 2-D matrix as a named entry inside `/obsm` or `/varm`.
 /// Creates the parent dict group with encoding attrs if it does not exist.
-fn add_dense_dict_entry(file: &File, group_name: &str, entry_name: &str, mat: &DenseMatrix) -> Result<()> {
+fn add_dense_dict_entry(
+    file: &File,
+    group_name: &str,
+    entry_name: &str,
+    mat: &DenseMatrix,
+) -> Result<()> {
     let grp = match file.group(group_name) {
         Ok(g) => g,
         Err(_) => {
@@ -1373,9 +1383,7 @@ fn ad_dataset_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
             if is_scalar {
                 let s = match ds.dtype()?.to_descriptor()? {
-                    TypeDescriptor::VarLenUnicode => {
-                        ds.read_scalar::<VarLenUnicode>()?.to_string()
-                    }
+                    TypeDescriptor::VarLenUnicode => ds.read_scalar::<VarLenUnicode>()?.to_string(),
                     _ => ds.read_scalar::<hdf5::types::VarLenAscii>()?.to_string(),
                 };
                 Ok(serde_json::Value::String(s))
