@@ -1274,10 +1274,7 @@ async fn inspect(
 
     // ── provenance + uns ─────────────────────────────────────────────────────
     let uns = reader.uns().await?;
-    let prov = uns
-        .raw
-        .as_object()
-        .and_then(|o| o.get("scx_provenance"));
+    let prov = uns.raw.as_object().and_then(|o| o.get("scx_provenance"));
 
     println!("{}", bold_cyan!("provenance"));
     match prov {
@@ -1337,10 +1334,7 @@ async fn inspect(
                                 .unwrap_or("?");
                             let sha = entry.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
                             let sha_short = &sha[..12.min(sha.len())];
-                            let at = entry
-                                .get("added_at")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let at = entry.get("added_at").and_then(|v| v.as_str()).unwrap_or("");
                             println!(
                                 "  {:<38} {}  {}  {}",
                                 key,
@@ -1357,10 +1351,12 @@ async fn inspect(
     }
     println!();
 
-    let uns_obj_filtered: Option<Vec<(&String, &serde_json::Value)>> = uns
-        .raw
-        .as_object()
-        .map(|o| o.iter().filter(|(k, _)| k.as_str() != "scx_provenance").collect());
+    let uns_obj_filtered: Option<Vec<(&String, &serde_json::Value)>> =
+        uns.raw.as_object().map(|o| {
+            o.iter()
+                .filter(|(k, _)| k.as_str() != "scx_provenance")
+                .collect()
+        });
 
     if uns.raw.is_null() {
         section("uns", 0, "keys");

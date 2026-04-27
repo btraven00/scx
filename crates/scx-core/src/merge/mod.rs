@@ -203,7 +203,14 @@ impl SlotPatchManager {
             prov.set_tag(k, v);
         }
 
-        apply_patches(&mut writer, &mut self.patches, &base_meta, &mut prov, chunk_size).await?;
+        apply_patches(
+            &mut writer,
+            &mut self.patches,
+            &base_meta,
+            &mut prov,
+            chunk_size,
+        )
+        .await?;
 
         let prov_json = prov
             .to_json()
@@ -223,7 +230,14 @@ impl SlotPatchManager {
 
         let mut writer = H5AdWriter::open_for_append(into)?;
 
-        apply_patches(&mut writer, &mut self.patches, &base_meta, &mut prov, chunk_size).await?;
+        apply_patches(
+            &mut writer,
+            &mut self.patches,
+            &base_meta,
+            &mut prov,
+            chunk_size,
+        )
+        .await?;
 
         let prov_json = prov
             .to_json()
@@ -287,7 +301,7 @@ async fn read_append_context(path: &Path) -> Result<(BaseMeta, SlotProvenance)> 
 /// written slot into `prov`.
 async fn apply_patches(
     writer: &mut H5AdWriter,
-    patches: &mut Vec<PatchSpec>,
+    patches: &mut [PatchSpec],
     base_meta: &BaseMeta,
     prov: &mut SlotProvenance,
     chunk_size: usize,
@@ -305,13 +319,23 @@ async fn apply_patches(
         for slot in &patch.slots {
             let applied = match slot {
                 SlotSelector::Layer(name) => {
-                    apply_layer_patch(writer, name, reader.as_mut(), base_meta, conflict, chunk_size).await?
+                    apply_layer_patch(
+                        writer,
+                        name,
+                        reader.as_mut(),
+                        base_meta,
+                        conflict,
+                        chunk_size,
+                    )
+                    .await?
                 }
                 SlotSelector::ObsColumn(name) => {
-                    apply_obs_column_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
+                    apply_obs_column_patch(writer, name, reader.as_mut(), base_meta, conflict)
+                        .await?
                 }
                 SlotSelector::VarColumn(name) => {
-                    apply_var_column_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
+                    apply_var_column_patch(writer, name, reader.as_mut(), base_meta, conflict)
+                        .await?
                 }
                 SlotSelector::Obsm(name) => {
                     apply_obsm_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
@@ -329,10 +353,7 @@ async fn apply_patches(
 }
 
 /// Open a reader for any supported format using content-based detection.
-fn open_patch_reader(
-    path: &Path,
-    chunk_size: usize,
-) -> Result<Box<dyn DatasetReader + Send>> {
+fn open_patch_reader(path: &Path, chunk_size: usize) -> Result<Box<dyn DatasetReader + Send>> {
     let fmt = sniff_dir(path).or_else(|| sniff(path));
     Ok(match fmt {
         Some(Format::BPCells) => Box::new(BpcellsDatasetReader::open(path, chunk_size)?),
@@ -413,7 +434,9 @@ async fn apply_obs_column_patch(
         .columns
         .iter()
         .find(|c| c.name == name)
-        .ok_or_else(|| ScxError::InvalidFormat(format!("column '{name}' not found in patch obs")))?;
+        .ok_or_else(|| {
+            ScxError::InvalidFormat(format!("column '{name}' not found in patch obs"))
+        })?;
     let reindex = align::build_obs_reindex(&base_meta.obs_index, &patch_obs.index)?;
     writer.add_obs_column(name, &align::reindex_column(&col.data, &reindex))?;
     Ok(true)
@@ -435,7 +458,9 @@ async fn apply_var_column_patch(
         .columns
         .iter()
         .find(|c| c.name == name)
-        .ok_or_else(|| ScxError::InvalidFormat(format!("column '{name}' not found in patch var")))?;
+        .ok_or_else(|| {
+            ScxError::InvalidFormat(format!("column '{name}' not found in patch var"))
+        })?;
     let reindex = align::build_var_reindex(&base_meta.var_index, &patch_var.index)?;
     writer.add_var_column(name, &align::reindex_column(&col.data, &reindex))?;
     Ok(true)
@@ -454,10 +479,9 @@ async fn apply_obsm_patch(
     }
     let patch_obs = reader.obs().await?;
     let obsm = reader.obsm().await?;
-    let mat = obsm
-        .map
-        .get(name)
-        .ok_or_else(|| ScxError::InvalidFormat(format!("obsm entry '{name}' not found in patch")))?;
+    let mat = obsm.map.get(name).ok_or_else(|| {
+        ScxError::InvalidFormat(format!("obsm entry '{name}' not found in patch"))
+    })?;
     let reindex = align::build_obs_reindex(&base_meta.obs_index, &patch_obs.index)?;
     writer.add_obsm_entry(name, &reindex_dense_rows(mat, &reindex))?;
     Ok(true)
@@ -476,10 +500,9 @@ async fn apply_varm_patch(
     }
     let patch_var = reader.var().await?;
     let varm = reader.varm().await?;
-    let mat = varm
-        .map
-        .get(name)
-        .ok_or_else(|| ScxError::InvalidFormat(format!("varm entry '{name}' not found in patch")))?;
+    let mat = varm.map.get(name).ok_or_else(|| {
+        ScxError::InvalidFormat(format!("varm entry '{name}' not found in patch"))
+    })?;
     let reindex = align::build_var_reindex(&base_meta.var_index, &patch_var.index)?;
     writer.add_varm_entry(name, &reindex_dense_rows(mat, &reindex))?;
     Ok(true)
@@ -501,7 +524,10 @@ fn check_column_conflict(
             "slot '{group}/{name}' already exists (use --on-conflict skip|overwrite)"
         ))),
         ConflictPolicy::Skip => {
-            tracing::info!(slot = format!("{group}/{name}"), "skipping existing slot (conflict=skip)");
+            tracing::info!(
+                slot = format!("{group}/{name}"),
+                "skipping existing slot (conflict=skip)"
+            );
             Ok(false)
         }
         ConflictPolicy::Overwrite => {
