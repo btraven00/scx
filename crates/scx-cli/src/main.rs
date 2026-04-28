@@ -19,6 +19,7 @@ use scx_core::{
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     provenance::{self, OutputInfo, ProvenanceRecord, SourceInfo},
     stream::{DatasetReader, DatasetWriter},
+    tenx::{read_tenx_h5, walk_h5, H5Node, H5NodeKind},
     validate::{run_validation, ValidationSchema},
 };
 
@@ -30,7 +31,7 @@ enum Cli {
     /// Input auto-detected by content:
     ///   .h5seurat  — SeuratDisk H5Seurat (Seurat v3/v4)
     ///   .h5ad      — AnnData H5AD (CSR X only)
-    ///   .h5        — SCX internal HDF5 schema
+    ///   .h5        — SCX internal HDF5 schema, or 10x HDF5 (inspect only)
     ///
     /// Output format selected by extension:
     ///   .h5ad      — AnnData H5AD  (default)
@@ -94,6 +95,13 @@ enum Cli {
     ///
     /// Prints format, shape, and a summary of every slot (obs, var, obsm,
     /// layers, obsp, varp, varm, uns) without converting.
+    ///
+    /// For 10x HDF5 files (Cell Ranger output), shows barcode/feature counts
+    /// and feature-type breakdown instead of obs/var slots.
+    ///
+    /// For any other valid HDF5 file (plain/unrecognized), prints a depth-2
+    /// tree of groups and datasets with shapes and dtypes — useful for
+    /// exploring intermediate files saved in HDF5.
     Inspect {
         /// Input file
         input: String,
@@ -325,6 +333,12 @@ async fn run() -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!("cannot open NPY dir '{input}': {e}"))?;
                     run_validation(&mut r, &schema_parsed, &input, &schema).await?
                 }
+                Some(Format::TenxH5) => {
+                    anyhow::bail!("'{}' is a 10x HDF5 file — validation requires a single-cell format with obs/var metadata (H5AD, H5Seurat, etc.)", input)
+                }
+                Some(Format::PlainH5) => {
+                    anyhow::bail!("'{}' is an unrecognized HDF5 file — use 'scx inspect' to explore its structure", input)
+                }
             };
 
             if json {
@@ -378,6 +392,14 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::ScxH5) | None => {
                     let mut r = ScxH5Reader::open(input_path, chunk)?;
                     inspect(&mut r, &input, "SCX H5").await?;
+                }
+                Some(Format::TenxH5) => {
+                    let info = read_tenx_h5(input_path)?;
+                    inspect_tenx(&info, &input);
+                }
+                Some(Format::PlainH5) => {
+                    let nodes = walk_h5(input_path, 2)?;
+                    inspect_plain_h5(&nodes, &input);
                 }
             }
         }
@@ -435,6 +457,12 @@ async fn run() -> anyhow::Result<()> {
             let output_path = Path::new(&output);
 
             let (n_obs, n_vars) = match fmt {
+                Some(Format::TenxH5) => {
+                    anyhow::bail!("'{}' is a 10x HDF5 file — conversion not yet supported; use 'scx inspect' to explore it", input)
+                }
+                Some(Format::PlainH5) => {
+                    anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot convert; use 'scx inspect' to explore its structure", input)
+                }
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
                     let mut reader = NpyIrReader::open(input_path, chunk_size)?;
@@ -594,6 +622,15 @@ async fn run() -> anyhow::Result<()> {
                 });
 
             let dataset = match fmt {
+                Some(Format::TenxH5) => {
+                    anyhow::bail!(
+                        "'{}' is a 10x HDF5 file — snapshot not yet supported",
+                        input
+                    )
+                }
+                Some(Format::PlainH5) => {
+                    anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot snapshot; use 'scx inspect' to explore its structure", input)
+                }
                 Some(Format::NpyDir) => NpyIrReader::open(input_path, chunk_size)?.into_dataset(),
                 Some(Format::BPCells) => {
                     materialise_dataset(
@@ -1384,6 +1421,171 @@ async fn inspect(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 10x HDF5 inspect
+// ---------------------------------------------------------------------------
+
+fn inspect_tenx(info: &scx_core::tenx::TenxH5Info, path: &str) {
+    use owo_colors::OwoColorize;
+    use owo_colors::Stream::Stdout;
+
+    macro_rules! bold {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bold())
+        };
+    }
+    macro_rules! cyan {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_cyan())
+        };
+    }
+    macro_rules! green {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_green())
+        };
+    }
+    macro_rules! dim {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.dimmed())
+        };
+    }
+    macro_rules! yellow {
+        ($x:expr) => {{
+            use owo_colors::Style;
+            $x.if_supports_color(Stdout, |t| t.style(Style::new().bright_yellow()))
+        }};
+    }
+    macro_rules! bold_cyan {
+        ($x:expr) => {{
+            use owo_colors::Style;
+            $x.if_supports_color(Stdout, |t| t.style(Style::new().bold().bright_cyan()))
+        }};
+    }
+
+    println!("{} {}", bold!("File   :"), green!(path));
+    println!("{} {}", bold!("Format :"), cyan!("10x HDF5"));
+    println!(
+        "{} {} {} × {} {}",
+        bold!("Shape  :"),
+        yellow!(info.n_barcodes),
+        dim!("barcodes"),
+        yellow!(info.n_features),
+        dim!("features"),
+    );
+    if let Some(genome) = &info.genome {
+        println!("{} {}", bold!("Genome :"), dim!(genome.as_str()));
+    }
+    println!();
+
+    println!(
+        "{} {}{}{}",
+        bold_cyan!("features"),
+        bold!("("),
+        yellow!(info.feature_types.len()),
+        bold!(" types):"),
+    );
+    if info.feature_types.is_empty() {
+        println!("  {}", dim!("(none)"));
+    } else {
+        for (ft, count) in &info.feature_types {
+            println!("  {:<40} {}", ft, yellow!(count));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plain HDF5 inspect
+// ---------------------------------------------------------------------------
+
+fn inspect_plain_h5(nodes: &[H5Node], path: &str) {
+    use owo_colors::OwoColorize;
+    use owo_colors::Stream::Stdout;
+
+    macro_rules! bold {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bold())
+        };
+    }
+    macro_rules! cyan {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_cyan())
+        };
+    }
+    macro_rules! green {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_green())
+        };
+    }
+    macro_rules! dim {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.dimmed())
+        };
+    }
+
+    println!("{} {}", bold!("File   :"), green!(path));
+    println!("{} {}", bold!("Format :"), cyan!("HDF5 (unrecognized)"));
+    println!();
+
+    fn print_nodes(nodes: &[H5Node], prefix: &str) {
+        use owo_colors::{OwoColorize, Stream::Stdout};
+        macro_rules! dim {
+            ($x:expr) => {
+                $x.if_supports_color(Stdout, |t| t.dimmed())
+            };
+        }
+
+        for (i, node) in nodes.iter().enumerate() {
+            let is_last = i == nodes.len() - 1;
+            let connector = if is_last { "└─" } else { "├─" };
+            let child_prefix = format!("{}{}  ", prefix, if is_last { "  " } else { "│ " });
+
+            match &node.kind {
+                H5NodeKind::Dataset { shape, dtype } => {
+                    let shape_str = if shape.is_empty() {
+                        "scalar".to_string()
+                    } else {
+                        format!(
+                            "({})",
+                            shape
+                                .iter()
+                                .map(|d| d.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    println!(
+                        "{}{}  {}  {}",
+                        prefix,
+                        connector,
+                        node.name,
+                        dim!(format!("{shape_str}  {dtype}").as_str()),
+                    );
+                }
+                H5NodeKind::Group {
+                    children,
+                    truncated,
+                } => {
+                    println!("{}{} {}/", prefix, connector, node.name);
+                    print_nodes(children, &child_prefix);
+                    if *truncated > 0 {
+                        println!(
+                            "{}  {}",
+                            child_prefix,
+                            dim!(format!("… {truncated} more (depth limit)").as_str()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        println!("{}", dim!("(empty file)"));
+    } else {
+        print_nodes(nodes, "");
+    }
 }
 
 // ---------------------------------------------------------------------------

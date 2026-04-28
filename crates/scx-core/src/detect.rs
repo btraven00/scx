@@ -7,6 +7,8 @@
 //! | H5AD     | Root attr `encoding-type = "anndata"` |
 //! | H5Seurat | Root dataset `cell.names` + root attr `active.assay` |
 //! | ScxH5    | Root dataset `X/shape` (SCX internal golden fixture schema) |
+//! | TenxH5   | `/matrix` group with `/matrix/barcodes` + `/matrix/features` |
+//! | PlainH5  | Any valid HDF5 file not matching the above |
 
 use std::path::Path;
 
@@ -24,6 +26,10 @@ pub enum Format {
     NpyDir,
     /// BPCells directory-format matrix (contains `version` + `storage_order`).
     BPCells,
+    /// 10x Genomics HDF5 feature-barcode matrix (Cell Ranger output).
+    TenxH5,
+    /// Valid HDF5 file with no recognized single-cell format fingerprint.
+    PlainH5,
 }
 
 impl Format {
@@ -34,6 +40,8 @@ impl Format {
             Format::ScxH5 => "ScxH5",
             Format::NpyDir => "NpyDir",
             Format::BPCells => "BPCells",
+            Format::TenxH5 => "10x HDF5",
+            Format::PlainH5 => "HDF5 (unrecognized)",
         }
     }
 }
@@ -95,7 +103,17 @@ pub fn sniff(path: &Path) -> Option<Format> {
         return Some(Format::ScxH5);
     }
 
-    None
+    // --- 10x Genomics HDF5 ---
+    // Cell Ranger writes a /matrix group containing /matrix/barcodes and
+    // /matrix/features (both present in v2+ multi-modal outputs).
+    let has_barcodes = file.dataset("matrix/barcodes").is_ok();
+    let has_features = file.group("matrix/features").is_ok();
+    if has_barcodes && has_features {
+        return Some(Format::TenxH5);
+    }
+
+    // Valid HDF5 but no recognised single-cell fingerprint — generic fallback.
+    Some(Format::PlainH5)
 }
 
 #[cfg(test)]

@@ -12,4 +12,5 @@ pub mod npy;
 pub mod provenance;
 pub mod sparse;
 pub mod stream;
+pub mod tenx;
 pub mod validate;
