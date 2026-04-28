@@ -11,7 +11,10 @@ use std::sync::Mutex;
 // HDF5 has global state that is not thread-safe without the --enable-threadsafe
 // compile flag. Serialise all in-process HDF5 calls (fixture building and
 // read-back verification) so parallel test threads don't corrupt each other.
-// CLI subprocess calls don't need the lock (they're separate processes).
+//
+// We also serialise CLI subprocess calls under the same lock: HDF5 file
+// locking on CI container filesystems intermittently returns EAGAIN when
+// multiple processes touch HDF5 files concurrently, even on disjoint paths.
 static HDF5_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_hdf5<T>(f: impl FnOnce() -> T) -> T {
@@ -39,10 +42,12 @@ fn binary_path() -> PathBuf {
 }
 
 fn scx(args: &[&str]) -> std::process::Output {
-    Command::new(binary_path())
-        .args(args)
-        .output()
-        .expect("failed to run scx")
+    with_hdf5(|| {
+        Command::new(binary_path())
+            .args(args)
+            .output()
+            .expect("failed to run scx")
+    })
 }
 
 fn assert_success(out: &std::process::Output) {
