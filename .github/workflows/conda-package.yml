@@ -2,6 +2,10 @@ name: Conda Package
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - 'v*'
 
 env:
   RATTLER_BUILD_VERSION: "0.31.1"
