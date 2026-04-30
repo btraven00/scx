@@ -60,6 +60,39 @@ impl TypedVec {
         }
     }
 
+    /// Cast to the requested `DataType`, reusing the allocation when the type matches.
+    pub fn cast(self, dtype: DataType) -> Self {
+        if self.dtype() == dtype {
+            return self;
+        }
+        match dtype {
+            DataType::F32 => TypedVec::F32(match &self {
+                TypedVec::F32(v) => v.clone(),
+                TypedVec::F64(v) => v.iter().map(|&x| x as f32).collect(),
+                TypedVec::I32(v) => v.iter().map(|&x| x as f32).collect(),
+                TypedVec::U32(v) => v.iter().map(|&x| x as f32).collect(),
+            }),
+            DataType::F64 => TypedVec::F64(match &self {
+                TypedVec::F32(v) => v.iter().map(|&x| x as f64).collect(),
+                TypedVec::F64(v) => v.clone(),
+                TypedVec::I32(v) => v.iter().map(|&x| x as f64).collect(),
+                TypedVec::U32(v) => v.iter().map(|&x| x as f64).collect(),
+            }),
+            DataType::I32 => TypedVec::I32(match &self {
+                TypedVec::F32(v) => v.iter().map(|&x| x as i32).collect(),
+                TypedVec::F64(v) => v.iter().map(|&x| x as i32).collect(),
+                TypedVec::I32(v) => v.clone(),
+                TypedVec::U32(v) => v.iter().map(|&x| x as i32).collect(),
+            }),
+            DataType::U32 => TypedVec::U32(match &self {
+                TypedVec::F32(v) => v.iter().map(|&x| x as u32).collect(),
+                TypedVec::F64(v) => v.iter().map(|&x| x as u32).collect(),
+                TypedVec::I32(v) => v.iter().map(|&x| x as u32).collect(),
+                TypedVec::U32(v) => v.clone(),
+            }),
+        }
+    }
+
     /// Parallel version of `to_f64` — use when len() is large (>100k elements).
     /// Within each rayon thread LLVM auto-vectorises the cast loop to AVX2/SSE4.
     pub fn to_f64_par(&self) -> Vec<f64> {

@@ -19,6 +19,7 @@ use scx_core::{
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     provenance::{self, OutputInfo, ProvenanceRecord, SourceInfo},
     stream::{DatasetReader, DatasetWriter},
+    mtx::{read_mtx_info, TenxMtxReader},
     tenx::{read_tenx_h5, walk_h5, H5Node, H5NodeKind},
     validate::{run_validation, ValidationSchema},
 };
@@ -339,6 +340,11 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — use 'scx inspect' to explore its structure", input)
                 }
+                Some(Format::TenxMtxDir) | Some(Format::MtxFile) => {
+                    let mut r = TenxMtxReader::open(input_path, 1000)
+                        .map_err(|e| anyhow::anyhow!("cannot open MTX '{input}': {e}"))?;
+                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
+                }
             };
 
             if json {
@@ -360,6 +366,7 @@ async fn run() -> anyhow::Result<()> {
             let input_path = Path::new(&input);
             let fmt = detect::sniff_dir(input_path)
                 .or_else(|| detect::sniff(input_path))
+                .or_else(|| detect::sniff_mtx_file(input_path))
                 .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
                     Some("h5seurat") => Some(Format::H5Seurat),
                     Some("h5ad") => Some(Format::H5Ad),
@@ -397,6 +404,19 @@ async fn run() -> anyhow::Result<()> {
                     let info = read_tenx_h5(input_path)?;
                     inspect_tenx(&info, &input);
                 }
+                Some(Format::TenxMtxDir) | Some(Format::MtxFile) => {
+                    let mtx_path = if input_path.is_dir() {
+                        ["matrix.mtx.gz", "matrix.mtx"]
+                            .iter()
+                            .map(|n| input_path.join(n))
+                            .find(|p| p.exists())
+                            .unwrap_or_else(|| input_path.to_path_buf())
+                    } else {
+                        input_path.to_path_buf()
+                    };
+                    let info = read_mtx_info(&mtx_path)?;
+                    inspect_mtx(&info, &input);
+                }
                 Some(Format::PlainH5) => {
                     let nodes = walk_h5(input_path, 2)?;
                     inspect_plain_h5(&nodes, &input);
@@ -431,6 +451,7 @@ async fn run() -> anyhow::Result<()> {
             // NPY snapshot directory takes priority.
             let fmt = detect::sniff_dir(input_path)
                 .or_else(|| detect::sniff(input_path))
+                .or_else(|| detect::sniff_mtx_file(input_path))
                 .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
                     Some("h5seurat") => Some(Format::H5Seurat),
                     Some("h5ad") => Some(Format::H5Ad),
@@ -462,6 +483,46 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot convert; use 'scx inspect' to explore its structure", input)
+                }
+                Some(Format::TenxMtxDir) => {
+                    tracing::info!(path = %input, "detected format: 10x MTX directory");
+                    let mut reader = TenxMtxReader::open(input_path, chunk_size)?;
+                    convert_with_reader(
+                        &mut reader,
+                        output_path,
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                        &input,
+                        source_url.as_deref(),
+                        source_sha256.clone(),
+                    )
+                    .await?
+                }
+                Some(Format::MtxFile) => {
+                    tracing::info!(path = %input, "detected format: MTX file");
+                    let mut reader = TenxMtxReader::open(input_path, chunk_size)?;
+                    convert_with_reader(
+                        &mut reader,
+                        output_path,
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                        &input,
+                        source_url.as_deref(),
+                        source_sha256.clone(),
+                    )
+                    .await?
                 }
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
@@ -650,6 +711,13 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::ScxH5) | None => {
                     materialise_dataset(&mut ScxH5Reader::open(input_path, chunk_size)?, chunk_size)
                         .await?
+                }
+                Some(Format::TenxMtxDir) | Some(Format::MtxFile) => {
+                    materialise_dataset(
+                        &mut TenxMtxReader::open(input_path, chunk_size)?,
+                        chunk_size,
+                    )
+                    .await?
                 }
             };
 
@@ -975,7 +1043,9 @@ async fn convert_with_reader(
         writer.begin_sparse("layers", &meta.name, meta).await?;
         let mut stream = reader.layer_stream(meta, chunk_size);
         while let Some(chunk) = stream.next().await {
-            writer.write_sparse_chunk(&chunk?).await?;
+            let mut chunk = chunk?;
+            chunk.data.data = chunk.data.data.cast(out_dtype);
+            writer.write_sparse_chunk(&chunk).await?;
         }
         writer.end_sparse().await?;
     }
@@ -986,7 +1056,9 @@ async fn convert_with_reader(
         writer.begin_sparse("obsp", &meta.name, meta).await?;
         let mut stream = reader.obsp_stream(meta, chunk_size);
         while let Some(chunk) = stream.next().await {
-            writer.write_sparse_chunk(&chunk?).await?;
+            let mut chunk = chunk?;
+            chunk.data.data = chunk.data.data.cast(out_dtype);
+            writer.write_sparse_chunk(&chunk).await?;
         }
         writer.end_sparse().await?;
     }
@@ -997,9 +1069,10 @@ async fn convert_with_reader(
     let mut n_chunks = 0usize;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let mut chunk = chunk?;
         total_nnz += chunk.data.indices.len();
         n_chunks += 1;
+        chunk.data.data = chunk.data.data.cast(out_dtype);
         writer.write_x_chunk(&chunk).await?;
     }
 
@@ -1492,6 +1565,78 @@ fn inspect_tenx(info: &scx_core::tenx::TenxH5Info, path: &str) {
         for (ft, count) in &info.feature_types {
             println!("  {:<40} {}", ft, yellow!(count));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MTX inspect
+// ---------------------------------------------------------------------------
+
+fn inspect_mtx(info: &scx_core::mtx::MtxInfo, path: &str) {
+    use owo_colors::OwoColorize;
+    use owo_colors::Stream::Stdout;
+
+    macro_rules! bold {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bold())
+        };
+    }
+    macro_rules! cyan {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_cyan())
+        };
+    }
+    macro_rules! green {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.bright_green())
+        };
+    }
+    macro_rules! yellow {
+        ($x:expr) => {{
+            use owo_colors::Style;
+            $x.if_supports_color(Stdout, |t| t.style(Style::new().bright_yellow()))
+        }};
+    }
+    macro_rules! dim {
+        ($x:expr) => {
+            $x.if_supports_color(Stdout, |t| t.dimmed())
+        };
+    }
+
+    let fmt_label = if path.ends_with(".gz") {
+        "MTX (gzip)"
+    } else {
+        "MTX"
+    };
+
+    println!("{} {}", bold!("File   :"), green!(path));
+    println!("{} {}", bold!("Format :"), cyan!(fmt_label));
+    println!(
+        "{} {} {} × {} {}",
+        bold!("Shape  :"),
+        yellow!(info.n_cells),
+        dim!("cells"),
+        yellow!(info.n_genes),
+        dim!("genes"),
+    );
+    let sparsity = if info.n_cells * info.n_genes > 0 {
+        100.0 * info.nnz as f64 / (info.n_cells as f64 * info.n_genes as f64)
+    } else {
+        0.0
+    };
+    println!(
+        "{} {} {:.2}%{}",
+        bold!("NNZ    :"),
+        yellow!(info.nnz),
+        sparsity,
+        dim!(" density"),
+    );
+    println!("{} {}", bold!("dtype  :"), dim!(info.value_type));
+    if let Some(sv) = &info.software_version {
+        println!("{} {}", bold!("Created:"), dim!(sv.as_str()));
+    }
+    if let Some(fv) = info.format_version {
+        println!("{} {}", bold!("Format version:"), dim!(fv));
     }
 }
 

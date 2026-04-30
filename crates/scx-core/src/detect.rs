@@ -30,6 +30,10 @@ pub enum Format {
     TenxH5,
     /// Valid HDF5 file with no recognized single-cell format fingerprint.
     PlainH5,
+    /// 10x Genomics MTX directory: matrix.mtx[.gz] + barcodes.tsv[.gz] + features/genes.tsv[.gz].
+    TenxMtxDir,
+    /// Standalone Matrix Market file (.mtx or .mtx.gz).
+    MtxFile,
 }
 
 impl Format {
@@ -42,6 +46,8 @@ impl Format {
             Format::BPCells => "BPCells",
             Format::TenxH5 => "10x HDF5",
             Format::PlainH5 => "HDF5 (unrecognized)",
+            Format::TenxMtxDir => "10x MTX directory",
+            Format::MtxFile => "MTX file",
         }
     }
 }
@@ -60,7 +66,26 @@ pub fn sniff_dir(path: &Path) -> Option<Format> {
     if path.join("version").exists() && path.join("storage_order").exists() {
         return Some(Format::BPCells);
     }
+    if path.join("matrix.mtx.gz").exists() || path.join("matrix.mtx").exists() {
+        return Some(Format::TenxMtxDir);
+    }
     None
+}
+
+/// Sniff a standalone MTX file by extension.
+///
+/// Matches `.mtx` and `.mtx.gz` (the `.gz` case has a double extension so we
+/// check the full file name rather than just the final extension).
+pub fn sniff_mtx_file(path: &Path) -> Option<Format> {
+    if path.is_dir() {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if name.ends_with(".mtx.gz") || name.ends_with(".mtx") {
+        Some(Format::MtxFile)
+    } else {
+        None
+    }
 }
 
 /// Sniff the format of `path` by inspecting HDF5 structure.
