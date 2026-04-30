@@ -220,7 +220,7 @@ fn open_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     let is_gz = path
         .file_name()
         .and_then(|n| n.to_str())
-        .map_or(false, |n| n.ends_with(".gz"));
+        .is_some_and(|n| n.ends_with(".gz"));
     if is_gz {
         Ok(Box::new(BufReader::new(GzDecoder::new(file))))
     } else {
@@ -264,7 +264,7 @@ fn parse_header(
         }
 
         if trimmed.starts_with("%metadata_json:") {
-            let json_str = trimmed["%metadata_json:".len()..].trim();
+            let json_str = trimmed.strip_prefix("%metadata_json:").unwrap_or("").trim();
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
                 software_version = v["software_version"].as_str().map(str::to_string);
                 format_version = v["format_version"].as_u64().map(|n| n as u32);
