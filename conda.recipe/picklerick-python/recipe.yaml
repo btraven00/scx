@@ -1,0 +1,59 @@
+context:
+  name: picklerick
+  # SCX_VERSION is set by CI from `git describe`; fallback for local builds.
+  version: ${{ env.get("SCX_VERSION", default="0.0.0.dev0") }}
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  path: ../../
+  use_gitignore: true
+
+build:
+  number: 0
+  script:
+    - if: unix
+      then:
+        - export HDF5_DIR="$PREFIX"
+        - export CARGO_TARGET_DIR="/tmp/picklerick-py-build"
+        - cd python/picklerick
+        - ${{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
+    - if: win
+      then:
+        - set "HDF5_DIR=%LIBRARY_PREFIX%"
+        - set "CARGO_TARGET_DIR=%TEMP%\picklerick-py-build"
+        - cd python\picklerick
+        - "%PYTHON% -m pip install . --no-deps --no-build-isolation -vv"
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    - ${{ compiler('c') }}
+    - if: unix
+      then: pkg-config
+  host:
+    - python
+    - pip
+    - maturin >=1.7,<2
+    - hdf5 1.12.*
+  run:
+    - python
+    - anndata >=0.10
+    - hdf5 1.12.*
+
+tests:
+  - python:
+      imports:
+        - picklerick
+
+about:
+  homepage: https://github.com/btraven00/scx
+  license: GPL-3.0-only
+  license_file: LICENSE
+  summary: "Python bindings for the SCX single-cell interop engine"
+  description: |
+    Thin Python wrapper over the SCX streaming interop engine for
+    single-cell genomics. Converts between H5Seurat, H5AD, and SCX
+    internal formats via a memory-bounded streaming pipeline.

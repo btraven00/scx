@@ -1,0 +1,60 @@
+context:
+  name: r-picklerick
+  # SCX_VERSION is set by CI from `git describe`; fallback for local builds.
+  version: ${{ env.get("SCX_VERSION", default="0.0.0.dev0") }}
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  path: ../../
+  use_gitignore: true
+
+build:
+  number: 0
+  script:
+    - if: unix
+      then:
+        - export HDF5_DIR="$PREFIX"
+        - export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+        - export CARGO_TARGET_DIR="/tmp/picklerick-r-build"
+        - cd r/picklerick
+        - $R CMD INSTALL --build .
+    - if: win
+      then:
+        - set "HDF5_DIR=%LIBRARY_PREFIX%"
+        - set "CARGO_TARGET_DIR=%TEMP%\picklerick-r-build"
+        - cd r\picklerick
+        - "%R% CMD INSTALL --build ."
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    - ${{ compiler('c') }}
+    - if: unix
+      then: pkg-config
+    - make
+  host:
+    - r-base
+    - hdf5 1.12.*
+  run:
+    - r-base
+    - hdf5 1.12.*
+
+tests:
+  - script:
+      - if: unix
+        then: $R -e "library(picklerick)"
+      - if: win
+        then: '%R% -e "library(picklerick)"'
+
+about:
+  homepage: https://github.com/btraven00/scx
+  license: GPL-3.0-only
+  license_file: LICENSE
+  summary: "R bindings for the SCX single-cell interop engine"
+  description: |
+    R bindings to the SCX streaming interop engine for single-cell
+    genomics. Converts between H5Seurat, H5AD, and SCX internal formats
+    via a memory-bounded streaming pipeline. No Python dependency.
