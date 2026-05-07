@@ -20,13 +20,13 @@ build:
         - export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
         - export CARGO_TARGET_DIR="/tmp/picklerick-r-build"
         - cd r/picklerick
-        - $R CMD INSTALL --build .
+        - R CMD INSTALL --build .
     - if: win
       then:
         - set "HDF5_DIR=%LIBRARY_PREFIX%"
         - set "CARGO_TARGET_DIR=%TEMP%\picklerick-r-build"
         - cd r\picklerick
-        - "%R% CMD INSTALL --build ."
+        - R CMD INSTALL --build .
 
 requirements:
   build:
@@ -44,10 +44,7 @@ requirements:
 
 tests:
   - script:
-      - if: unix
-        then: $R -e "library(picklerick)"
-      - if: win
-        then: '%R% -e "library(picklerick)"'
+      - R -e "library(picklerick)"
 
 about:
   homepage: https://github.com/btraven00/scx
