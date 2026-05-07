@@ -13,10 +13,14 @@ use scx_core::{
     bpcells::BpcellsDatasetReader,
     detect,
     detect::Format,
-    dtype::DataType,
+    dtype::{DataType, TypedVec},
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5seurat::H5SeuratReader,
+    ir::{
+        Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+        UnsTable, VarTable, Varm,
+    },
     stream::{DatasetReader, DatasetWriter},
 };
 use std::path::Path;
@@ -155,6 +159,9 @@ fn scx_convert(
             Some(Format::NpyDir) => {
                 Err(anyhow::anyhow!("NpyDir format is not supported"))
             }
+            Some(Format::TenxH5) | Some(Format::PlainH5) => {
+                Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
+            }
         }
     });
 
@@ -210,6 +217,9 @@ fn scx_inspect(input: &str, chunk_size: i32) -> Result<Robj> {
             }
             Some(Format::NpyDir) => {
                 Err(anyhow::anyhow!("NpyDir format is not supported"))
+            }
+            Some(Format::TenxH5) | Some(Format::PlainH5) => {
+                Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
             }
         }
     });
@@ -296,6 +306,189 @@ async fn collect_info(
 }
 
 // ---------------------------------------------------------------------------
+// Exported function: scx_write_h5ad
+//
+// In-memory SCE → H5AD path. The R caller materializes counts(sce) as a
+// dgCMatrix (CSC of genes×cells, which is structurally identical to CSR of
+// cells×genes — same indptr/indices/data) and hands the triplet over with
+// obs/var column lists and a JSON blob for uns.
+// ---------------------------------------------------------------------------
+
+fn parse_dtype(dtype: &str) -> Result<DataType> {
+    Ok(match dtype {
+        "f32" => DataType::F32,
+        "f64" => DataType::F64,
+        "i32" => DataType::I32,
+        "u32" => DataType::U32,
+        other => return Err(Error::from(format!("unknown dtype '{other}'"))),
+    })
+}
+
+/// Coerce an R column (Robj) into scx-core's ColumnData.
+fn robj_to_column_data(name: &str, obj: &Robj) -> Result<ColumnData> {
+    // Factor: integer vector with class "factor" + levels attr.
+    if obj.is_factor() {
+        let levels_obj = obj.get_attrib("levels").unwrap_or_else(|| ().into());
+        let levels: Vec<String> = levels_obj
+            .as_str_vector()
+            .ok_or_else(|| Error::from(format!("column '{name}': factor missing levels")))?
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let codes: Vec<u32> = obj
+            .as_integer_vector()
+            .ok_or_else(|| Error::from(format!("column '{name}': factor codes not integer")))?
+            .into_iter()
+            .map(|x| if x < 1 { 0u32 } else { (x - 1) as u32 })
+            .collect();
+        return Ok(ColumnData::Categorical { codes, levels });
+    }
+    if let Some(v) = obj.as_logical_slice() {
+        let bools: Vec<bool> = v.iter().map(|b| b.is_true()).collect();
+        return Ok(ColumnData::Bool(bools));
+    }
+    if let Some(v) = obj.as_integer_vector() {
+        return Ok(ColumnData::Int(v));
+    }
+    if let Some(v) = obj.as_real_vector() {
+        return Ok(ColumnData::Float(v));
+    }
+    if let Some(v) = obj.as_str_vector() {
+        return Ok(ColumnData::String(v.into_iter().map(String::from).collect()));
+    }
+    Err(Error::from(format!(
+        "column '{name}': unsupported R type — expected logical/integer/double/character/factor",
+    )))
+}
+
+fn list_to_columns(list: &List) -> Result<Vec<Column>> {
+    let mut out = Vec::with_capacity(list.len());
+    for (name, obj) in list.iter() {
+        let data = robj_to_column_data(name, &obj)?;
+        out.push(Column {
+            name: name.to_string(),
+            data,
+        });
+    }
+    Ok(out)
+}
+
+/// Write an in-memory matrix + tables to an H5AD file.
+///
+/// @param output    Path to output `.h5ad` file.
+/// @param n_obs     Number of cells (rows of X).
+/// @param n_vars    Number of genes (columns of X).
+/// @param x_indptr  CSR row pointers (length `n_obs + 1`). Same layout as
+///   `dgCMatrix@p` for the genes×cells counts matrix.
+/// @param x_indices CSR column (gene) indices (length `nnz`, 0-based).
+/// @param x_data    Numeric/integer R vector of nnz values.
+/// @param obs_index Cell barcodes (length `n_obs`).
+/// @param var_index Feature names (length `n_vars`).
+/// @param obs_cols  Named list of obs columns (length n_obs each).
+/// @param var_cols  Named list of var columns (length n_vars each).
+/// @param uns_json  JSON-encoded uns object (`{}` for empty).
+/// @param dtype     Output X dtype: `"f32"` | `"f64"` | `"i32"` | `"u32"`.
+/// @noRd
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn scx_write_h5ad(
+    output:    &str,
+    n_obs:     i32,
+    n_vars:    i32,
+    x_indptr:  Vec<i32>,
+    x_indices: Vec<i32>,
+    x_data:    Robj,
+    obs_index: Vec<String>,
+    var_index: Vec<String>,
+    obs_cols:  List,
+    var_cols:  List,
+    uns_json:  &str,
+    dtype:     &str,
+) -> Result<()> {
+    let dtype = parse_dtype(dtype)?;
+    let n_obs  = n_obs  as usize;
+    let n_vars = n_vars as usize;
+
+    if x_indptr.len() != n_obs + 1 {
+        return Err(Error::from(format!(
+            "x_indptr length {} != n_obs+1 ({})",
+            x_indptr.len(),
+            n_obs + 1
+        )));
+    }
+    if x_indices.len() != *x_indptr.last().unwrap() as usize {
+        return Err(Error::from(
+            "x_indices length does not match indptr last entry".to_string(),
+        ));
+    }
+
+    // X data: accept R numeric (REAL → f64) or integer (INTSXP → i32).
+    let data: TypedVec = if let Some(v) = x_data.as_real_vector() {
+        TypedVec::F64(v)
+    } else if let Some(v) = x_data.as_integer_vector() {
+        TypedVec::I32(v)
+    } else {
+        return Err(Error::from(
+            "x_data must be a numeric or integer vector".to_string(),
+        ));
+    };
+    if data.len() != x_indices.len() {
+        return Err(Error::from(format!(
+            "x_data length {} != x_indices length {}",
+            data.len(),
+            x_indices.len()
+        )));
+    }
+
+    let csr = SparseMatrixCSR {
+        shape: (n_obs, n_vars),
+        indptr: x_indptr.iter().map(|&x| x as u64).collect(),
+        indices: x_indices.iter().map(|&x| x as u32).collect(),
+        data,
+    };
+
+    if obs_index.len() != n_obs {
+        return Err(Error::from("obs_index length mismatch".to_string()));
+    }
+    if var_index.len() != n_vars {
+        return Err(Error::from("var_index length mismatch".to_string()));
+    }
+
+    let obs = ObsTable {
+        index: obs_index,
+        columns: list_to_columns(&obs_cols)?,
+    };
+    let var = VarTable {
+        index: var_index,
+        columns: list_to_columns(&var_cols)?,
+    };
+
+    let uns_value: serde_json::Value =
+        serde_json::from_str(uns_json).map_err(|e| Error::from(format!("uns JSON: {e}")))?;
+    let uns = UnsTable { raw: uns_value };
+
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: csr,
+    };
+
+    let result = block_on(async {
+        let mut writer = H5AdWriter::create(Path::new(output), n_obs, n_vars, dtype)?;
+        writer.write_obs(&obs).await?;
+        writer.write_var(&var).await?;
+        writer.write_obsm(&Embeddings::default()).await?;
+        writer.write_uns(&uns).await?;
+        writer.write_varm(&Varm::default()).await?;
+        writer.write_x_chunk(&chunk).await?;
+        writer.finalize().await?;
+        anyhow::Ok(())
+    });
+
+    result.map_err(|e| Error::from(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
 
@@ -303,4 +496,5 @@ extendr_module! {
     mod picklerick;
     fn scx_convert;
     fn scx_inspect;
+    fn scx_write_h5ad;
 }

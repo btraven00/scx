@@ -13,3 +13,29 @@ scx_convert <- function(input, output, chunk_size, dtype, assay, layer) {
     PACKAGE = "picklerick"
   )
 }
+
+#' @keywords internal
+scx_inspect <- function(input, chunk_size) {
+  .Call(
+    "wrap__scx_inspect",
+    input, chunk_size,
+    PACKAGE = "picklerick"
+  )
+}
+
+#' @keywords internal
+scx_write_h5ad <- function(output, n_obs, n_vars,
+                           x_indptr, x_indices, x_data,
+                           obs_index, var_index,
+                           obs_cols, var_cols,
+                           uns_json, dtype) {
+  .Call(
+    "wrap__scx_write_h5ad",
+    output, n_obs, n_vars,
+    x_indptr, x_indices, x_data,
+    obs_index, var_index,
+    obs_cols, var_cols,
+    uns_json, dtype,
+    PACKAGE = "picklerick"
+  )
+}

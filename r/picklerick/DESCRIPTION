@@ -9,6 +9,12 @@ Description: R bindings to the SCX streaming interop engine for single-cell
     a memory-bounded streaming pipeline. Inspect file metadata without loading
     data into memory. No Python dependency.
 License: GPL-3
+Imports:
+    methods,
+    Matrix,
+    jsonlite,
+    S4Vectors,
+    SummarizedExperiment
 Suggests:
     testthat (>= 3.0.0)
 Encoding: UTF-8

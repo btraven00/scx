@@ -264,11 +264,11 @@ fn write_json_value(grp: &Group, name: &str, value: &serde_json::Value) -> Resul
             if let Some(i) = n.as_i64() {
                 let ds = grp.new_dataset::<i64>().shape(()).create(name)?;
                 ds.write_scalar(&i)?;
-                write_encoding_on_ds(&ds, "numeric-scalar", "0.2.0")?;
+                write_encoding_on_ds(&ds, "scalar", "0.2.0")?;
             } else if let Some(f) = n.as_f64() {
                 let ds = grp.new_dataset::<f64>().shape(()).create(name)?;
                 ds.write_scalar(&f)?;
-                write_encoding_on_ds(&ds, "numeric-scalar", "0.2.0")?;
+                write_encoding_on_ds(&ds, "scalar", "0.2.0")?;
             }
         }
         serde_json::Value::Object(obj) => {
