@@ -44,12 +44,13 @@ jobs:
         run: cargo test --all
 
   build:
-    name: Build (${{ matrix.platform.target }})
+    name: Build ${{ matrix.recipe }} (${{ matrix.platform.target }})
     needs: test
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
+        recipe: [scx, picklerick-python, r-picklerick]
         platform:
           - os: ubuntu-latest
             target: linux-64
@@ -57,6 +58,13 @@ jobs:
             target: osx-arm64
           - os: windows-latest
             target: win-64
+        exclude:
+          # R + rust + HDF5 on Windows is not yet wired up.
+          - recipe: r-picklerick
+            platform: { os: windows-latest, target: win-64 }
+          # maturin + HDF5-linked PyO3 ext on Windows: revisit after Linux/macOS land.
+          - recipe: picklerick-python
+            platform: { os: windows-latest, target: win-64 }
 
     steps:
       - uses: actions/checkout@v4
@@ -98,14 +106,14 @@ jobs:
           # Output dir MUST be outside the source tree, or rattler-build
           # recurses into its own work dir while copying the path source
           # and fails with ENAMETOOLONG (upstream issue #2045).
-          rattler-build build --recipe conda.recipe/recipe.yaml \
+          rattler-build build --recipe conda.recipe/${{ matrix.recipe }}/recipe.yaml \
             --output-dir "${RUNNER_TEMP}/rattler-output" \
             --target-platform ${{ matrix.platform.target }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: package-${{ matrix.platform.target }}
+          name: package-${{ matrix.recipe }}-${{ matrix.platform.target }}
           path: ${{ runner.temp }}/rattler-output/
           retention-days: 7
           if-no-files-found: error
