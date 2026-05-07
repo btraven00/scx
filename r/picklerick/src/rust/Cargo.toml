@@ -5,8 +5,9 @@ edition = "2021"
 
 # This crate is NOT part of the top-level Cargo workspace.
 # It is compiled separately by R's build system (src/Makevars.in) when
-# native bindings are activated.  Path dependency reaches up to scx-core
-# in the parent workspace.
+# native bindings are activated.  scx-core is vendored at ./scx-core so
+# the package builds in isolation on r-universe (which only ships this
+# directory).  Re-sync via r/picklerick/sync-scx-core.sh.
 [workspace]
 
 [lib]
@@ -14,11 +15,12 @@ crate-type = ["staticlib"]
 
 [dependencies]
 extendr-api = "0.7"
-scx-core    = { path = "../../../../crates/scx-core", version = "0.1.0" }
+scx-core    = { path = "./scx-core" }
 ndarray     = "0.16"
 tokio       = { version = "1", features = ["rt"] }
 futures     = "0.3"
 anyhow      = "1"
+serde_json  = "1"
 # Dynamic system HDF5.  Static HDF5 (hdf5-sys features=["static","zlib"]) was
 # tried but libz-sys >= 1.1 builds zlib-ng with -DZ_SOLO, which rejects the
 # NULL zalloc/zfree that HDF5's H5Z_filter_deflate passes → inflateInit() fails.
