@@ -630,10 +630,9 @@ async fn run() -> anyhow::Result<()> {
             tracing::info!(
                 input = %input,
                 output = %output_dir,
-                "materialising IR snapshot"
+                "streaming IR snapshot"
             );
 
-            // Read the full dataset from any supported input format.
             let fmt = detect::sniff_dir(input_path)
                 .or_else(|| detect::sniff(input_path))
                 .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
@@ -642,42 +641,52 @@ async fn run() -> anyhow::Result<()> {
                     _ => Some(Format::ScxH5),
                 });
 
-            let dataset = match fmt {
-                Some(Format::TenxH5) => {
-                    let mut r = TenxH5Reader::open(input_path, chunk_size)?;
-                    materialise_dataset(&mut r, chunk_size).await?
-                }
+            let (n_obs, n_vars) = match fmt {
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot snapshot; use 'scx inspect' to explore its structure", input)
                 }
-                Some(Format::NpyDir) => NpyIrReader::open(input_path, chunk_size)?.into_dataset(),
+                Some(Format::TenxH5) => {
+                    let mut r = TenxH5Reader::open(input_path, chunk_size)?;
+                    let shape = r.shape();
+                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
+                    shape
+                }
+                Some(Format::NpyDir) => {
+                    let mut r = NpyIrReader::open(input_path, chunk_size)?;
+                    let shape = r.shape();
+                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
+                    shape
+                }
                 Some(Format::BPCells) => {
-                    materialise_dataset(
-                        &mut BpcellsDatasetReader::open(input_path, chunk_size)?,
-                        chunk_size,
-                    )
-                    .await?
+                    let mut r = BpcellsDatasetReader::open(input_path, chunk_size)?;
+                    let shape = r.shape();
+                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
+                    shape
                 }
                 Some(Format::H5Seurat) => {
                     let mut r = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    materialise_dataset(&mut *r, chunk_size).await?
+                    let shape = r.shape();
+                    NpyIrWriter::stream(output_path, &mut *r, &filter, chunk_size).await?;
+                    shape
                 }
                 Some(Format::H5Ad) => {
-                    materialise_dataset(&mut H5AdReader::open(input_path, chunk_size)?, chunk_size)
-                        .await?
+                    let mut r = H5AdReader::open(input_path, chunk_size)?;
+                    let shape = r.shape();
+                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
+                    shape
                 }
                 Some(Format::ScxH5) | None => {
-                    materialise_dataset(&mut ScxH5Reader::open(input_path, chunk_size)?, chunk_size)
-                        .await?
+                    let mut r = ScxH5Reader::open(input_path, chunk_size)?;
+                    let shape = r.shape();
+                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
+                    shape
                 }
             };
 
-            NpyIrWriter::write(output_path, &dataset, &filter)?;
-
             tracing::info!(
                 output = %output_dir,
-                n_obs  = dataset.x.shape.0,
-                n_vars = dataset.x.shape.1,
+                n_obs,
+                n_vars,
                 "snapshot written"
             );
         }
@@ -724,137 +733,6 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Fully materialise a streaming reader into a [`SingleCellDataset`].
-async fn materialise_dataset(
-    reader: &mut dyn DatasetReader,
-    chunk_size: usize,
-) -> anyhow::Result<scx_core::ir::SingleCellDataset> {
-    use futures::StreamExt;
-    use scx_core::dtype::TypedVec;
-    use scx_core::ir::{Layers, Obsp, SingleCellDataset, SparseMatrixCSR};
-
-    let (n_obs, n_vars) = reader.shape();
-    let x_dtype = reader.dtype();
-
-    let obs = reader.obs().await?;
-    let var = reader.var().await?;
-    let obsm = reader.obsm().await?;
-    let uns = reader.uns().await?;
-    let varm = reader.varm().await?;
-
-    // Materialise layers by consuming the stream for each named matrix.
-    let layer_metas = reader.layer_metas().await?;
-    let mut layers = Layers::default();
-    for meta in &layer_metas {
-        let mut indptr: Vec<u64> = vec![0u64];
-        let mut indices: Vec<u32> = Vec::new();
-        let mut data_vals: Vec<f32> = Vec::new();
-        let mut stream = reader.layer_stream(meta, chunk_size);
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let base = *indptr.last().unwrap();
-            for &p in &chunk.data.indptr[1..] {
-                indptr.push(base + p);
-            }
-            indices.extend_from_slice(&chunk.data.indices);
-            data_vals.extend(chunk.data.data.to_f64().into_iter().map(|x| x as f32));
-        }
-        layers.map.insert(
-            meta.name.clone(),
-            SparseMatrixCSR {
-                shape: meta.shape,
-                indptr,
-                indices,
-                data: scx_core::dtype::TypedVec::F32(data_vals),
-            },
-        );
-    }
-
-    // Materialise obsp.
-    let obsp_metas = reader.obsp_metas().await?;
-    let mut obsp = Obsp::default();
-    for meta in &obsp_metas {
-        let mut indptr: Vec<u64> = vec![0u64];
-        let mut indices: Vec<u32> = Vec::new();
-        let mut data_vals: Vec<f32> = Vec::new();
-        let mut stream = reader.obsp_stream(meta, chunk_size);
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let base = *indptr.last().unwrap();
-            for &p in &chunk.data.indptr[1..] {
-                indptr.push(base + p);
-            }
-            indices.extend_from_slice(&chunk.data.indices);
-            data_vals.extend(chunk.data.data.to_f64().into_iter().map(|x| x as f32));
-        }
-        obsp.map.insert(
-            meta.name.clone(),
-            SparseMatrixCSR {
-                shape: meta.shape,
-                indptr,
-                indices,
-                data: scx_core::dtype::TypedVec::F32(data_vals),
-            },
-        );
-    }
-
-    // varp is not streamed (no source currently emits it), default to empty.
-    let varp = scx_core::ir::Varp::default();
-
-    // Accumulate X chunks into a full CSR.
-    let mut x_indptr: Vec<u64> = Vec::with_capacity(n_obs + 1);
-    x_indptr.push(0);
-    let mut x_indices: Vec<u32> = Vec::new();
-    let mut x_data_f32: Vec<f32> = Vec::new();
-    let mut x_data_f64: Vec<f64> = Vec::new();
-    let mut x_data_i32: Vec<i32> = Vec::new();
-    let mut x_data_u32: Vec<u32> = Vec::new();
-
-    let mut stream = reader.x_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        x_indices.extend_from_slice(&chunk.data.indices);
-        match &chunk.data.data {
-            TypedVec::F32(v) => x_data_f32.extend_from_slice(v),
-            TypedVec::F64(v) => x_data_f64.extend_from_slice(v),
-            TypedVec::I32(v) => x_data_i32.extend_from_slice(v),
-            TypedVec::U32(v) => x_data_u32.extend_from_slice(v),
-        }
-        // Extend indptr (skip the leading 0 of each chunk's indptr).
-        let base = *x_indptr.last().unwrap();
-        for &p in &chunk.data.indptr[1..] {
-            x_indptr.push(base + p);
-        }
-    }
-
-    let x_data = match x_dtype {
-        DataType::F32 => TypedVec::F32(x_data_f32),
-        DataType::F64 => TypedVec::F64(x_data_f64),
-        DataType::I32 => TypedVec::I32(x_data_i32),
-        DataType::U32 => TypedVec::U32(x_data_u32),
-    };
-
-    let x = SparseMatrixCSR {
-        shape: (n_obs, n_vars),
-        indptr: x_indptr,
-        indices: x_indices,
-        data: x_data,
-    };
-
-    Ok(SingleCellDataset {
-        x,
-        x_dtype,
-        obs,
-        var,
-        obsm,
-        uns,
-        layers,
-        obsp,
-        varp,
-        varm,
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
