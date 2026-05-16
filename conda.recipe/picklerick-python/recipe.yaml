@@ -14,16 +14,21 @@ source:
 build:
   number: 0
   script:
+    # MATURIN_PEP517_ARGS forwards --no-default-features to cargo, disabling
+    # the vendored-hdf5 feature so we link against the conda-provided libhdf5
+    # in $PREFIX instead of building HDF5 from source.
     - if: unix
       then:
         - export HDF5_DIR="$PREFIX"
         - export CARGO_TARGET_DIR="/tmp/picklerick-py-build"
+        - export MATURIN_PEP517_ARGS="--no-default-features"
         - cd python/picklerick
         - ${{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
     - if: win
       then:
         - set "HDF5_DIR=%LIBRARY_PREFIX%"
         - set "CARGO_TARGET_DIR=%TEMP%\picklerick-py-build"
+        - set "MATURIN_PEP517_ARGS=--no-default-features"
         - cd python\picklerick
         - "%PYTHON% -m pip install . --no-deps --no-build-isolation -vv"
 
