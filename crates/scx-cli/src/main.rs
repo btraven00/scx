@@ -19,7 +19,7 @@ use scx_core::{
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     provenance::{self, OutputInfo, ProvenanceRecord, SourceInfo},
     stream::{DatasetReader, DatasetWriter},
-    tenx::{read_tenx_h5, walk_h5, H5Node, H5NodeKind},
+    tenx::{read_tenx_summary, walk_h5, H5Node, H5NodeKind, TenxH5Reader},
     validate::{run_validation, ValidationSchema},
 };
 
@@ -31,7 +31,7 @@ enum Cli {
     /// Input auto-detected by content:
     ///   .h5seurat  — SeuratDisk H5Seurat (Seurat v3/v4)
     ///   .h5ad      — AnnData H5AD (CSR X only)
-    ///   .h5        — SCX internal HDF5 schema, or 10x HDF5 (inspect only)
+    ///   .h5        — SCX internal HDF5 schema, or 10x HDF5 (Cell Ranger output)
     ///
     /// Output format selected by extension:
     ///   .h5ad      — AnnData H5AD  (default)
@@ -334,7 +334,9 @@ async fn run() -> anyhow::Result<()> {
                     run_validation(&mut r, &schema_parsed, &input, &schema).await?
                 }
                 Some(Format::TenxH5) => {
-                    anyhow::bail!("'{}' is a 10x HDF5 file — validation requires a single-cell format with obs/var metadata (H5AD, H5Seurat, etc.)", input)
+                    let mut r = TenxH5Reader::open(input_path, 1000)
+                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
                 }
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — use 'scx inspect' to explore its structure", input)
@@ -394,8 +396,10 @@ async fn run() -> anyhow::Result<()> {
                     inspect(&mut r, &input, "SCX H5").await?;
                 }
                 Some(Format::TenxH5) => {
-                    let info = read_tenx_h5(input_path)?;
-                    inspect_tenx(&info, &input);
+                    let mut r = TenxH5Reader::open(input_path, chunk)?;
+                    inspect(&mut r, &input, "10x HDF5").await?;
+                    let summary = read_tenx_summary(input_path)?;
+                    print_tenx_summary(&summary);
                 }
                 Some(Format::PlainH5) => {
                     let nodes = walk_h5(input_path, 2)?;
@@ -458,7 +462,24 @@ async fn run() -> anyhow::Result<()> {
 
             let (n_obs, n_vars) = match fmt {
                 Some(Format::TenxH5) => {
-                    anyhow::bail!("'{}' is a 10x HDF5 file — conversion not yet supported; use 'scx inspect' to explore it", input)
+                    tracing::info!(path = %input, "detected format: 10x HDF5 (Cell Ranger)");
+                    let mut reader = TenxH5Reader::open(input_path, chunk_size)?;
+                    convert_with_reader(
+                        &mut reader,
+                        output_path,
+                        out_dtype,
+                        &assay,
+                        &layer,
+                        &x_slot,
+                        &project,
+                        chunk_size,
+                        dgcmatrix,
+                        seuratdisk_compat,
+                        &input,
+                        source_url.as_deref(),
+                        source_sha256.clone(),
+                    )
+                    .await?
                 }
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot convert; use 'scx inspect' to explore its structure", input)
@@ -623,10 +644,8 @@ async fn run() -> anyhow::Result<()> {
 
             let dataset = match fmt {
                 Some(Format::TenxH5) => {
-                    anyhow::bail!(
-                        "'{}' is a 10x HDF5 file — snapshot not yet supported",
-                        input
-                    )
+                    let mut r = TenxH5Reader::open(input_path, chunk_size)?;
+                    materialise_dataset(&mut r, chunk_size).await?
                 }
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot snapshot; use 'scx inspect' to explore its structure", input)
@@ -1424,75 +1443,41 @@ async fn inspect(
 }
 
 // ---------------------------------------------------------------------------
-// 10x HDF5 inspect
+// 10x HDF5 supplementary summary
 // ---------------------------------------------------------------------------
 
-fn inspect_tenx(info: &scx_core::tenx::TenxH5Info, path: &str) {
-    use owo_colors::OwoColorize;
-    use owo_colors::Stream::Stdout;
+fn print_tenx_summary(s: &scx_core::tenx::TenxSummary) {
+    use owo_colors::{OwoColorize, Stream::Stdout, Style};
 
-    macro_rules! bold {
-        ($x:expr) => {
-            $x.if_supports_color(Stdout, |t| t.bold())
-        };
-    }
-    macro_rules! cyan {
-        ($x:expr) => {
-            $x.if_supports_color(Stdout, |t| t.bright_cyan())
-        };
-    }
-    macro_rules! green {
-        ($x:expr) => {
-            $x.if_supports_color(Stdout, |t| t.bright_green())
-        };
-    }
-    macro_rules! dim {
-        ($x:expr) => {
-            $x.if_supports_color(Stdout, |t| t.dimmed())
-        };
-    }
-    macro_rules! yellow {
-        ($x:expr) => {{
-            use owo_colors::Style;
-            $x.if_supports_color(Stdout, |t| t.style(Style::new().bright_yellow()))
-        }};
-    }
-    macro_rules! bold_cyan {
-        ($x:expr) => {{
-            use owo_colors::Style;
-            $x.if_supports_color(Stdout, |t| t.style(Style::new().bold().bright_cyan()))
-        }};
+    if s.feature_types.is_empty() && s.genomes.is_empty() {
+        return;
     }
 
-    println!("{} {}", bold!("File   :"), green!(path));
-    println!("{} {}", bold!("Format :"), cyan!("10x HDF5"));
-    println!(
-        "{} {} {} × {} {}",
-        bold!("Shape  :"),
-        yellow!(info.n_barcodes),
-        dim!("barcodes"),
-        yellow!(info.n_features),
-        dim!("features"),
-    );
-    if let Some(genome) = &info.genome {
-        println!("{} {}", bold!("Genome :"), dim!(genome.as_str()));
-    }
-    println!();
+    let header = "10x".if_supports_color(Stdout, |t| t.style(Style::new().bold().bright_cyan()));
+    println!("{header}");
 
-    println!(
-        "{} {}{}{}",
-        bold_cyan!("features"),
-        bold!("("),
-        yellow!(info.feature_types.len()),
-        bold!(" types):"),
-    );
-    if info.feature_types.is_empty() {
-        println!("  {}", dim!("(none)"));
-    } else {
-        for (ft, count) in &info.feature_types {
-            println!("  {:<40} {}", ft, yellow!(count));
+    if !s.genomes.is_empty() {
+        let label = "  genome".if_supports_color(Stdout, |t| t.bold());
+        let val = s
+            .genomes
+            .join(", ")
+            .if_supports_color(Stdout, |t| t.dimmed())
+            .to_string();
+        println!("{label:<10} {val}");
+    }
+
+    if !s.feature_types.is_empty() {
+        let label = "  feature_types".if_supports_color(Stdout, |t| t.bold());
+        println!("{label}");
+        for (ft, count) in &s.feature_types {
+            let count_s = count
+                .to_string()
+                .if_supports_color(Stdout, |t| t.style(Style::new().bright_yellow()))
+                .to_string();
+            println!("    {ft:<40} {count_s}");
         }
     }
+    println!();
 }
 
 // ---------------------------------------------------------------------------
