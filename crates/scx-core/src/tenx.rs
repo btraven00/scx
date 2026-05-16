@@ -236,9 +236,7 @@ impl TenxH5Reader {
         if let Ok(shape_ds) = file.dataset("matrix/shape") {
             if let Ok(s) = shape_ds.read_1d::<i64>() {
                 let v = s.to_vec();
-                if v.len() == 2
-                    && (v[0] as usize != n_vars || v[1] as usize != n_obs)
-                {
+                if v.len() == 2 && (v[0] as usize != n_vars || v[1] as usize != n_obs) {
                     tracing::warn!(
                         "10x /matrix/shape {:?} disagrees with barcodes/features lengths ({n_obs}, {n_vars})",
                         v
@@ -246,9 +244,7 @@ impl TenxH5Reader {
                 }
             } else if let Ok(s) = shape_ds.read_1d::<i32>() {
                 let v = s.to_vec();
-                if v.len() == 2
-                    && (v[0] as usize != n_vars || v[1] as usize != n_obs)
-                {
+                if v.len() == 2 && (v[0] as usize != n_vars || v[1] as usize != n_obs) {
                     tracing::warn!(
                         "10x /matrix/shape {:?} disagrees with barcodes/features lengths ({n_obs}, {n_vars})",
                         v
@@ -342,9 +338,9 @@ fn read_tenx_chunk(
                 .iter()
                 .map(|&x| x as u32)
                 .collect(),
-            TypeDescriptor::Unsigned(_) => ds
-                .read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?
-                .to_vec(),
+            TypeDescriptor::Unsigned(_) => {
+                ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec()
+            }
             other => {
                 return Err(ScxError::InvalidFormat(format!(
                     "unexpected /matrix/indices dtype {:?}",
@@ -360,27 +356,27 @@ fn read_tenx_chunk(
         let ds = file.dataset("matrix/data")?;
         let descr = ds.dtype()?.to_descriptor()?;
         match (dtype, descr) {
-            (DataType::F32, TypeDescriptor::Float(_)) => TypedVec::F32(
-                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec(),
-            ),
-            (DataType::F64, _) => TypedVec::F64(
-                ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec(),
-            ),
+            (DataType::F32, TypeDescriptor::Float(_)) => {
+                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            (DataType::F64, _) => {
+                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
             (DataType::I32, TypeDescriptor::Integer(IntSize::U8)) => TypedVec::I32(
                 ds.read_slice_1d::<i64, _>(s![nnz_start..nnz_end])?
                     .iter()
                     .map(|&x| x as i32)
                     .collect(),
             ),
-            (DataType::I32, _) => TypedVec::I32(
-                ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec(),
-            ),
-            (DataType::U32, _) => TypedVec::U32(
-                ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec(),
-            ),
-            (DataType::F32, _) => TypedVec::F32(
-                ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec(),
-            ),
+            (DataType::I32, _) => {
+                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            (DataType::U32, _) => {
+                TypedVec::U32(ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
+            (DataType::F32, _) => {
+                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
+            }
         }
     } else {
         match dtype {
