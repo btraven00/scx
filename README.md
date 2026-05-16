@@ -15,8 +15,18 @@ cargo build --release -p scx-cli
 # binary at target/release/scx
 ```
 
-Requires Rust ≥ 1.70 and a system HDF5 library (`libhdf5-dev` on
-Debian/Ubuntu, `hdf5` via Homebrew on macOS).
+Requires Rust ≥ 1.70. HDF5 is built from source and statically linked by
+default, so the resulting binary has no system `libhdf5` dependency. Cold
+builds add ~1–2 min for compiling HDF5; CMake and a C compiler must be on
+PATH.
+
+Distro/conda packagers that already ship `libhdf5` can link dynamically
+against the system copy:
+
+```bash
+cargo build --release -p scx-cli --no-default-features
+# requires libhdf5-dev (Debian/Ubuntu) or `brew install hdf5` (macOS)
+```
 
 ## Usage
 

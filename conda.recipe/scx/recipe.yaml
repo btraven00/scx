@@ -14,16 +14,19 @@ source:
 build:
   number: 0
   script:
+    # --no-default-features disables vendored-hdf5; conda provides libhdf5
+    # in the host env, so link dynamically against that instead of building
+    # a second copy from source.
     - if: unix
       then:
         - export HDF5_DIR="$PREFIX"
         - export CARGO_TARGET_DIR="/tmp/scx-build"
-        - cargo install --path crates/scx-cli --root "$PREFIX" --locked
+        - cargo install --path crates/scx-cli --root "$PREFIX" --locked --no-default-features
     - if: win
       then:
         - set "HDF5_DIR=%LIBRARY_PREFIX%"
         - set "CARGO_TARGET_DIR=%TEMP%\scx-build"
-        - cargo install --path crates/scx-cli --root "%PREFIX%" --locked
+        - cargo install --path crates/scx-cli --root "%PREFIX%" --locked --no-default-features
 
 requirements:
   build:
