@@ -9,9 +9,13 @@ name = "picklerick_py_native"
 crate-type = ["cdylib"]
 path = "rust/src/lib.rs"
 
+[features]
+default = ["vendored-hdf5"]
+vendored-hdf5 = ["scx-core/vendored-hdf5"]
+
 [dependencies]
 anyhow = "1"
 futures = "0.3"
 pyo3 = { version = "0.22", features = ["extension-module"] }
-scx-core = { path = "../../crates/scx-core" }
+scx-core = { path = "../../crates/scx-core", default-features = false }
 tokio = { version = "1", features = ["rt"] }

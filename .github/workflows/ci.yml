@@ -8,8 +8,21 @@ on:
 
 jobs:
   test:
-    name: Test & Lint
+    name: Test & Lint (${{ matrix.hdf5 }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Default build path: vendored static HDF5 + zlib. No system libhdf5
+          # needed. This is what cargo install / wheels / source-tree users get.
+          - hdf5: vendored
+            cargo_flags: ""
+            apt_packages: ""
+          # Conda + distro packager path: link the system libhdf5.
+          - hdf5: system
+            cargo_flags: "--no-default-features"
+            apt_packages: "libhdf5-dev"
     steps:
       - uses: actions/checkout@v4
 
@@ -17,8 +30,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install HDF5
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+      - name: Install system HDF5
+        if: matrix.apt_packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_packages }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -27,16 +41,17 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ matrix.hdf5 }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.hdf5 }}-
 
       - name: fmt
+        if: matrix.hdf5 == 'vendored'
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets ${{ matrix.cargo_flags }} -- -D warnings
 
       - name: test
         env:
           HDF5_USE_FILE_LOCKING: "FALSE"
-        run: cargo test --all
+        run: cargo test --all ${{ matrix.cargo_flags }}

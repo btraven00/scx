@@ -109,13 +109,25 @@ always passes NULL — incompatible. Three workarounds all failed:
 | `LIBZ_SYS_STATIC=0` | `hdf5-sys` build.rs unconditionally emits `rustc-link-lib=static=z`; no `libz.a` provided → link failure |
 | `build.rs` emitting system lib search path | Cargo resolves `hdf5-sys` link deps before the crate's own `build.rs` path is in scope |
 
-**Resolution:** dropped static HDF5; switched to dynamic system HDF5.
+**Resolution (0.0.6):** dropped static HDF5; switched to dynamic system HDF5.
 `Makevars` now uses `pkg-config --libs hdf5` (Ubuntu fallback:
 `-L/usr/lib/x86_64-linux-gnu/hdf5/serial -lhdf5`). rhdf5 + picklerick
 coexistence was empirically confirmed safe for simple open-read-close
 conversions. Known limitation: do not load `hdf5r` (not rhdf5) in the same
 session as picklerick native mode — `hdf5r` links against a different
 `libhdf5.so` build and property-list IDs may corrupt.
+
+**Re-resolution (workspace, current):** the Z_SOLO blocker no longer applies
+in the workspace. Current `hdf5-metno-src 0.10.2` pulls `libz-sys 1.1` with
+`default-features = false` + `static + libc` only — no `zlib-ng` feature,
+so libz-sys builds *stock* zlib that HDF5's `H5Z_filter_deflate` accepts.
+The workspace (`scx-cli`, `python/picklerick`) now defaults to vendored
+static HDF5 via the `vendored-hdf5` feature on `scx-core`; conda recipes
+opt out with `--no-default-features` to keep using the conda-provided
+`libhdf5`. The R `picklerick` package still builds dynamically against
+system HDF5 — it has a vendored copy of `scx-core` outside the workspace,
+and the rhdf5/`hdf5r` coexistence story needs to be re-validated before
+flipping that to vendored.
 
 ### What was delivered
 
