@@ -14,8 +14,10 @@ Imports:
     Matrix,
     jsonlite,
     S4Vectors,
+    SingleCellExperiment,
     SummarizedExperiment
 Suggests:
+    Seurat,
     testthat (>= 3.0.0)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
