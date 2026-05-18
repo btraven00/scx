@@ -18,6 +18,13 @@
 #' @param as         Target class: `"SingleCellExperiment"` (default),
 #'   `"Seurat"`, or `"list"`.
 #' @param chunk_size Cells per internal streaming chunk. Default `5000L`.
+#' @param lazy       When `TRUE`, leave the X matrix on disk and wrap it in a
+#'   `DelayedMatrix` via `HDF5Array::H5SparseMatrix`. The Rust side only
+#'   reads metadata (obs / var / obsm / varm / uns), so peak memory is
+#'   bounded by metadata size rather than the count matrix. Only supported
+#'   for HDF5-backed inputs (`.h5ad`, `.h5`, `.h5seurat`) and only when
+#'   `as = "SingleCellExperiment"` (Seurat does not consume DelayedArray
+#'   natively). Requires the `HDF5Array` package (Bioconductor).
 #'
 #' @return A `SingleCellExperiment`, `Seurat`, or named list.
 #' @export
@@ -27,12 +34,40 @@
 #' sce <- read_h5ad("pbmc3k.h5ad")
 #' obj <- read_h5ad("pbmc3k.h5ad", as = "Seurat")
 #' raw <- read_h5ad("pbmc3k.h5ad", as = "list")  # advanced
+#'
+#' # Lazy mode — X stays on disk, no full materialization.
+#' sce <- read_h5ad("huge.h5ad", lazy = TRUE)
+#' counts(sce)            # DelayedMatrix
+#' counts(sce)[1:10, ]    # only these rows hit disk
 #' }
 read_h5ad <- function(path,
                       as         = c("SingleCellExperiment", "Seurat", "list"),
-                      chunk_size = 5000L) {
+                      chunk_size = 5000L,
+                      lazy       = FALSE) {
   as <- match.arg(as)
-  raw <- scx_read(path.expand(path), as.integer(chunk_size))
+  path <- path.expand(path)
+
+  if (lazy) {
+    if (as == "Seurat") {
+      stop("read_h5ad: lazy = TRUE is incompatible with as = 'Seurat' ",
+           "(Seurat does not consume DelayedArray).", call. = FALSE)
+    }
+    if (!requireNamespace("HDF5Array", quietly = TRUE)) {
+      stop("read_h5ad(lazy = TRUE) requires the HDF5Array package ",
+           "(Bioconductor).", call. = FALSE)
+    }
+    raw <- scx_read(path, as.integer(chunk_size), read_x = FALSE)
+    if (!identical(raw$format, "H5AD")) {
+      stop(sprintf(
+        "read_h5ad: lazy = TRUE currently supports H5AD only (got %s). ",
+        raw$format),
+        "Re-run with lazy = FALSE.", call. = FALSE)
+    }
+    if (as == "list") return(raw)
+    return(.as_sce_lazy(raw, path))
+  }
+
+  raw <- scx_read(path, as.integer(chunk_size), read_x = TRUE)
   switch(as,
     list                 = raw,
     SingleCellExperiment = .as_sce(raw),
@@ -229,4 +264,52 @@ read_h5ad <- function(path,
   if (length(uns)) obj@misc <- uns
 
   obj
+}
+
+# ---------------------------------------------------------------------------
+# Lazy SCE assembler: X stays on disk, wrapped as a DelayedMatrix via
+# HDF5Array::H5SparseMatrix. Only h5ad layout is supported (data/indices/
+# indptr at /X). obsp / layers are skipped in lazy mode for now — they could
+# be wrapped the same way but each one is its own HDF5 group lookup.
+# ---------------------------------------------------------------------------
+
+.as_sce_lazy <- function(raw, path) {
+  if (!requireNamespace("SingleCellExperiment", quietly = TRUE)) {
+    stop("read_h5ad(lazy = TRUE) requires the SingleCellExperiment package.",
+         call. = FALSE)
+  }
+
+  # H5SparseMatrix infers CSR vs CSC from the AnnData encoding-type attribute
+  # on /X. For h5ad: encoding-type = "csr_matrix" → shape (n_obs, n_vars).
+  # We want (n_vars × n_obs) for SCE — t() is a lazy op on DelayedArray.
+  x_lazy <- HDF5Array::H5SparseMatrix(filepath = path, group = "/X")
+  if (nrow(x_lazy) == raw$n_obs && ncol(x_lazy) == raw$n_vars) {
+    x_lazy <- t(x_lazy)   # → (n_vars × n_obs)
+  }
+  dimnames(x_lazy) <- list(raw$var_index, raw$obs_index)
+
+  obs_df <- .cols_to_df(raw$obs_cols, raw$obs_index)
+  var_df <- .cols_to_df(raw$var_cols, raw$var_index)
+
+  reduced <- lapply(names(raw$obsm), function(nm) {
+    .embed_with_rownames(raw$obsm[[nm]], raw$obs_index)
+  })
+  names(reduced) <- names(raw$obsm)
+
+  sce <- SingleCellExperiment::SingleCellExperiment(
+    assays      = list(counts = x_lazy),
+    colData     = S4Vectors::DataFrame(obs_df),
+    rowData     = S4Vectors::DataFrame(var_df),
+    reducedDims = reduced,
+    metadata    = .parse_uns(raw$uns_json)
+  )
+
+  if (length(raw$varm)) {
+    S4Vectors::metadata(sce)$varm <- lapply(raw$varm, function(m) {
+      if (nrow(m) == length(raw$var_index)) rownames(m) <- raw$var_index
+      m
+    })
+  }
+
+  sce
 }
