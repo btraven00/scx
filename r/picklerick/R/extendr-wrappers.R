@@ -24,6 +24,15 @@ scx_inspect <- function(input, chunk_size) {
 }
 
 #' @keywords internal
+scx_read <- function(input, chunk_size) {
+  .Call(
+    "wrap__scx_read",
+    input, chunk_size,
+    PACKAGE = "picklerick"
+  )
+}
+
+#' @keywords internal
 scx_write_h5ad <- function(output, n_obs, n_vars,
                            x_indptr, x_indices, x_data,
                            obs_index, var_index,

@@ -3,4 +3,5 @@
 useDynLib(picklerick, .registration = TRUE)
 export(convert)
 export(inspect)
+export(read_h5ad)
 export(write_h5ad)
