@@ -501,10 +501,13 @@ fn scx_write_h5ad(
 ///
 /// @param input      Path to the file (.h5seurat, .h5ad, .h5).
 /// @param chunk_size Cells per internal streaming chunk.
+/// @param read_x     When TRUE, materialize the X matrix into a CSR triplet.
+///   When FALSE, x_indptr/x_indices/x_data come back empty — used by the R
+///   side's `lazy = TRUE` mode where X stays on disk via HDF5Array.
 /// @return A named list — see R/read.R for the field layout.
 /// @noRd
 #[extendr]
-fn scx_read(input: &str, chunk_size: i32) -> Result<Robj> {
+fn scx_read(input: &str, chunk_size: i32, read_x: bool) -> Result<Robj> {
     let chunk = chunk_size as usize;
     let input_path = Path::new(input);
 
@@ -516,27 +519,37 @@ fn scx_read(input: &str, chunk_size: i32) -> Result<Robj> {
         }
     });
 
+    let format_name = match fmt {
+        Some(Format::H5Seurat) => "H5Seurat",
+        Some(Format::H5Ad) | None => "H5AD",
+        Some(Format::ScxH5)   => "ScxH5",
+        Some(Format::BPCells) => "BPCells",
+        Some(Format::NpyDir)  => "NpyDir",
+        Some(Format::TenxH5)  => "TenxH5",
+        Some(Format::PlainH5) => "PlainH5",
+    };
+
     let result = block_on(async {
         match fmt {
             Some(Format::H5Seurat) => {
                 let mut r = H5SeuratReader::open(input_path, chunk, None, None)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk).await
+                collect_into_robj(&mut r, chunk, read_x, format_name).await
             }
             Some(Format::H5Ad) | None => {
                 let mut r = H5AdReader::open(input_path, chunk)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk).await
+                collect_into_robj(&mut r, chunk, read_x, format_name).await
             }
             Some(Format::ScxH5) => {
                 let mut r = ScxH5Reader::open(input_path, chunk)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk).await
+                collect_into_robj(&mut r, chunk, read_x, format_name).await
             }
             Some(Format::BPCells) => {
                 let mut r = BpcellsDatasetReader::open(input_path, chunk)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk).await
+                collect_into_robj(&mut r, chunk, read_x, format_name).await
             }
             Some(Format::NpyDir) => {
                 Err(anyhow::anyhow!("NpyDir format is not supported"))
@@ -553,6 +566,8 @@ fn scx_read(input: &str, chunk_size: i32) -> Result<Robj> {
 async fn collect_into_robj(
     reader: &mut dyn DatasetReader,
     chunk_size: usize,
+    read_x: bool,
+    format_name: &str,
 ) -> anyhow::Result<Robj> {
     let (n_obs, n_vars) = reader.shape();
     let obs   = reader.obs().await?;
@@ -563,8 +578,13 @@ async fn collect_into_robj(
     let layer_metas = reader.layer_metas().await?;
     let obsp_metas  = reader.obsp_metas().await?;
 
-    // Concatenate X chunks into a single CSR triplet.
-    let (x_indptr, x_indices, x_data) = concat_csr(reader.x_stream(), n_obs).await?;
+    // Concatenate X chunks into a single CSR triplet — unless caller opted out
+    // (lazy mode reads X on the R side via HDF5Array instead).
+    let (x_indptr, x_indices, x_data) = if read_x {
+        concat_csr(reader.x_stream(), n_obs).await?
+    } else {
+        (Vec::<u64>::new(), Vec::<u32>::new(), TypedVec::F64(Vec::new()))
+    };
 
     // layers / obsp — one CSR triplet each, also concatenated.
     let mut layers_pairs: Vec<(String, Robj)> = Vec::with_capacity(layer_metas.len());
@@ -590,6 +610,7 @@ async fn collect_into_robj(
     let uns_json    = serde_json::to_string(&uns.raw).unwrap_or_else(|_| "{}".to_string());
 
     Ok(list!(
+        format    = format_name,
         n_obs     = n_obs as i32,
         n_vars    = n_vars as i32,
         obs_index = obs.index,

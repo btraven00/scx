@@ -16,11 +16,12 @@ test_that("read_h5ad(as = 'list') exposes the expected fields and shapes", {
   raw <- read_h5ad(input, as = "list")
 
   expect_named(raw,
-    c("n_obs", "n_vars", "obs_index", "var_index",
+    c("format", "n_obs", "n_vars", "obs_index", "var_index",
       "obs_cols", "var_cols",
       "x_indptr", "x_indices", "x_data",
       "obsm", "varm", "layers", "obsp", "uns_json"),
     ignore.order = TRUE)
+  expect_equal(raw$format, "H5AD")
 
   expect_equal(raw$n_obs,  2700L)
   expect_equal(raw$n_vars, 13714L)
@@ -94,6 +95,33 @@ test_that("read_h5ad(as = 'Seurat') builds a valid Seurat object", {
 # ---------------------------------------------------------------------------
 # chunk_size invariance — same SCE shape and counts regardless of chunking.
 # ---------------------------------------------------------------------------
+
+test_that("read_h5ad(lazy = TRUE) returns SCE backed by DelayedMatrix", {
+  skip_if_not_installed("SingleCellExperiment")
+  skip_if_not_installed("HDF5Array")
+  input <- golden("pbmc3k_reference.h5ad")
+  sce <- read_h5ad(input, as = "SingleCellExperiment", lazy = TRUE)
+
+  expect_s4_class(sce, "SingleCellExperiment")
+  expect_equal(ncol(sce), 2700L)
+  expect_equal(nrow(sce), 13714L)
+
+  m <- SummarizedExperiment::assay(sce, "counts")
+  expect_true(methods::is(m, "DelayedMatrix"))
+  expect_equal(dim(m), c(13714L, 2700L))
+
+  # A small slice should equal the eager equivalent.
+  sce_eager <- read_h5ad(input, as = "SingleCellExperiment")
+  slice_lazy  <- as.matrix(SummarizedExperiment::assay(sce, "counts")[1:5, 1:10])
+  slice_eager <- as.matrix(SummarizedExperiment::assay(sce_eager, "counts")[1:5, 1:10])
+  expect_equal(slice_lazy, slice_eager)
+})
+
+test_that("read_h5ad(lazy = TRUE, as = 'Seurat') errors out", {
+  input <- golden("pbmc3k_reference.h5ad")
+  expect_error(read_h5ad(input, as = "Seurat", lazy = TRUE),
+               "incompatible with as = 'Seurat'")
+})
 
 test_that("chunk_size does not affect the assembled SCE", {
   skip_if_not_installed("SingleCellExperiment")
