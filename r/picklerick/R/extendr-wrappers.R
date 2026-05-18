@@ -24,10 +24,10 @@ scx_inspect <- function(input, chunk_size) {
 }
 
 #' @keywords internal
-scx_read <- function(input, chunk_size) {
+scx_read <- function(input, chunk_size, read_x = TRUE) {
   .Call(
     "wrap__scx_read",
-    input, chunk_size,
+    input, chunk_size, read_x,
     PACKAGE = "picklerick"
   )
 }
