@@ -108,7 +108,8 @@ jobs:
           # and fails with ENAMETOOLONG (upstream issue #2045).
           rattler-build build --recipe conda.recipe/${{ matrix.recipe }}/recipe.yaml \
             --output-dir "${RUNNER_TEMP}/rattler-output" \
-            --target-platform ${{ matrix.platform.target }}
+            --target-platform ${{ matrix.platform.target }} \
+            --channel conda-forge --channel bioconda
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
