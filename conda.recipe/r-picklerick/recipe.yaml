@@ -38,9 +38,19 @@ requirements:
   host:
     - r-base
     - hdf5 1.12.*
+    - r-matrix
+    - r-jsonlite
+    - bioconductor-s4vectors
+    - bioconductor-singlecellexperiment
+    - bioconductor-summarizedexperiment
   run:
     - r-base
     - hdf5 1.12.*
+    - r-matrix
+    - r-jsonlite
+    - bioconductor-s4vectors
+    - bioconductor-singlecellexperiment
+    - bioconductor-summarizedexperiment
 
 tests:
   - script:
