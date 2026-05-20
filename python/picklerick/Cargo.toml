@@ -16,6 +16,7 @@ vendored-hdf5 = ["scx-core/vendored-hdf5"]
 [dependencies]
 anyhow = "1"
 futures = "0.3"
+# TODO: bump to pyo3 0.24+ for Python 3.14 support; recipe pins python <3.14 as a workaround.
 pyo3 = { version = "0.22", features = ["extension-module"] }
 scx-core = { path = "../../crates/scx-core", default-features = false }
 tokio = { version = "1", features = ["rt"] }
