@@ -18,13 +18,11 @@ build:
       then:
         - export HDF5_DIR="$PREFIX"
         - export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-        - export CARGO_TARGET_DIR="/tmp/picklerick-r-build"
         - cd r/picklerick
         - R CMD INSTALL --build .
     - if: win
       then:
         - set "HDF5_DIR=%LIBRARY_PREFIX%"
-        - set "CARGO_TARGET_DIR=%TEMP%\picklerick-r-build"
         - cd r\picklerick
         - R CMD INSTALL --build .
 
@@ -38,6 +36,7 @@ requirements:
   host:
     - r-base
     - hdf5 1.12.*
+    - zlib
     - r-matrix
     - r-jsonlite
     - bioconductor-s4vectors
