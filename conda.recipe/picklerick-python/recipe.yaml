@@ -22,6 +22,10 @@ build:
         - export HDF5_DIR="$PREFIX"
         - export CARGO_TARGET_DIR="/tmp/picklerick-py-build"
         - export MATURIN_PEP517_ARGS="--no-default-features"
+        # Force maturin to tag the wheel with the conda macOS deployment
+        # target (not the build runner's OS version) so pip check accepts
+        # it in the test env. No-op on linux.
+        - export MACOSX_DEPLOYMENT_TARGET=11.0
         - cd python/picklerick
         - ${{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
     - if: win
