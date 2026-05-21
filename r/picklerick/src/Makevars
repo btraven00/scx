@@ -13,7 +13,11 @@ PKG_LIBS   = $(STATLIB) $(HDF5_LIBS) -lz -ldl -lm
 $(SHLIB): $(STATLIB)
 
 $(STATLIB):
-	cargo build --lib --release --manifest-path=./rust/Cargo.toml
+	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir=$(TARGET_DIR)
+	@echo "==> Makevars debug: PWD=$$(pwd)"
+	@echo "==> Makevars debug: looking for $(STATLIB)"
+	@find ./rust -name 'libpicklerick_r.a' -print 2>/dev/null || true
+	@ls -la $(LIBDIR) 2>/dev/null || echo "  (no $(LIBDIR))"
 
 clean:
 	rm -Rf $(SHLIB) $(STATLIB) $(TARGET_DIR)
