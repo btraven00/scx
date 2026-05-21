@@ -14,10 +14,16 @@ $(SHLIB): $(STATLIB)
 
 $(STATLIB):
 	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir=$(TARGET_DIR)
-	@echo "==> Makevars debug: PWD=$$(pwd)"
-	@echo "==> Makevars debug: looking for $(STATLIB)"
-	@find ./rust -name 'libpicklerick_r.a' -print 2>/dev/null || true
-	@ls -la $(LIBDIR) 2>/dev/null || echo "  (no $(LIBDIR))"
+	@# When CARGO_BUILD_TARGET is set (e.g. by conda's rust toolchain
+	@# activation), cargo writes to $(TARGET_DIR)/<triple>/release/ instead
+	@# of $(TARGET_DIR)/release/. Copy it back to the expected location.
+	@if [ ! -f $(STATLIB) ]; then \
+	    found=$$(find $(TARGET_DIR) -path '*/release/libpicklerick_r.a' | head -1); \
+	    if [ -n "$$found" ]; then \
+	        mkdir -p $(LIBDIR); \
+	        cp "$$found" $(STATLIB); \
+	    fi; \
+	fi
 
 clean:
 	rm -Rf $(SHLIB) $(STATLIB) $(TARGET_DIR)
