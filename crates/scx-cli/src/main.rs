@@ -269,8 +269,7 @@ enum Cli {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -278,7 +277,7 @@ async fn main() {
         )
         .init();
 
-    if let Err(e) = run().await {
+    if let Err(e) = futures::executor::block_on(run()) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
