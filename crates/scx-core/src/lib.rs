@@ -1,3 +1,4 @@
+pub mod api;
 pub mod bpcells;
 pub mod detect;
 pub mod dtype;
