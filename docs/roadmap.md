@@ -763,7 +763,53 @@ be added when a concrete use case arises.
 
 ---
 
-## 0.1.4 — Python streaming iterator → numpy
+## 0.1.4 (done) — Public Rust write API (`scx_core::api::write`)
+
+**Goal:** let other Rust crates hand `scx-core` an in-memory matrix +
+obs/var metadata and get back a written file, without touching the
+streaming `DatasetReader` / `DatasetWriter` traits.
+
+Now that static HDF5 linking is solved (see 0.0.6 notes), downstream Rust
+projects can depend on `scx-core` and delegate format writing.
+
+### What was delivered
+
+- `scx_core::api::write` module with:
+  - **Eager writers**: `write_h5ad_csr`, `write_h5ad_dense`,
+    `write_bpcells_h5seurat_csr`, `write_bpcells_h5seurat_dense`,
+    `write_h5seurat_dgcmatrix_csr`, `write_h5seurat_dgcmatrix_dense`.
+  - **Streaming builders**: `H5AdBuilder`, `BpcellsH5SeuratBuilder`,
+    `H5SeuratBuilder` — `new`, `obs`, `var`, `add_obsm`, `add_varm`,
+    `add_uns`, `add_layer_csr`/`add_obsp_csr` (h5ad only),
+    `push_x_csr_chunk`, `finalize`.
+  - `H5AdOptions` and `BpcellsOptions` for per-format knobs.
+  - `ScxError` — public thiserror enum (`Io`, `Hdf5`, `WrongShape`,
+    `WrongOrientation`, `NotImplemented`, `Other`).
+- Inputs: `sprs::CsMatViewI<f32, u32>` for sparse, `ndarray::ArrayView2<f32>`
+  for dense. CSC inputs are rejected with `WrongOrientation` (no silent
+  transpose).
+- All public entry points are **synchronous**. Internally they call
+  `futures::executor::block_on` on the existing async writer traits — no
+  tokio runtime, consistent with the 0.1.3 tokio cleanup.
+- `crates/scx-core/examples/write_from_ndarray.rs` demonstrates dense →
+  `.h5ad` and sparse → BPCells `.h5seurat` end-to-end.
+- 8 round-trip tests cover: CSR h5ad, dense h5ad (zero-drop), builder obsm
+  preservation, builder layer preservation, CSC rejection, BPCells CSR,
+  BPCells dense, dgCMatrix CSR. Reads back via the existing readers.
+
+### Out of scope (deferred)
+
+- **Compression**: `H5AdOptions::compression` is reserved; `H5AdWriter`
+  doesn't expose gzip yet.
+- **`add_uns` on h5seurat builders**: present, but uns translation across
+  formats is best-effort.
+- **Zarr writer**: deferred to 0.3.0 alongside the network reader work.
+- **Read-side facade**: not promoted in this milestone. Existing
+  `H5AdReader`/`H5SeuratReader` remain the read API.
+
+---
+
+## 0.1.5 — Python streaming iterator → numpy
 
 **Goal: expose chunk-by-chunk matrix iteration to Python for benchmark
 and analysis workflows.**
@@ -801,7 +847,7 @@ matrix access. Python lacks an equivalent, so `open_stream` fills the gap.
 
 ---
 
-## 0.1.5 — Distribution: PyPI + R-universe
+## 0.1.6 — Distribution: PyPI + R-universe
 
 **Goal:** ship what's built to the community without requiring conda.
 
@@ -829,7 +875,7 @@ matrix access. Python lacks an equivalent, so `open_stream` fills the gap.
 
 ---
 
-## 0.1.6 — Truly streaming H5Seurat write
+## 0.1.7 — Truly streaming H5Seurat write
 
 The 0.0.9 BPCells writer and the 0.0.4 dgCMatrix writer both buffer O(nnz)
 entries in RAM. For genuine atlas-scale (>1B nnz), implement a two-pass
@@ -861,6 +907,72 @@ Key points:
 **Partial progress:** `crates/scx-core/src/provenance.rs` + `--source-url` flag
 on `scx convert` are implemented (byte-level SHA-256 reproducibility for single
 files). The multi-file merge pipeline is still pending.
+
+---
+
+## 0.3.0 — Network-backed readers (Zarr, Parquet, ranged HDF5)
+
+**Goal:** read directly from object stores (S3/GCS/HTTP) without staging files
+locally. Activates the async trait surface that has been structural-only since
+0.0.1 — see `docs/tech-debt-async.md` for the runtime-gating plan.
+
+### Targets
+
+- **Zarr** via `zarrs` over `object_store`. Many small range GETs per chunk;
+  `buffer_unordered(N)` pipelines reads — the canonical async-I/O win.
+- **Parquet** via `parquet::ParquetRecordBatchStreamBuilder` over `object_store`.
+  Async-native; footer + projected column reads avoid full-file pulls.
+- **Ranged h5ad / h5seurat** over HTTP. Either `ros3` VFD (sync, painful) or
+  reimplement chunked HDF5 reads over `object_store` (async, larger project).
+  Defer the HDF5-over-HTTP path; Zarr/Parquet cover most cloud-native use cases.
+
+### Tech-debt prerequisite
+
+Land the `net` / `object-store` feature flag from `docs/tech-debt-async.md` first
+so the tokio runtime is constructed only when a network reader is actually
+instantiated. Local HDF5 conversion stays runtime-free.
+
+### Merge implications
+
+`scx merge` becomes the obvious beneficiary: wrap the per-input pipeline in
+`buffer_unordered(N)` once any input is network-backed. The 0.2.0 merge loop
+stays sequential; this is a ~10-line change once a network reader exists.
+
+---
+
+## 0.4.0 — TileDB-SOMA reader
+
+**Goal:** read `SOMAExperiment` collections (CZI + TileDB's single-cell spec,
+storage layer behind CELLxGENE Census).
+
+### Why deferred to 0.4.0
+
+SOMA is a much larger integration than Zarr/Parquet. There is no first-class
+Rust SOMA crate today; `tiledb-rs` bindings are thin and not async-native.
+Options:
+
+1. **FFI to `libtiledbsoma` (C++)** — mirrors what Python/R SDKs do. Heavy
+   build dependency, but tracks the official spec automatically. Likely path.
+2. **Reimplement SOMA reads on `tiledb-rs`** — multi-month effort against an
+   evolving spec; rejects the maintenance burden.
+3. **Skip in-process; treat SOMA as an external converter source** — use
+   `tiledbsoma` Python to materialize SOMA → h5ad, then feed scx. Fallback if
+   neither (1) nor (2) is justified by demand.
+4. **Wait for upstream Rust SOMA** — TileDB has signalled interest, nothing
+   shipped. Monitor.
+
+### Async fit
+
+TileDB's I/O against S3/GCS is concurrent and range-based — same shape as
+Zarr/Parquet. Reinforces the "keep async traits" decision from
+`docs/tech-debt-async.md`. Whatever path (1)–(3) we pick, the boundary into
+`scx-core` stays async.
+
+### Scope (tentative)
+
+- Reader only initially; writing into a SOMAExperiment is a separate project.
+- Map SOMA's `obs` / `var` / `X` / `obsm` to existing IR types.
+- Audience: CELLxGENE Census users, atlas-scale workflows already on TileDB.
 
 ---
 
