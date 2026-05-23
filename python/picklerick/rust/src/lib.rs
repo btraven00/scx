@@ -22,11 +22,7 @@ fn py_err<E: std::fmt::Display>(e: E) -> PyErr {
 }
 
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime")
-        .block_on(fut)
+    futures::executor::block_on(fut)
 }
 
 fn parse_dtype(dtype: &str) -> anyhow::Result<DataType> {
@@ -512,11 +508,7 @@ fn scx_open_stream(
     let (tx, rx) = std::sync::mpsc::sync_channel::<std::result::Result<MatrixChunk, String>>(8);
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        rt.block_on(async move {
+        futures::executor::block_on(async move {
             let mut reader = reader;
             let mut stream = reader.x_stream();
             while let Some(chunk) = stream.next().await {

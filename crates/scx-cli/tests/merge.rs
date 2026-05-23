@@ -75,11 +75,7 @@ fn assert_failure(out: &std::process::Output) {
 // ---------------------------------------------------------------------------
 
 fn make_base_h5ad(path: &Path, n_obs: usize, n_vars: usize) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async {
+    futures::executor::block_on(async {
         let obs = ObsTable {
             index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
             columns: vec![],
@@ -106,11 +102,7 @@ fn make_obs_column_h5ad(
     n_vars: usize,
     extra_cols: Vec<(&str, ColumnData)>,
 ) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async {
+    futures::executor::block_on(async {
         let obs = ObsTable {
             index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
             columns: extra_cols
@@ -138,11 +130,7 @@ fn make_obs_column_h5ad(
 }
 
 fn make_h5ad_with_layer(path: &Path, n_obs: usize, n_vars: usize, layer_name: &str) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async {
+    futures::executor::block_on(async {
         let obs = ObsTable {
             index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
             columns: vec![],
@@ -190,11 +178,7 @@ fn make_h5ad_with_layer(path: &Path, n_obs: usize, n_vars: usize, layer_name: &s
 }
 
 fn make_h5ad_with_obsm(path: &Path, n_obs: usize, n_vars: usize, obsm_name: &str, n_dims: usize) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async {
+    futures::executor::block_on(async {
         let obs = ObsTable {
             index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
             columns: vec![],
@@ -283,11 +267,7 @@ fn test_merge_create_layer() {
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             assert_eq!(reader.shape(), (10, 8));
             let metas = reader.layer_metas().await.unwrap();
@@ -333,11 +313,7 @@ fn test_merge_create_obs_column() {
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let obs = reader.obs().await.unwrap();
             assert!(
@@ -371,11 +347,7 @@ fn test_merge_create_obsm() {
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let obsm = reader.obsm().await.unwrap();
             assert!(obsm.map.contains_key("X_pca"), "obsm 'X_pca' missing");
@@ -531,11 +503,7 @@ fn test_merge_append_adds_second_slot() {
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let metas = reader.layer_metas().await.unwrap();
             let names: Vec<&str> = metas.iter().map(|m| m.name.as_str()).collect();
@@ -580,11 +548,7 @@ fn test_merge_provenance_written_to_uns() {
     ]));
 
     with_hdf5(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let mut reader = H5AdReader::open(&out, 5).unwrap();
             let uns = reader.uns().await.unwrap();
             let prov = uns
