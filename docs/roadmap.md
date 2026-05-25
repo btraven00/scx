@@ -892,21 +892,88 @@ where nnz > ~500M; the current buffered writers handle everything up to
 
 ---
 
-## 0.2.0 — Merge / fusion
+## 0.2.0 (done) — Merge / fusion
 
 Combine multiple per-sample `.h5ad` files into a single atlas-scale file with
-provenance tracking. See `feature_merge.md` in project memory for full design.
+provenance tracking. Shipped 2026-04-28 (PR #4, squash-merged to main; tag
+`v0.2.0` added 2026-05-25). See `feature_merge.md` in project memory for the
+design rationale and `docs/merge.md` for end-user docs.
 
-Key points:
-- Streaming concatenation (cell-major): never materializes the full combined
-  matrix; peak RSS ~ chunk_size
-- SHA-256 provenance tracking per source file
-- obs metadata merge with configurable conflict resolution
-- CLI: `scx merge sample1.h5ad sample2.h5ad ... -o atlas.h5ad`
+Delivered:
+- `scx merge` CLI subcommand — create + append modes, slot patches over
+  layers / obs+var columns / obsm+varm
+- Per-slot provenance written to `uns["scx_provenance"]`
+- `scx export` CSV / Parquet
+- Integration tests, HDF5 lock serialisation in test harness
 
-**Partial progress:** `crates/scx-core/src/provenance.rs` + `--source-url` flag
-on `scx convert` are implemented (byte-level SHA-256 reproducibility for single
-files). The multi-file merge pipeline is still pending.
+Deferred to 0.2.1: obsp / varp / uns slot support in merge.
+
+---
+
+## Picklerick R zero-copy thread (in progress on `feat/picklerick-zerocopy`)
+
+Not a version milestone, but a research/perf thread worth tracking separately.
+
+Starting point: `picklerick::read_h5ad` on pbmc3k (28 MB file) goes through
+the extendr/Rust bridge and uses ~622 MB peak heap when assembling a
+`SingleCellExperiment`. Goal: identify where the bytes go and cut them.
+
+What landed in this session (2026-05-25):
+
+1. **Fixed `r/picklerick/src/Makevars` dependency tracking.** `$(STATLIB)`
+   had no Rust source deps, so `cargo build` was only invoked when the
+   archive didn't exist. Result: edits to `r/picklerick/src/rust/src/lib.rs`
+   were silently ignored — the loaded `.so` could be arbitrarily stale (we
+   caught a 7-day-old binary masking every benchmark iteration).
+2. **Switched picklerick to vendored static HDF5** (the deferred follow-up
+   from commit 5992b9a). HDF5 + zlib are now linked statically inside
+   `libpicklerick_r.a`; no system libhdf5 at link/load time. Bypasses the
+   `H5Literate` ABI drift in conda's HDF5 1.14+.
+3. **R bench harness + heaptrack pipeline** under `bench/r/`. Includes
+   warmup, /proc/self/status VmHWM tracking, and a working
+   `heaptrack`-via-direct-R-launcher recipe (extra friction: `Rscript`'s
+   exec model loses `LD_PRELOAD`; you have to call the `R` binary inside
+   `lib/R/bin/exec/` with `R_HOME` set).
+
+What we learned (the negative result that shapes the next step):
+
+- **R's SEXP page allocator (`GetNewPage` in libR.so) dominates** picklerick
+  peak heap by ~72% (451 MB out of 622 MB on pbmc3k SCE). Trimming Rust-side
+  transients (e.g. the `Vec<u64> → Vec<i32> → INTSXP` two-step in the
+  extendr bridge) is byte-for-byte invisible to peak memory. We made the
+  change anyway (commit 2362b14) because it's slightly tidier, but it's
+  a no-op for the metric.
+- **ALTREP + mmap zero-copy doesn't apply to h5ad.** HDF5's chunked +
+  compressed storage rules it out — you can't mmap `/X/data` and treat
+  the bytes as `double*`. The h5ad equivalent of "lazy zero-copy" is
+  `HDF5Array::H5SparseMatrix` + DelayedArray, which picklerick's
+  `lazy = TRUE` path already uses. See `scratch/r-altrep.md` for full
+  reasoning.
+
+Candidate next steps (none committed; pick one when picking this back up):
+
+- **(a) Investigate why `lazy = TRUE` is *slower* than eager on norman.**
+  norman (83 MB): lazy 1209 ms vs eager 1016 ms. Suspect HDF5Array's
+  per-call file-open / setup tax. Likely cacheable. Small fix, clear win
+  if it pans out.
+- **(b) Skip intermediate SEXPs by filling a preallocated dgCMatrix from
+  streaming chunks.** This is the only Rust-side change that would
+  actually move peak memory: have Rust write straight into the SEXP
+  buffers backing the dgCMatrix `i` / `p` / `x` slots, rather than
+  materialising those buffers as standalone SEXPs first. Requires the
+  dgCMatrix to be allocated R-side (knowing nnz from a metadata pass)
+  and its slot pointers handed to Rust. Bigger surgery.
+- **(c) Build real ALTREP+mmap for `.npy` (or the `.scxd` probe).** The
+  pattern in `scratch/r-altrep.md` works for native-layout payloads.
+  Doesn't optimise h5ad at all but builds the zero-copy primitive on
+  formats where it's structurally valid. This is also the PhD-benchmark
+  contribution thread (see `scratch/format-bench.md`,
+  `scratch/format_comparison.md`).
+
+Branch state: `feat/picklerick-zerocopy` ready to merge or iterate from.
+The Makevars fix and HDF5 vendoring should land regardless of which (if
+any) of (a/b/c) gets picked next — they're independent infrastructure
+wins.
 
 ---
 

@@ -15,20 +15,16 @@ crate-type = ["staticlib"]
 
 [dependencies]
 extendr-api = "0.7"
+# Vendored scx-core builds HDF5 + zlib statically by default (mirrors the
+# workspace's vendored-hdf5 feature flip in commit 5992b9a). This isolates
+# picklerick's HDF5 from rhdf5 / hdf5r and avoids ABI drift against the
+# system libhdf5 (e.g. H5Literate removed in 1.14+).
 scx-core    = { path = "./scx-core" }
 ndarray     = "0.16"
 tokio       = { version = "1", features = ["rt"] }
 futures     = "0.3"
 anyhow      = "1"
 serde_json  = "1"
-# Dynamic system HDF5. The workspace flipped to vendored static HDF5 (see
-# docs/roadmap.md §0.0.6 "Re-resolution"), but the R package still links
-# dynamically because:
-#   1. It builds outside the workspace (vendored scx-core in ./scx-core) for
-#      r-universe, so the workspace's `vendored-hdf5` feature isn't wired in.
-#   2. rhdf5 / hdf5r coexistence under a vendored static libhdf5 has not been
-#      validated — switching could regress R session safety.
-# TODO: enable vendored-hdf5 here once both are addressed.
 
 [profile.release]
 lto           = true
