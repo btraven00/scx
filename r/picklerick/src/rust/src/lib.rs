@@ -504,10 +504,15 @@ fn scx_write_h5ad(
 /// @param read_x     When TRUE, materialize the X matrix into a CSR triplet.
 ///   When FALSE, x_indptr/x_indices/x_data come back empty — used by the R
 ///   side's `lazy = TRUE` mode where X stays on disk via HDF5Array.
+/// @param read_uns   When TRUE, serialize the uns tree to JSON and return it
+///   as `uns_json`. When FALSE (default on the R side), `uns_json = ""` —
+///   the R wrapper reads uns on demand via rhdf5 instead, which skips the
+///   ~18× memory inflation the JSON intermediate causes (HDF5 stores uns as
+///   native typed arrays; JSON forces every integer into REALSXP).
 /// @return A named list — see R/read.R for the field layout.
 /// @noRd
 #[extendr]
-fn scx_read(input: &str, chunk_size: i32, read_x: bool) -> Result<Robj> {
+fn scx_read(input: &str, chunk_size: i32, read_x: bool, read_uns: bool) -> Result<Robj> {
     let chunk = chunk_size as usize;
     let input_path = Path::new(input);
 
@@ -534,22 +539,22 @@ fn scx_read(input: &str, chunk_size: i32, read_x: bool) -> Result<Robj> {
             Some(Format::H5Seurat) => {
                 let mut r = H5SeuratReader::open(input_path, chunk, None, None)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, format_name).await
+                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
             }
             Some(Format::H5Ad) | None => {
                 let mut r = H5AdReader::open(input_path, chunk)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, format_name).await
+                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
             }
             Some(Format::ScxH5) => {
                 let mut r = ScxH5Reader::open(input_path, chunk)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, format_name).await
+                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
             }
             Some(Format::BPCells) => {
                 let mut r = BpcellsDatasetReader::open(input_path, chunk)
                     .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, format_name).await
+                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
             }
             Some(Format::NpyDir) => {
                 Err(anyhow::anyhow!("NpyDir format is not supported"))
@@ -567,13 +572,18 @@ async fn collect_into_robj(
     reader: &mut dyn DatasetReader,
     chunk_size: usize,
     read_x: bool,
+    read_uns: bool,
     format_name: &str,
 ) -> anyhow::Result<Robj> {
     let (n_obs, n_vars) = reader.shape();
     let obs   = reader.obs().await?;
     let var   = reader.var().await?;
     let obsm  = reader.obsm().await?;
-    let uns   = reader.uns().await?;
+    let uns   = if read_uns {
+        reader.uns().await?
+    } else {
+        scx_core::ir::UnsTable::default()
+    };
     let varm  = reader.varm().await?;
     let layer_metas = reader.layer_metas().await?;
     let obsp_metas  = reader.obsp_metas().await?;
@@ -607,7 +617,11 @@ async fn collect_into_robj(
     let varm_list     = embeddings_to_robj_from_map(&varm.map);
 
     let x_data_robj = typed_vec_to_robj(x_data);
-    let uns_json    = serde_json::to_string(&uns.raw).unwrap_or_else(|_| "{}".to_string());
+    let uns_json    = if read_uns {
+        serde_json::to_string(&uns.raw).unwrap_or_else(|_| "{}".to_string())
+    } else {
+        String::new()
+    };
 
     Ok(list!(
         format    = format_name,

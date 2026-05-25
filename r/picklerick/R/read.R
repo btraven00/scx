@@ -43,7 +43,8 @@
 read_h5ad <- function(path,
                       as         = c("SingleCellExperiment", "Seurat", "list"),
                       chunk_size = 5000L,
-                      lazy       = FALSE) {
+                      lazy       = FALSE,
+                      parse_uns  = FALSE) {
   as <- match.arg(as)
   path <- path.expand(path)
 
@@ -56,7 +57,11 @@ read_h5ad <- function(path,
       stop("read_h5ad(lazy = TRUE) requires the HDF5Array package ",
            "(Bioconductor).", call. = FALSE)
     }
-    raw <- scx_read(path, as.integer(chunk_size), read_x = FALSE)
+    # read_uns = FALSE: Rust skips JSON-serialising uns. R wrapper reads
+    # uns on demand via rhdf5 (uns() / parse_uns = TRUE) — see read_h5ad
+    # docstring. read_uns = TRUE would only matter for non-H5AD inputs
+    # where rhdf5 can't read /uns; current lazy mode is H5AD-only.
+    raw <- scx_read(path, as.integer(chunk_size), read_x = FALSE, read_uns = FALSE)
     if (!identical(raw$format, "H5AD")) {
       stop(sprintf(
         "read_h5ad: lazy = TRUE currently supports H5AD only (got %s). ",
@@ -64,15 +69,85 @@ read_h5ad <- function(path,
         "Re-run with lazy = FALSE.", call. = FALSE)
     }
     if (as == "list") return(raw)
-    return(.as_sce_lazy(raw, path))
+    return(.as_sce_lazy(raw, path, parse_uns = parse_uns))
   }
 
-  raw <- scx_read(path, as.integer(chunk_size), read_x = TRUE)
+  # For non-H5AD inputs the on-demand rhdf5 path won't apply (it's H5AD-
+  # only); fall back to JSON serialisation when the caller explicitly opts
+  # into eager uns parsing AND the source isn't an H5AD file we can stream.
+  # We always pass read_uns = FALSE here and let .materialise_uns decide
+  # whether to use rhdf5 (preferred) or fall back to JSON.
+  raw <- scx_read(path, as.integer(chunk_size), read_x = TRUE, read_uns = FALSE)
   switch(as,
     list                 = raw,
-    SingleCellExperiment = .as_sce(raw),
-    Seurat               = .as_seurat(raw)
+    SingleCellExperiment = .as_sce(raw, path = path, parse_uns = parse_uns),
+    Seurat               = .as_seurat(raw, path = path, parse_uns = parse_uns)
   )
+}
+
+#' Access uns metadata from a read_h5ad() result on demand
+#'
+#' When `read_h5ad()` is called with the default `parse_uns = FALSE`, the
+#' `uns` slot is *not* eagerly materialised — the source file path is
+#' stashed in `metadata(sce)$.uns_path` (for SCE) or `obj@misc$.uns_path`
+#' (for Seurat). Use `uns()` to read keys on demand via `rhdf5`, which is
+#' both faster and ~10–20× cheaper in memory than the eager JSON path
+#' (HDF5 stores uns as native typed arrays; the eager parse goes through
+#' JSON which inflates every integer into REALSXP).
+#'
+#' @param x      A `SingleCellExperiment`, `Seurat`, or named list returned
+#'   by `read_h5ad()`, OR a path string to an `.h5ad` file directly.
+#' @param key    Top-level uns key. If `NULL`, returns the list of
+#'   available keys (cheap; uses HDF5 group listing).
+#' @param sub_key Optional sub-key for nested uns (e.g. one condition
+#'   under a per-condition dict). If supplied, only that leaf is read.
+#'
+#' @return If `key` is `NULL`: character vector of top-level uns keys.
+#'   Otherwise the value at that path (a vector, list, or scalar
+#'   depending on the on-disk layout).
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' sce <- read_h5ad("norman.h5ad")           # parse_uns = FALSE
+#' uns(sce)                                  # list top-level keys
+#' x <- uns(sce, "top_non_zero_de_20")       # read one whole key
+#' x <- uns(sce, "top_non_zero_de_20", "A549_AHR+FEV_1+1")  # one leaf
+#' }
+uns <- function(x, key = NULL, sub_key = NULL) {
+  path <- .uns_source_path(x)
+  if (is.null(path)) {
+    stop("uns(): no source path on this object. Was it returned by ",
+         "read_h5ad()? (If you used parse_uns = TRUE the uns is already ",
+         "materialised; access it directly with metadata() / @misc.)",
+         call. = FALSE)
+  }
+  if (!requireNamespace("rhdf5", quietly = TRUE)) {
+    stop("uns() requires the rhdf5 package (Bioconductor).", call. = FALSE)
+  }
+  if (is.null(key)) {
+    # h5ls(recursive = 1) only lists the file root; the /uns children
+    # show up at recursive depth 2. The walk is still cheap because
+    # rhdf5 stops descending past the requested depth.
+    ls <- rhdf5::h5ls(path, recursive = 2)
+    return(ls$name[ls$group == "/uns"])
+  }
+  h5path <- if (is.null(sub_key)) file.path("/uns", key)
+            else                  file.path("/uns", key, sub_key)
+  rhdf5::h5read(path, h5path)
+}
+
+# Resolve the on-disk source path for uns lookups, across return shapes.
+.uns_source_path <- function(x) {
+  if (is.character(x) && length(x) == 1L) return(path.expand(x))
+  if (is.list(x) && !is.null(x$.uns_path)) return(x$.uns_path)
+  if (methods::is(x, "SummarizedExperiment")) {
+    return(S4Vectors::metadata(x)$.uns_path)
+  }
+  if (methods::is(x, "Seurat")) {
+    return(x@misc$.uns_path)
+  }
+  NULL
 }
 
 # ---------------------------------------------------------------------------
@@ -138,11 +213,37 @@ read_h5ad <- function(path,
            })
 }
 
+# Read the full uns tree directly from HDF5 (skipping the JSON intermediate).
+# Used by parse_uns = TRUE when the source is an .h5ad file. Returns a list
+# matching the on-disk hierarchy. Each leaf comes back with its native HDF5
+# type — integer arrays stay integer (4 B/elem) instead of REALSXP (8 B/elem).
+.uns_from_h5 <- function(path) {
+  if (!requireNamespace("rhdf5", quietly = TRUE)) {
+    warning("parse_uns = TRUE requested but rhdf5 is unavailable; ",
+            "uns will be empty.")
+    return(list())
+  }
+  tryCatch(rhdf5::h5read(path, "/uns"),
+           error = function(e) {
+             warning("read_h5ad: failed to read /uns from ", path, ": ",
+                     conditionMessage(e))
+             list()
+           })
+}
+
+# Materialise uns according to parse_uns + path. NULL path means we have no
+# source to stream from (e.g. non-H5AD reader); fall back to JSON.
+.materialise_uns <- function(parse_uns, path, uns_json) {
+  if (!isTRUE(parse_uns)) return(list())
+  if (!is.null(path) && file.exists(path)) return(.uns_from_h5(path))
+  .parse_uns(uns_json)
+}
+
 # ---------------------------------------------------------------------------
 # SingleCellExperiment assembler
 # ---------------------------------------------------------------------------
 
-.as_sce <- function(raw) {
+.as_sce <- function(raw, path = NULL, parse_uns = FALSE) {
   if (!requireNamespace("SingleCellExperiment", quietly = TRUE)) {
     stop("read_h5ad(as = 'SingleCellExperiment') requires the ",
          "SingleCellExperiment package.", call. = FALSE)
@@ -172,12 +273,15 @@ read_h5ad <- function(path,
   })
   names(reduced) <- names(raw$obsm)
 
+  meta_list <- .materialise_uns(parse_uns, path, raw$uns_json)
+  if (!is.null(path)) meta_list$.uns_path <- path
+
   sce <- SingleCellExperiment::SingleCellExperiment(
     assays      = c(list(counts = m), layer_assays),
     colData     = S4Vectors::DataFrame(obs_df),
     rowData     = S4Vectors::DataFrame(var_df),
     reducedDims = reduced,
-    metadata    = .parse_uns(raw$uns_json)
+    metadata    = meta_list
   )
 
   # obsp → colPair (n_obs × n_obs sparse matrices).
@@ -207,7 +311,7 @@ read_h5ad <- function(path,
 # Seurat assembler
 # ---------------------------------------------------------------------------
 
-.as_seurat <- function(raw) {
+.as_seurat <- function(raw, path = NULL, parse_uns = FALSE) {
   if (!requireNamespace("Seurat", quietly = TRUE)) {
     stop("read_h5ad(as = 'Seurat') requires the Seurat package ",
          "(in Suggests; install separately).", call. = FALSE)
@@ -259,9 +363,10 @@ read_h5ad <- function(path,
                     nm))
   }
 
-  # uns → @misc.
-  uns <- .parse_uns(raw$uns_json)
-  if (length(uns)) obj@misc <- uns
+  # uns → @misc. Skip JSON unless caller asked for an eager parse.
+  uns_list <- .materialise_uns(parse_uns, path, raw$uns_json)
+  if (!is.null(path)) uns_list$.uns_path <- path
+  if (length(uns_list)) obj@misc <- uns_list
 
   obj
 }
@@ -273,7 +378,7 @@ read_h5ad <- function(path,
 # be wrapped the same way but each one is its own HDF5 group lookup.
 # ---------------------------------------------------------------------------
 
-.as_sce_lazy <- function(raw, path) {
+.as_sce_lazy <- function(raw, path, parse_uns = FALSE) {
   if (!requireNamespace("SingleCellExperiment", quietly = TRUE)) {
     stop("read_h5ad(lazy = TRUE) requires the SingleCellExperiment package.",
          call. = FALSE)
@@ -296,12 +401,15 @@ read_h5ad <- function(path,
   })
   names(reduced) <- names(raw$obsm)
 
+  meta_list <- .materialise_uns(parse_uns, path, raw$uns_json)
+  if (!is.null(path)) meta_list$.uns_path <- path
+
   sce <- SingleCellExperiment::SingleCellExperiment(
     assays      = list(counts = x_lazy),
     colData     = S4Vectors::DataFrame(obs_df),
     rowData     = S4Vectors::DataFrame(var_df),
     reducedDims = reduced,
-    metadata    = .parse_uns(raw$uns_json)
+    metadata    = meta_list
   )
 
   if (length(raw$varm)) {
