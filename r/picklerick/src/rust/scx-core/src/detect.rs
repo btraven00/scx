@@ -84,15 +84,18 @@ pub fn sniff(path: &Path) -> Option<Format> {
     }
 
     // --- H5Seurat ---
-    // SeuratDisk always writes /cell.names (string dataset) and sets
-    // active.assay as a root-level HDF5 attribute.
+    // The /cell.names root dataset + /assays group are the structural
+    // fingerprint. SeuratDisk also writes an active.assay root attr, but
+    // our lean BPCells-mode output skips that unless --seuratdisk-compat
+    // is passed, so we accept either signal as confirmation.
     let has_cell_names = file.dataset("cell.names").is_ok();
+    let has_assays = file.group("assays").is_ok();
     let has_active_assay = file
         .group("/")
         .ok()
         .map(|g| g.attr("active.assay").is_ok())
         .unwrap_or(false);
-    if has_cell_names && has_active_assay {
+    if has_cell_names && (has_assays || has_active_assay) {
         return Some(Format::H5Seurat);
     }
 

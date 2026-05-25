@@ -7,6 +7,14 @@ authors = ["btraven <ben.uzh@pm.me>"]
 license = "GPL-3.0"
 repository = "https://github.com/btraven00/scx"
 
+[features]
+default = ["vendored-hdf5"]
+# Build HDF5 from source and link it statically along with a vendored zlib.
+# Produces self-contained binaries/wheels with no system libhdf5 requirement.
+# Distro packagers (conda, debian) can opt out with --no-default-features to
+# link against the system HDF5 instead.
+vendored-hdf5 = ["hdf5/static", "hdf5/zlib"]
+
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
@@ -17,9 +25,9 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sprs = "0.11"
 chrono = "0.4"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "macros"] }
 tracing = "0.1"
 
 # Vendored from crates/scx-core via sync-scx-core.sh — do not edit by hand.

@@ -601,8 +601,8 @@ async fn collect_into_robj(
     }
     let obsp_list = pairs_to_named_list(obsp_pairs);
 
-    let obs_cols_list = columns_to_robj(&obs.columns);
-    let var_cols_list = columns_to_robj(&var.columns);
+    let obs_cols_list = columns_to_robj(obs.columns);
+    let var_cols_list = columns_to_robj(var.columns);
     let obsm_list     = embeddings_to_robj(&obsm);
     let varm_list     = embeddings_to_robj_from_map(&varm.map);
 
@@ -617,8 +617,8 @@ async fn collect_into_robj(
         var_index = var.index,
         obs_cols  = obs_cols_list,
         var_cols  = var_cols_list,
-        x_indptr  = u64_to_i32(&x_indptr),
-        x_indices = u32_to_i32(&x_indices),
+        x_indptr  = u64_to_intsxp(&x_indptr),
+        x_indices = u32_to_intsxp(&x_indices),
         x_data    = x_data_robj,
         obsm      = obsm_list,
         varm      = varm_list,
@@ -667,21 +667,51 @@ async fn concat_csr(
     Ok((indptr, indices, data))
 }
 
-fn u64_to_i32(v: &[u64]) -> Vec<i32> {
-    v.iter().map(|&x| x as i32).collect()
+// Allocate an R integer vector and fill it directly from a u64 slice — skips
+// the intermediate `Vec<i32>` the obvious `iter.collect().into_robj()` path
+// would build. For pbmc3k's ~2.3M-element indices that's ~9 MB of peak
+// allocation removed; for atlas-scale (16M+ nnz) it's much more.
+fn u64_to_intsxp(v: &[u64]) -> Robj {
+    let mut out = Integers::new(v.len());
+    let dest: &mut [Rint] = &mut out;
+    for (d, &s) in dest.iter_mut().zip(v.iter()) {
+        *d = Rint::from(s as i32);
+    }
+    out.into_robj()
 }
 
-fn u32_to_i32(v: &[u32]) -> Vec<i32> {
-    v.iter().map(|&x| x as i32).collect()
+fn u32_to_intsxp(v: &[u32]) -> Robj {
+    let mut out = Integers::new(v.len());
+    let dest: &mut [Rint] = &mut out;
+    for (d, &s) in dest.iter_mut().zip(v.iter()) {
+        *d = Rint::from(s as i32);
+    }
+    out.into_robj()
 }
 
 /// Convert a TypedVec into the most natural R type.
 /// I32/U32 stay integer (R INTSXP); F32/F64 become numeric (REALSXP, double).
+/// The non-native paths (U32 → i32, F32 → f64) write straight into a freshly
+/// allocated R vector rather than building an intermediate `Vec`.
 fn typed_vec_to_robj(v: TypedVec) -> Robj {
     match v {
         TypedVec::I32(d) => d.into_robj(),
-        TypedVec::U32(d) => d.into_iter().map(|x| x as i32).collect::<Vec<i32>>().into_robj(),
-        TypedVec::F32(d) => d.into_iter().map(|x| x as f64).collect::<Vec<f64>>().into_robj(),
+        TypedVec::U32(d) => {
+            let mut out = Integers::new(d.len());
+            let dest: &mut [Rint] = &mut out;
+            for (o, x) in dest.iter_mut().zip(d.into_iter()) {
+                *o = Rint::from(x as i32);
+            }
+            out.into_robj()
+        }
+        TypedVec::F32(d) => {
+            let mut out = Doubles::new(d.len());
+            let dest: &mut [Rfloat] = &mut out;
+            for (o, x) in dest.iter_mut().zip(d.into_iter()) {
+                *o = Rfloat::from(x as f64);
+            }
+            out.into_robj()
+        }
         TypedVec::F64(d) => d.into_robj(),
     }
 }
@@ -691,8 +721,8 @@ fn csr_to_robj(triplet: (Vec<u64>, Vec<u32>, TypedVec), shape: (usize, usize)) -
     list!(
         n_rows  = shape.0 as i32,
         n_cols  = shape.1 as i32,
-        indptr  = u64_to_i32(&indptr),
-        indices = u32_to_i32(&indices),
+        indptr  = u64_to_intsxp(&indptr),
+        indices = u32_to_intsxp(&indices),
         data    = typed_vec_to_robj(data)
     ).into_robj()
 }
@@ -709,25 +739,33 @@ fn pairs_to_named_list(pairs: Vec<(String, Robj)>) -> Robj {
 /// Convert IR columns into a named R list. Factors come back as R factors
 /// (integer vector + class="factor" + levels attr), matching what
 /// `list_to_columns` / `robj_to_column_data` expect on the write side.
-fn columns_to_robj(cols: &[Column]) -> Robj {
+///
+/// Takes `cols` by value so we can consume each column's `Vec` directly into
+/// the R object — avoids cloning every obs/var column.
+fn columns_to_robj(cols: Vec<Column>) -> Robj {
     let mut pairs: Vec<(String, Robj)> = Vec::with_capacity(cols.len());
     for c in cols {
-        let v: Robj = match &c.data {
-            ColumnData::Int(v)    => v.clone().into_robj(),
-            ColumnData::Float(v)  => v.clone().into_robj(),
-            ColumnData::Bool(v)   => v.clone().into_robj(),
-            ColumnData::String(v) => v.clone().into_robj(),
+        let v: Robj = match c.data {
+            ColumnData::Int(v)    => v.into_robj(),
+            ColumnData::Float(v)  => v.into_robj(),
+            ColumnData::Bool(v)   => v.into_robj(),
+            ColumnData::String(v) => v.into_robj(),
             ColumnData::Categorical { codes, levels } => {
-                // R factor: 1-based integer codes, NA = NA_integer_ (we have no
-                // sentinel from IR — treat code 0 as level 1).
-                let r_codes: Vec<i32> = codes.iter().map(|&x| (x as i32) + 1).collect();
-                let mut robj = r_codes.into_robj();
-                let _ = robj.set_attrib("levels", levels.clone());
+                // R factor: 1-based integer codes, written straight into the
+                // INTSXP (no intermediate Vec<i32>). NA sentinel = code 0
+                // → level 1 (we have no NA from IR).
+                let mut ints = Integers::new(codes.len());
+                let dest: &mut [Rint] = &mut ints;
+                for (o, &c) in dest.iter_mut().zip(codes.iter()) {
+                    *o = Rint::from((c as i32) + 1);
+                }
+                let mut robj = ints.into_robj();
+                let _ = robj.set_attrib("levels", levels);
                 let _ = robj.set_attrib("class", "factor");
                 robj
             }
         };
-        pairs.push((c.name.clone(), v));
+        pairs.push((c.name, v));
     }
     pairs_to_named_list(pairs)
 }

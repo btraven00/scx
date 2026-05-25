@@ -5,14 +5,16 @@ TARGET_DIR = ./rust/target
 LIBDIR     = $(TARGET_DIR)/release
 STATLIB    = $(LIBDIR)/libpicklerick_r.a
 
-# Dynamic system HDF5.  On Ubuntu/Debian HDF5 lives in a non-standard path;
-# use pkg-config to get the right -L and -l flags.
-HDF5_LIBS  = $(shell pkg-config --libs hdf5 2>/dev/null || echo "-L/usr/lib/x86_64-linux-gnu/hdf5/serial -lhdf5")
-PKG_LIBS   = $(STATLIB) $(HDF5_LIBS) -lz -ldl -lm
+# HDF5 + zlib are linked statically into libpicklerick_r.a via the
+# vendored-hdf5 feature on the vendored scx-core (see ./rust/scx-core).
+# No system libhdf5 / libz at link or load time.
+PKG_LIBS   = $(STATLIB) -ldl -lm
+
+RUST_SRC = $(shell find ./rust/src ./rust/scx-core/src -name '*.rs' 2>/dev/null) ./rust/Cargo.toml
 
 $(SHLIB): $(STATLIB)
 
-$(STATLIB):
+$(STATLIB): $(RUST_SRC)
 	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir=$(TARGET_DIR)
 	@# When CARGO_BUILD_TARGET is set (e.g. by conda's rust toolchain
 	@# activation), cargo writes to $(TARGET_DIR)/<triple>/release/ instead
