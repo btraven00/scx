@@ -1234,8 +1234,56 @@ fn ad_read_categorical(file: &File, grp_path: &str) -> Result<ColumnData> {
         }
     };
 
-    let levels = ad_read_strings(file, &format!("{grp_path}/categories"))?;
+    let levels = ad_read_levels(file, &format!("{grp_path}/categories"))?;
     Ok(ColumnData::Categorical { codes, levels })
+}
+
+/// Read a categorical `categories` dataset as level labels. AnnData usually
+/// stores these as strings, but pandas Categoricals with integer/float levels
+/// (e.g. cluster ids stored as small uints) are equally valid. We coerce any
+/// scalar level dtype to its string label so `ColumnData::Categorical` always
+/// carries `Vec<String>` levels.
+fn ad_read_levels(file: &File, path: &str) -> Result<Vec<String>> {
+    let ds = file.dataset(path)?;
+    match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => ad_read_strings(file, path),
+        TypeDescriptor::Integer(IntSize::U1) => {
+            Ok(ds.read_1d::<i8>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Integer(IntSize::U2) => {
+            Ok(ds.read_1d::<i16>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Integer(IntSize::U8) => {
+            Ok(ds.read_1d::<i64>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Integer(_) => {
+            Ok(ds.read_1d::<i32>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Unsigned(IntSize::U1) => {
+            Ok(ds.read_1d::<u8>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Unsigned(IntSize::U2) => {
+            Ok(ds.read_1d::<u16>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Unsigned(IntSize::U8) => {
+            Ok(ds.read_1d::<u64>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Unsigned(_) => {
+            Ok(ds.read_1d::<u32>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Float(FloatSize::U4) => {
+            Ok(ds.read_1d::<f32>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Float(_) => {
+            Ok(ds.read_1d::<f64>()?.iter().map(|v| v.to_string()).collect())
+        }
+        TypeDescriptor::Boolean => {
+            Ok(ds.read_1d::<bool>()?.iter().map(|v| v.to_string()).collect())
+        }
+        other => Err(ScxError::InvalidFormat(format!(
+            "unsupported categorical level dtype {other:?} at '{path}'"
+        ))),
+    }
 }
 
 /// Read a nullable column group (values + mask) as ColumnData.
@@ -2255,5 +2303,81 @@ mod tests {
             total_rows += res.unwrap().nrows;
         }
         assert_eq!(total_rows, n_obs);
+    }
+
+    // --- categorical with non-string levels (regression: integer-coded
+    // categoricals such as HBCA's cluster_id were silently skipped) ---
+
+    /// Write a minimal categorical group: i8 `codes` + a `categories`
+    /// dataset of caller-chosen dtype `T`. Returns the open file.
+    fn write_cat_group<T: hdf5::H5Type>(
+        path: &std::path::Path,
+        codes: &[i8],
+        levels: &[T],
+    ) -> File {
+        let file = File::create(path).unwrap();
+        let grp = file.create_group("col").unwrap();
+        grp.new_dataset::<i8>()
+            .shape(codes.len())
+            .create("codes")
+            .unwrap()
+            .write(&Array1::from_vec(codes.to_vec()))
+            .unwrap();
+        grp.new_dataset::<T>()
+            .shape(levels.len())
+            .create("categories")
+            .unwrap()
+            .write(levels)
+            .unwrap();
+        file
+    }
+
+    #[test]
+    fn test_categorical_int64_levels() {
+        let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+        // codes index into integer levels [10, 20, 30].
+        let file = write_cat_group::<i64>(tmp.path(), &[0, 2, 1, 0], &[10, 20, 30]);
+        match ad_read_categorical(&file, "col").unwrap() {
+            ColumnData::Categorical { codes, levels } => {
+                assert_eq!(levels, vec!["10", "20", "30"]);
+                assert_eq!(codes, vec![0, 2, 1, 0]);
+            }
+            other => panic!("expected Categorical, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_categorical_uint32_levels() {
+        let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+        let file = write_cat_group::<u32>(tmp.path(), &[1, 0], &[100u32, 200u32]);
+        match ad_read_categorical(&file, "col").unwrap() {
+            ColumnData::Categorical { codes, levels } => {
+                assert_eq!(levels, vec!["100", "200"]);
+                assert_eq!(codes, vec![1, 0]);
+            }
+            other => panic!("expected Categorical, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_categorical_string_levels_unchanged() {
+        // The common case must still work after the dtype-dispatch change.
+        let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+        let file = File::create(tmp.path()).unwrap();
+        let grp = file.create_group("col").unwrap();
+        grp.new_dataset::<i8>()
+            .shape(3)
+            .create("codes")
+            .unwrap()
+            .write(&Array1::from_vec(vec![0i8, 1, 0]))
+            .unwrap();
+        write_vlen_str_dataset(&grp, "categories", &["a".into(), "b".into()]).unwrap();
+        match ad_read_categorical(&file, "col").unwrap() {
+            ColumnData::Categorical { codes, levels } => {
+                assert_eq!(levels, vec!["a", "b"]);
+                assert_eq!(codes, vec![0, 1, 0]);
+            }
+            other => panic!("expected Categorical, got {:?}", other),
+        }
     }
 }
