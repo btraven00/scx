@@ -1,0 +1,345 @@
+{
+  "X": {
+    "digest": "9eec49ec138b9796c35bde19d2bbbecf196caae9e07fcd51a99ea798f252aa68",
+    "nnz": 1140406918,
+    "row0_spot": [
+      [
+        2,
+        0.6940295100212097
+      ],
+      [
+        22,
+        0.6940295100212097
+      ],
+      [
+        34,
+        1.0997885465621948
+      ],
+      [
+        38,
+        0.6940295100212097
+      ],
+      [
+        44,
+        0.6940295100212097
+      ]
+    ],
+    "shape": [
+      584944,
+      28024
+    ]
+  },
+  "_source": {
+    "fixture": "hlca_core.h5ad",
+    "tool": "anndata"
+  },
+  "n_obs": 584944,
+  "n_vars": 28024,
+  "obs": {
+    "BMI": {
+      "digest": "29b04fe9bd22bebda0a976c3176a79309ce1c36bc0c226b5c817e6c94f52676b",
+      "kind": "float"
+    },
+    "age_or_mean_of_age_range": {
+      "digest": "5c13f617eb84d8e0e400f34bc5d98f05272b4531ab0d30ce2091229b9fcd77f0",
+      "kind": "float"
+    },
+    "age_range": {
+      "digest": "8afc3e4873f1b4630e315700ba31e5c26eb3ccda7cb5b758506c0d556bce7762",
+      "kind": "categorical"
+    },
+    "anatomical_region_ccf_score": {
+      "digest": "f582ca5762a7328c830ef7bd460cc7fc512738e5f11bac56f713bd204d5e391e",
+      "kind": "float"
+    },
+    "ann_coarse_for_GWAS_and_modeling": {
+      "digest": "fc4fd2ff7520af1c0d20a7c69fb9994c7183652ab091c4a46fa9445a54d3c769",
+      "kind": "categorical"
+    },
+    "ann_finest_level": {
+      "digest": "f19341d3788a33e95ad47b6099ced7e6c83b629feef36f13c67d6e364da44f21",
+      "kind": "categorical"
+    },
+    "ann_level_1": {
+      "digest": "7285dcc70197b42c768bd9eb525abd8cd6fdd7c99f66b21cf6c9947e1455d120",
+      "kind": "categorical"
+    },
+    "ann_level_2": {
+      "digest": "1af8a452325f7435ed5c466be0a456db98912227648afac53364ff518712562a",
+      "kind": "categorical"
+    },
+    "ann_level_3": {
+      "digest": "7e0fdc4ffc6453cbaf73995c7b37798edd5b765295d747733ddc638f6a5c2d51",
+      "kind": "categorical"
+    },
+    "ann_level_4": {
+      "digest": "6d30e25adf026f460a2aaf6de5f41a3251493248203fac131da1c0fb08057f41",
+      "kind": "categorical"
+    },
+    "ann_level_5": {
+      "digest": "39d0e9e91fc2206f10a03d511274c5921a2643f36dc6934869c97c9e3a3755e6",
+      "kind": "categorical"
+    },
+    "assay": {
+      "digest": "c102d6a2a9b00efb6e2a8cda821a8ae8edf07d48c71402e1c33bc2fbd8df7b29",
+      "kind": "categorical"
+    },
+    "assay_ontology_term_id": {
+      "digest": "fae305e3485efd09954ef8d6d37359ee460cf9905365121c9736fb3ce337ebb6",
+      "kind": "categorical"
+    },
+    "cause_of_death": {
+      "digest": "c58b087e5dd579752f4b5ac21ed7dcb945e47ad6b7f3dbbe1176f4cef30613d9",
+      "kind": "categorical"
+    },
+    "cell_type": {
+      "digest": "1a0a28b423fc353665b1cab115d984d5fad5700c9c9012171bfcbc3734f807be",
+      "kind": "categorical"
+    },
+    "cell_type_ontology_term_id": {
+      "digest": "090c3d3327d099268b54f23deda44a6dbff55e4b295bea15387263be689a0084",
+      "kind": "categorical"
+    },
+    "dataset": {
+      "digest": "b314375803e596534df25daa877c64334c0fbdf42fc315247fcb3efa3c55f7e4",
+      "kind": "categorical"
+    },
+    "development_stage": {
+      "digest": "3c7ba20cf9f60a58adfe9ba127f9cd8e02174ffd4a421776df942a737eaa0ee9",
+      "kind": "categorical"
+    },
+    "development_stage_ontology_term_id": {
+      "digest": "36068e730dc2ed16b6bf28b3be50b697a24d71388b0d3f063936bd9acfe6c396",
+      "kind": "categorical"
+    },
+    "disease": {
+      "digest": "d169732079b68d3fb6f936ee94b47f20c39c2874075d94db3eeaeb1dd58d6b54",
+      "kind": "categorical"
+    },
+    "disease_ontology_term_id": {
+      "digest": "de483ff5b70d3858629a49fe2a2fb11f21d389ad5abdebde0938ede308087dcc",
+      "kind": "categorical"
+    },
+    "donor_id": {
+      "digest": "3d1ddff0e26b09a5a5e1235511e3eba2dc427e607d91a61611258a7ec69c609e",
+      "kind": "categorical"
+    },
+    "entropy_dataset_leiden_3": {
+      "digest": "9d4b7c04d01e5619fd495a64c56b2ed783e97895bdb16f277b51ad28100b6339",
+      "kind": "float"
+    },
+    "entropy_original_ann_level_1_leiden_3": {
+      "digest": "973757b5b0ba14324ff5d0464e78ff63d0ca2c6f9e252cd5452da5f6ae2e9845",
+      "kind": "float"
+    },
+    "entropy_original_ann_level_2_clean_leiden_3": {
+      "digest": "35815f9d87fd0c900fed0232c091b94b4132da1a81ae731c6e00c92cd4e50a9d",
+      "kind": "float"
+    },
+    "entropy_original_ann_level_3_clean_leiden_3": {
+      "digest": "39b0c95934d4b13a1bc8ef13214e96506a626a698537fcb2cda02e571a5b8a98",
+      "kind": "float"
+    },
+    "entropy_subject_ID_leiden_3": {
+      "digest": "ce36be8f838b99e61e8f7d7b4a80de6cefd50d085174fb3a2ab933c1e76d249a",
+      "kind": "float"
+    },
+    "fresh_or_frozen": {
+      "digest": "5683ffed12ff756e9832280b55d327f235f8fd13e9e1fa17d161cae6fde799ab",
+      "kind": "categorical"
+    },
+    "is_primary_data": {
+      "digest": "18e713bd0a91453bc98d2d1452a1d11025335f4e7cb25b92664c369843abd6b3",
+      "kind": "int"
+    },
+    "leiden_1": {
+      "digest": "a0afbfbc79ac4b454f7463178c59d78f56d8e2cc5f6720c95054dce63a219061",
+      "kind": "categorical"
+    },
+    "leiden_2": {
+      "digest": "82c7d282b93fd2eb4b17a4af09b8440a9758fd0b9e80b5d9010298394b5807d6",
+      "kind": "categorical"
+    },
+    "leiden_3": {
+      "digest": "f1e042828749a45efd897cc3f8d83d65df1f97c95a47164b8289cbb1ef28ccaa",
+      "kind": "categorical"
+    },
+    "leiden_4": {
+      "digest": "2f37872238d8aad031f81ca5b9b06e8db652ecddfaf952b35ffd5c9fb3803a4a",
+      "kind": "categorical"
+    },
+    "leiden_5": {
+      "digest": "ecc8df0c799808a98776b4879244933e774be29682446cf73bfb5011275c97c2",
+      "kind": "categorical"
+    },
+    "log10_total_counts": {
+      "digest": "481645b2d9cd0269ba922a15f5c9257c43c01f64f484cd9ce64fca3473f8e1d9",
+      "kind": "float"
+    },
+    "lung_condition": {
+      "digest": "61f388d9a009bd7510f1867e3fafd005691744c37d2cabdd7170f1c8d28029c1",
+      "kind": "categorical"
+    },
+    "mixed_ancestry": {
+      "digest": "f66bbc3164927b04a3023d896bbfb1a6c8b696974585d11cd06922c6ae87cacf",
+      "kind": "categorical"
+    },
+    "n_genes_detected": {
+      "digest": "1574060a21ac676a4c8b5a5bafcd94dc125584515c595d82912b3a1aae369d30",
+      "kind": "int"
+    },
+    "organism": {
+      "digest": "161d5733b932b1586138ab1a8fc61b38c8809fe50a833c86889e9c50017d142c",
+      "kind": "categorical"
+    },
+    "organism_ontology_term_id": {
+      "digest": "65be3a5bffb8cd8f47de4da7499d4a955e3b65c5b5cf1e4b3a9c58f349a9088e",
+      "kind": "categorical"
+    },
+    "original_ann_highest_res": {
+      "digest": "d93491b47fda2316110527ae03c64ec1db70241045e1c7e59bbcd6e8848457b8",
+      "kind": "int"
+    },
+    "original_ann_level_1": {
+      "digest": "0251a9716839a78b3f0c49cea719a56be59e5113675a8032bd3478bc1b4cc836",
+      "kind": "categorical"
+    },
+    "original_ann_level_2": {
+      "digest": "a60f2f6082e119feffdf497cf61e6df831b3281c0a72d6bf856f0f0cbabae9b8",
+      "kind": "categorical"
+    },
+    "original_ann_level_3": {
+      "digest": "ca95b0c72fa1926c4f4274ebc3891e49baa98a5069876b259a694ff94f26594b",
+      "kind": "categorical"
+    },
+    "original_ann_level_4": {
+      "digest": "6b8c2c435c01d0a01df73762dcf6a7c8dc41dc125fe94ad7344899417feb475a",
+      "kind": "categorical"
+    },
+    "original_ann_level_5": {
+      "digest": "1744e7468b6324f6279b5de8893c55c4513215d9d98cd8897931217aae35f521",
+      "kind": "categorical"
+    },
+    "original_ann_nonharmonized": {
+      "digest": "a7345c773ccfeff651093748564c62bb65eb0145c486b167bf7435b2d6487c29",
+      "kind": "categorical"
+    },
+    "reannotation_type": {
+      "digest": "d787ae7af6db62f86d60ee4a2392f2ef179723afb04c0069866b1585cc293550",
+      "kind": "categorical"
+    },
+    "reference_genome": {
+      "digest": "616b1901262492ec34d3069b868ff41775d1f9330f4e4aded07d9a818c8d2d0a",
+      "kind": "categorical"
+    },
+    "sample": {
+      "digest": "8f55e996a0e4ddb468c5902569ea1b65503977c1e69301c6cf2b905634529d88",
+      "kind": "categorical"
+    },
+    "scanvi_label": {
+      "digest": "0b0d0d5d39e168b70ed07396831176ff9cebc2648b6b58f0779cfd2a5143bad4",
+      "kind": "categorical"
+    },
+    "self_reported_ethnicity": {
+      "digest": "d736258bdd32129dc3fb558e2aef01ebd92fa482d1e946af30ba099dd5140ba1",
+      "kind": "categorical"
+    },
+    "self_reported_ethnicity_ontology_term_id": {
+      "digest": "3723e9b1cfdaf07153fc1363c7bae2071ddb08f6eda15758b5e40e242717f206",
+      "kind": "categorical"
+    },
+    "sequencing_platform": {
+      "digest": "e0d583a6de9d979999ebec6e2f94433af1cb15b16e3333720a2ec1adb35577a5",
+      "kind": "categorical"
+    },
+    "sex": {
+      "digest": "0ec9e9fdaaa22c2800d092811d9857a582e4ea5e6a69e3181c744ed0349c11d7",
+      "kind": "categorical"
+    },
+    "sex_ontology_term_id": {
+      "digest": "c5604c75725b5560d8599686b8719ea0b31075ce223838b02986ba24aa3ee651",
+      "kind": "categorical"
+    },
+    "size_factors": {
+      "digest": "8cde80ce5212ac09939b522bd7557f07f3b1f64dd7990f6f89fe736bdeae4bdf",
+      "kind": "float"
+    },
+    "smoking_status": {
+      "digest": "ecd391bfe64cdebacaac1ae7333f197d999abdf25ab32d5d736e419477ebb07f",
+      "kind": "categorical"
+    },
+    "study": {
+      "digest": "ea24c29ca88b13d5dd76cb02b9449b1da4e05a8d8a4e2d90201ba84d8e02e0c9",
+      "kind": "categorical"
+    },
+    "subject_type": {
+      "digest": "ffdf3042b49bed2b9a0972863b8783171e0326ab08276d2aae097857d9365dd7",
+      "kind": "categorical"
+    },
+    "suspension_type": {
+      "digest": "f39d9aeb1a294994153563f679524b5ce9acd71ac6d82d28b0c9ded30926cc47",
+      "kind": "categorical"
+    },
+    "tissue": {
+      "digest": "a547c5d2c7de4aba2d34ed03a934ad401049e092b038f98ee5c635109a2baad1",
+      "kind": "categorical"
+    },
+    "tissue_dissociation_protocol": {
+      "digest": "f884ba8c94479661750b1699ef69374000c19735ab04a3243e58d3c2bd3377ae",
+      "kind": "categorical"
+    },
+    "tissue_level_2": {
+      "digest": "ea50bbd5a9d70394535f16ae63264303acce795bf0a56f9a69442d3410821c35",
+      "kind": "categorical"
+    },
+    "tissue_level_3": {
+      "digest": "2f808e4eaa9b81cece45bf08491c6319bfeb3b4b2afc7c4bc0d9a2d5f5dcf64c",
+      "kind": "categorical"
+    },
+    "tissue_ontology_term_id": {
+      "digest": "1c0bc27cb73cc412c5d780ef80c77ab68f596935de46bc626e814908a104f753",
+      "kind": "categorical"
+    },
+    "tissue_sampling_method": {
+      "digest": "52aaa4e9cfe705f70425c40f5d69ab590c944fb28191789a43edef7210c7b6f7",
+      "kind": "categorical"
+    }
+  },
+  "obs_names": "9c95051180252387671a70508a2e8ad338b9ada6244af86bcfe9ed6e4ba0d7b2",
+  "obsm": {
+    "X_scanvi_emb": {
+      "digest": "8c9e5825fdbe84939a5580c654c2e17fcb07c3b79776097c969a23667eb8e08c",
+      "shape": [
+        584944,
+        30
+      ]
+    },
+    "X_umap": {
+      "digest": "4ff40f70533b4ecc27b87715fbf0ad405e450f1d5f8e36e69033877ee7c08ece",
+      "shape": [
+        584944,
+        2
+      ]
+    }
+  },
+  "schema": 1,
+  "var": {
+    "feature_biotype": {
+      "digest": "6b11bc7f60849bd3e82bfb2ce7394b68895ec3059ed430ed8ae852b84e3baa67",
+      "kind": "categorical"
+    },
+    "feature_is_filtered": {
+      "digest": "7455140200f99d8d0c55726135839b1b0853f0dbac11732ee52ecf3f1fa68ca3",
+      "kind": "int"
+    },
+    "feature_name": {
+      "digest": "64678dc15c84e324bdb0fbc8f1caf39083f95a70f4b8f456fd6340c2964c65d3",
+      "kind": "categorical"
+    },
+    "feature_reference": {
+      "digest": "09859037e821603317c2efbe1e8ce69a1242ef141c3295653d4609c093d05cd8",
+      "kind": "categorical"
+    }
+  },
+  "var_names": "96db5569a8d8f69f1f1325ffbfb233a313b81bd75a05915c5a2b8dfed2ba2d2c"
+}
