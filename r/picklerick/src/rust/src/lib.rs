@@ -39,6 +39,27 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 }
 
 // ---------------------------------------------------------------------------
+// Error bridge: raise a clean R error instead of panicking.
+//
+// extendr's default `From<Result<T, E>> for Robj` (into_robj.rs:71) is
+// `res.unwrap().into()`, so returning a `Result::Err` from an `#[extendr]` fn
+// panics — surfaced to R via `handle_panic` as an ugly "thread panicked at"
+// message, and leaking per extendr's own docs. The `#[extendr]` entry points
+// below are therefore thin wrappers that run the real `*_inner` body and feed
+// its `Result` through `or_throw`, which raises a normal R error condition
+// (`Error in scx_read(...) : <message>`) via `throw_r_error`. By the time we
+// throw, the inner fn has already returned and dropped its readers/buffers, so
+// the longjmp only skips the error string itself.
+// ---------------------------------------------------------------------------
+
+fn or_throw<T>(res: Result<T>) -> T {
+    match res {
+        Ok(v) => v,
+        Err(e) => throw_r_error(e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core conversion helper (mirrors scx-cli/src/main.rs:convert_with_reader)
 // ---------------------------------------------------------------------------
 
@@ -114,6 +135,17 @@ fn scx_convert(
     dtype:      &str,
     assay:      &str,
     layer:      &str,
+) {
+    or_throw(scx_convert_inner(input, output, chunk_size, dtype, assay, layer))
+}
+
+fn scx_convert_inner(
+    input:      &str,
+    output:     &str,
+    chunk_size: i32,
+    dtype:      &str,
+    assay:      &str,
+    layer:      &str,
 ) -> Result<()> {
     let dtype = match dtype {
         "f32" => DataType::F32,
@@ -180,7 +212,11 @@ fn scx_convert(
 ///   obsm_keys, layers, uns_keys, obsp_keys, varp_keys, varm_keys.
 /// @noRd
 #[extendr]
-fn scx_inspect(input: &str, chunk_size: i32) -> Result<Robj> {
+fn scx_inspect(input: &str, chunk_size: i32) -> Robj {
+    or_throw(scx_inspect_inner(input, chunk_size))
+}
+
+fn scx_inspect_inner(input: &str, chunk_size: i32) -> Result<Robj> {
     let chunk = chunk_size as usize;
     let input_path = Path::new(input);
 
@@ -404,6 +440,27 @@ fn scx_write_h5ad(
     var_cols:  List,
     uns_json:  &str,
     dtype:     &str,
+) {
+    or_throw(scx_write_h5ad_inner(
+        output, n_obs, n_vars, x_indptr, x_indices, x_data,
+        obs_index, var_index, obs_cols, var_cols, uns_json, dtype,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scx_write_h5ad_inner(
+    output:    &str,
+    n_obs:     i32,
+    n_vars:    i32,
+    x_indptr:  Vec<i32>,
+    x_indices: Vec<i32>,
+    x_data:    Robj,
+    obs_index: Vec<String>,
+    var_index: Vec<String>,
+    obs_cols:  List,
+    var_cols:  List,
+    uns_json:  &str,
+    dtype:     &str,
 ) -> Result<()> {
     let dtype = parse_dtype(dtype)?;
     let n_obs  = n_obs  as usize;
@@ -512,7 +569,11 @@ fn scx_write_h5ad(
 /// @return A named list — see R/read.R for the field layout.
 /// @noRd
 #[extendr]
-fn scx_read(input: &str, chunk_size: i32, read_x: bool, read_uns: bool) -> Result<Robj> {
+fn scx_read(input: &str, chunk_size: i32, read_x: bool, read_uns: bool) -> Robj {
+    or_throw(scx_read_inner(input, chunk_size, read_x, read_uns))
+}
+
+fn scx_read_inner(input: &str, chunk_size: i32, read_x: bool, read_uns: bool) -> Result<Robj> {
     let chunk = chunk_size as usize;
     let input_path = Path::new(input);
 
