@@ -400,9 +400,9 @@ unsafe fn slice_as_bytes<T>(v: &[T]) -> &[u8] {
 
 /// A single chunk of rows from a streaming matrix read.
 ///
-/// Arrays are pre-computed as Python `bytes` objects; use
-/// `numpy.frombuffer(chunk.indptr_bytes, dtype=numpy.uint64)` etc.
-/// to obtain zero-copy numpy views.
+/// Arrays are pre-computed as Python `bytes` objects (one copy out of the
+/// Rust buffer); use `numpy.frombuffer(chunk.indptr_bytes, dtype=numpy.uint64)`
+/// etc. to wrap them as read-only numpy arrays without a further copy.
 #[pyclass]
 pub struct PyMatrixChunk {
     #[pyo3(get)]

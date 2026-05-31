@@ -72,6 +72,11 @@ def h5ad_ref_path(golden_root: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
+def bpcells_csr_path(golden_root: Path) -> Path:
+    return golden_root / "bpcells" / "synth_packed_uint_csr"
+
+
+@pytest.fixture(scope="session")
 def expected_n_obs() -> int:
     return EXPECTED_N_OBS
 
