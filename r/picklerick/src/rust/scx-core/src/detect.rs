@@ -83,6 +83,27 @@ pub fn sniff(path: &Path) -> Option<Format> {
         }
     }
 
+    // --- H5AD (legacy, pre-0.8) ---
+    // Older AnnData did not write the root `encoding-type = "anndata"` attr,
+    // but still lays out the canonical /X, /obs, /var structure and tags the
+    // /obs and /var groups with `encoding-type = "dataframe"`. Recognise that
+    // structural fingerprint so these files (e.g. the GEARS perturb datasets)
+    // are read as H5AD rather than misclassified as generic PlainH5. This is
+    // strictly more specific than the 10x check below (which keys on /matrix),
+    // so there is no ambiguity.
+    let group_encoding = |name: &str| -> Option<String> {
+        let attr = file.group(name).ok()?.attr("encoding-type").ok()?;
+        attr.read_scalar::<VarLenUnicode>()
+            .ok()
+            .map(|s| s.as_str().to_owned())
+    };
+    let obs_is_df = group_encoding("obs").as_deref() == Some("dataframe");
+    let var_is_df = group_encoding("var").as_deref() == Some("dataframe");
+    let has_x = file.group("X").is_ok() || file.dataset("X").is_ok();
+    if has_x && obs_is_df && var_is_df {
+        return Some(Format::H5Ad);
+    }
+
     // --- H5Seurat ---
     // The /cell.names root dataset + /assays group are the structural
     // fingerprint. SeuratDisk also writes an active.assay root attr, but
