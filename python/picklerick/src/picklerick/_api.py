@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from functools import cached_property
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Generator
@@ -229,14 +228,6 @@ def inspect(
     return result
 
 
-_STREAM_DTYPE_MAP: dict[str, type] = {
-    "float32": np.float32,
-    "float64": np.float64,
-    "int32": np.int32,
-    "uint32": np.uint32,
-}
-
-
 class MatrixChunk:
     """
     A single chunk of rows from a streaming matrix read.
@@ -260,10 +251,10 @@ class MatrixChunk:
 
     Notes
     -----
-    The arrays wrap an immutable ``bytes`` buffer via ``numpy.frombuffer``,
-    so they are **read-only**. Copy (``arr.copy()``) before mutating. The
-    chunk is copied once out of Rust into the ``bytes`` buffer; the numpy
-    wrapping itself is copy-free.
+    The arrays are zero-copy: each owns the Rust allocation the reader thread
+    decoded into (moved into numpy via ``IntoPyArray``, freed by numpy). There
+    is no per-chunk copy. The arrays are writable, but the chunk's memory is
+    released once the chunk goes out of scope, so copy anything you keep.
     """
 
     def __init__(self, native: object) -> None:
@@ -272,20 +263,9 @@ class MatrixChunk:
         self.nrows: int = native.nrows
         self.n_vars: int = native.n_vars
         self.dtype: str = native.dtype
-
-    @cached_property
-    def indptr(self) -> np.ndarray:
-        return np.frombuffer(self._native.indptr_bytes, dtype=np.uint64)
-
-    @cached_property
-    def indices(self) -> np.ndarray:
-        return np.frombuffer(self._native.indices_bytes, dtype=np.uint32)
-
-    @cached_property
-    def data(self) -> np.ndarray:
-        return np.frombuffer(
-            self._native.data_bytes, dtype=_STREAM_DTYPE_MAP[self.dtype]
-        )
+        self.indptr: np.ndarray = native.indptr
+        self.indices: np.ndarray = native.indices
+        self.data: np.ndarray = native.data
 
 
 def open_stream(

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use futures::StreamExt;
+use numpy::IntoPyArray;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use scx_core::{
@@ -390,19 +391,12 @@ fn scx_inspect_native(py: Python<'_>, input: &str, _chunk_size: usize) -> PyResu
 // Streaming iterator
 // ---------------------------------------------------------------------------
 
-/// Cast a typed slice to its raw byte representation.
-///
-/// Safety: `T` must be a plain-old-data type (no padding, no uninit bytes).
-/// The caller must ensure the slice outlives the returned reference.
-unsafe fn slice_as_bytes<T>(v: &[T]) -> &[u8] {
-    std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v))
-}
-
 /// A single chunk of rows from a streaming matrix read.
 ///
-/// Arrays are pre-computed as Python `bytes` objects (one copy out of the
-/// Rust buffer); use `numpy.frombuffer(chunk.indptr_bytes, dtype=numpy.uint64)`
-/// etc. to wrap them as read-only numpy arrays without a further copy.
+/// The CSR arrays are exposed as numpy arrays that own the underlying Rust
+/// allocation directly (moved via `IntoPyArray`, freed by numpy through a
+/// capsule). There is no per-chunk copy — the decoded buffer the reader thread
+/// produced *is* the numpy array's buffer. Arrays are writable.
 #[pyclass]
 pub struct PyMatrixChunk {
     #[pyo3(get)]
@@ -411,18 +405,18 @@ pub struct PyMatrixChunk {
     pub nrows: usize,
     #[pyo3(get)]
     pub n_vars: usize,
-    /// NumPy dtype string for the `data_bytes` array.
+    /// NumPy dtype string for the `data` array.
     #[pyo3(get)]
     pub dtype: &'static str,
-    /// Raw bytes of a `(nrows+1,) uint64` CSR row-pointer array.
+    /// `(nrows+1,) uint64` CSR row-pointer numpy array.
     #[pyo3(get)]
-    pub indptr_bytes: PyObject,
-    /// Raw bytes of a `(nnz,) uint32` column-index array.
+    pub indptr: PyObject,
+    /// `(nnz,) uint32` column-index numpy array.
     #[pyo3(get)]
-    pub indices_bytes: PyObject,
-    /// Raw bytes of a `(nnz,) <dtype>` values array.
+    pub indices: PyObject,
+    /// `(nnz,) <dtype>` values numpy array.
     #[pyo3(get)]
-    pub data_bytes: PyObject,
+    pub data: PyObject,
 }
 
 fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyResult<PyMatrixChunk> {
@@ -432,32 +426,30 @@ fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyResult<Py
         TypedVec::I32(_) => "int32",
         TypedVec::U32(_) => "uint32",
     };
-    // Safety: Vec<u64/u32/f32/f64> are plain-old-data, no padding.
-    let indptr_bytes: PyObject =
-        pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(&chunk.data.indptr) })
-            .into_any()
-            .unbind();
-    let indices_bytes: PyObject =
-        pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(&chunk.data.indices) })
-            .into_any()
-            .unbind();
-    let data_bytes: PyObject = match &chunk.data.data {
-        TypedVec::F32(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
-        TypedVec::F64(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
-        TypedVec::I32(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
-        TypedVec::U32(v) => pyo3::types::PyBytes::new_bound(py, unsafe { slice_as_bytes(v) }),
-    }
-    .into_any()
-    .unbind();
+    let MatrixChunk {
+        row_offset,
+        nrows,
+        data: csr,
+    } = chunk;
+    // Zero-copy: hand each Rust Vec to numpy by ownership transfer. No memcpy,
+    // no GIL-bound bytes build — this was the open_stream bottleneck.
+    let indptr: PyObject = csr.indptr.into_pyarray_bound(py).into_any().unbind();
+    let indices: PyObject = csr.indices.into_pyarray_bound(py).into_any().unbind();
+    let data: PyObject = match csr.data {
+        TypedVec::F32(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        TypedVec::F64(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        TypedVec::I32(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        TypedVec::U32(v) => v.into_pyarray_bound(py).into_any().unbind(),
+    };
 
     Ok(PyMatrixChunk {
-        row_offset: chunk.row_offset,
-        nrows: chunk.nrows,
+        row_offset,
+        nrows,
         n_vars,
         dtype,
-        indptr_bytes,
-        indices_bytes,
-        data_bytes,
+        indptr,
+        indices,
+        data,
     })
 }
 
