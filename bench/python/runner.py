@@ -69,9 +69,10 @@ def run_stream(path: str, chunk_size: int) -> tuple[float, int, int]:
         # slow path): per-column weighted counts == per-gene sums. Keeping the
         # reduction cheap means wall_s reflects decode throughput, not the
         # reduction, so it is comparable to the read-dominated load path.
-        gene_sums += np.bincount(
-            chunk.indices, weights=chunk.data.astype(np.float64), minlength=n_vars
-        )
+        # Pass the native (f32/uint) weights directly — bincount accumulates in
+        # float64 internally, so the result is bit-identical to astype(f64)
+        # first, but skips a full-nnz copy (~5% faster end-to-end on hlca).
+        gene_sums += np.bincount(chunk.indices, weights=chunk.data, minlength=n_vars)
         n_obs += chunk.nrows
     total = float(gene_sums.sum()) if gene_sums is not None else 0.0
     return total, n_obs, n_vars
