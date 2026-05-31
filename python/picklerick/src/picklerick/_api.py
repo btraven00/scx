@@ -253,12 +253,17 @@ class MatrixChunk:
         NumPy dtype string for the ``data`` array (e.g. ``"float32"``).
     indptr : numpy.ndarray
         Shape ``(nrows+1,)``, dtype ``uint64``. CSR row-pointer array.
-        Zero-copy view of the underlying bytes.
     indices : numpy.ndarray
-        Shape ``(nnz,)``, dtype ``uint32``. Column indices. Zero-copy view.
+        Shape ``(nnz,)``, dtype ``uint32``. Column indices.
     data : numpy.ndarray
         Shape ``(nnz,)``, dtype matches ``self.dtype``. Non-zero values.
-        Zero-copy view.
+
+    Notes
+    -----
+    The arrays wrap an immutable ``bytes`` buffer via ``numpy.frombuffer``,
+    so they are **read-only**. Copy (``arr.copy()``) before mutating. The
+    chunk is copied once out of Rust into the ``bytes`` buffer; the numpy
+    wrapping itself is copy-free.
     """
 
     def __init__(self, native: object) -> None:
@@ -310,7 +315,7 @@ def open_stream(
     ------
     MatrixChunk
         Each chunk exposes ``row_offset``, ``nrows``, ``n_vars``, ``dtype``,
-        and zero-copy numpy arrays ``indptr``, ``indices``, ``data``.
+        and read-only numpy arrays ``indptr``, ``indices``, ``data``.
 
     Raises
     ------
