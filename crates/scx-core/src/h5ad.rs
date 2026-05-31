@@ -12,6 +12,7 @@ use ndarray::{s, Array1, Array2};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
+    h5_chunk,
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
         SparseMatrixMeta, UnsTable, VarTable, Varm,
@@ -1039,6 +1040,91 @@ fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
 
 /// Read a chunk [row_start, row_end) from a CSR matrix stored at /X/.
 /// H5AD natively stores X as CSR, so this is a direct slice — no transpose.
+/// Read `X/indices[a..b]` as `u32`. Uses the parallel-inflate fast path for
+/// 4-byte, deflate-only-chunked datasets (the common case); otherwise the
+/// normal HDF5 read. Column indices are non-negative, so a 4-byte little-endian
+/// reinterpret is correct whether stored signed or unsigned.
+fn read_x_indices(file: &File, a: usize, b: usize) -> Result<Vec<u32>> {
+    let ds = file.dataset("X/indices")?;
+    let stored_bytes = ds.dtype()?.size();
+    match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {}
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "unexpected X/indices dtype {:?}",
+                other
+            )))
+        }
+    }
+    if stored_bytes == 4 {
+        if let Some(clen) = h5_chunk::deflate_chunk_len(&ds) {
+            let bytes = h5_chunk::read_range_parallel(&ds, a, b, 4, clen)?;
+            return Ok(bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect());
+        }
+    }
+    Ok(ds
+        .read_slice_1d::<i32, _>(s![a..b])?
+        .iter()
+        .map(|&x| x as u32)
+        .collect())
+}
+
+/// Read `X/data[a..b]` as the requested `dtype`. Uses the parallel-inflate fast
+/// path when the stored element layout matches the requested dtype and the
+/// dataset is deflate-only-chunked; otherwise the normal HDF5 read (which also
+/// handles any stored→requested type conversion).
+fn read_x_data(file: &File, a: usize, b: usize, dtype: DataType) -> Result<TypedVec> {
+    let ds = file.dataset("X/data")?;
+    let (want_bytes, want_float) = match dtype {
+        DataType::F32 => (4usize, true),
+        DataType::F64 => (8, true),
+        DataType::I32 | DataType::U32 => (4, false),
+    };
+    let stored_bytes = ds.dtype()?.size();
+    let stored_float = matches!(ds.dtype()?.to_descriptor()?, TypeDescriptor::Float(_));
+    if stored_bytes == want_bytes && stored_float == want_float {
+        if let Some(clen) = h5_chunk::deflate_chunk_len(&ds) {
+            let raw = h5_chunk::read_range_parallel(&ds, a, b, want_bytes, clen)?;
+            return Ok(bytes_to_typed(&raw, dtype));
+        }
+    }
+    Ok(match dtype {
+        DataType::F32 => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![a..b])?.to_vec()),
+        DataType::F64 => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![a..b])?.to_vec()),
+        DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![a..b])?.to_vec()),
+        DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![a..b])?.to_vec()),
+    })
+}
+
+/// Reinterpret little-endian raw bytes as a `TypedVec` of the given dtype.
+fn bytes_to_typed(b: &[u8], dtype: DataType) -> TypedVec {
+    match dtype {
+        DataType::F32 => TypedVec::F32(
+            b.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
+        DataType::F64 => TypedVec::F64(
+            b.chunks_exact(8)
+                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+        ),
+        DataType::I32 => TypedVec::I32(
+            b.chunks_exact(4)
+                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
+        DataType::U32 => TypedVec::U32(
+            b.chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
+    }
+}
+
 fn ad_read_chunk(
     path: &Path,
     indptr: &[u64],
@@ -1054,40 +1140,13 @@ fn ad_read_chunk(
     let nnz = nnz_end - nnz_start;
 
     let indices: Vec<u32> = if nnz > 0 {
-        let ds = file.dataset("X/indices")?;
-        match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Integer(_) => ds
-                .read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?
-                .iter()
-                .map(|&x| x as u32)
-                .collect(),
-            other => {
-                return Err(ScxError::InvalidFormat(format!(
-                    "unexpected X/indices dtype {:?}",
-                    other
-                )))
-            }
-        }
+        read_x_indices(&file, nnz_start, nnz_end)?
     } else {
         Vec::new()
     };
 
     let data: TypedVec = if nnz > 0 {
-        let ds = file.dataset("X/data")?;
-        match dtype {
-            DataType::F32 => {
-                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::F64 => {
-                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::I32 => {
-                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::U32 => {
-                TypedVec::U32(ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-        }
+        read_x_data(&file, nnz_start, nnz_end, dtype)?
     } else {
         TypedVec::F32(Vec::new())
     };
