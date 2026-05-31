@@ -4,6 +4,7 @@ pub mod detect;
 pub mod dtype;
 pub mod error;
 pub mod h5;
+pub mod h5_chunk;
 pub mod h5ad;
 pub mod h5bpcells;
 pub mod h5seurat;
