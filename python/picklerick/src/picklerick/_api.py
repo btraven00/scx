@@ -253,8 +253,9 @@ class MatrixChunk:
     -----
     The arrays are zero-copy: each owns the Rust allocation the reader thread
     decoded into (moved into numpy via ``IntoPyArray``, freed by numpy). There
-    is no per-chunk copy. The arrays are writable, but the chunk's memory is
-    released once the chunk goes out of scope, so copy anything you keep.
+    is no per-chunk copy. The arrays are writable and remain valid after the
+    chunk is dropped — numpy owns the allocation — so you may keep or mutate
+    them without copying.
     """
 
     def __init__(self, native: object) -> None:
