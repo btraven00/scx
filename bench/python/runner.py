@@ -34,6 +34,25 @@ def run_load(path: str) -> tuple[float, int, int]:
     return float(gene_sums.sum()), n_obs, n_vars
 
 
+def run_backed(path: str, chunk_size: int) -> tuple[float, int, int]:
+    """anndata's own bounded-memory path: backed read + chunked_X.
+
+    This is the apples-to-apples baseline for open_stream on h5ad — both read
+    the matrix in row blocks off disk without materialising it. (anndata
+    backed mode only supports h5ad/zarr; the non-h5ad formats open_stream
+    handles have no anndata equivalent, which is the point of the comparison.)
+    """
+    import anndata as ad
+    import numpy as np
+
+    adata = ad.read_h5ad(path, backed="r")
+    n_obs, n_vars = adata.shape
+    gene_sums = np.zeros(n_vars, dtype=np.float64)
+    for chunk, _start, _end in adata.chunked_X(chunk_size):
+        gene_sums += np.asarray(chunk.sum(axis=0), dtype=np.float64).ravel()
+    return float(gene_sums.sum()), n_obs, n_vars
+
+
 def run_stream(path: str, chunk_size: int) -> tuple[float, int, int]:
     import numpy as np
 
@@ -60,7 +79,7 @@ def run_stream(path: str, chunk_size: int) -> tuple[float, int, int]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["load", "stream"], required=True)
+    ap.add_argument("--mode", choices=["load", "stream", "backed"], required=True)
     ap.add_argument("--path", required=True)
     ap.add_argument("--chunk-size", type=int, default=5000)
     args = ap.parse_args()
@@ -68,6 +87,8 @@ def main() -> None:
     t0 = time.perf_counter()
     if args.mode == "load":
         checksum, n_obs, n_vars = run_load(args.path)
+    elif args.mode == "backed":
+        checksum, n_obs, n_vars = run_backed(args.path, args.chunk_size)
     else:
         checksum, n_obs, n_vars = run_stream(args.path, args.chunk_size)
     wall_s = time.perf_counter() - t0

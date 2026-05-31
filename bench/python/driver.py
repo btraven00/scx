@@ -137,16 +137,21 @@ def main() -> None:
         load = _run("load", path, chunk_size=0)
         results[f"{name}/load"] = load
 
+        # `backed` is anndata's own bounded-memory path (read_h5ad backed +
+        # chunked_X) — the apples-to-apples baseline for stream on h5ad. Run
+        # both at each chunk size so peaks are directly comparable.
         for cs in args.chunk_sizes:
-            print(f"  stream cs={cs} ...", file=sys.stderr, flush=True)
-            stream = _run("stream", path, chunk_size=cs)
-            ok = _checksums_agree(load["checksum"], stream["checksum"], args.rtol)
-            stream["checksum_ok"] = ok
-            results[f"{name}/stream-cs{cs}"] = stream
-            if not ok:
-                failures.append(
-                    f"{name} cs={cs}: load={load['checksum']!r} stream={stream['checksum']!r}"
-                )
+            for mode in ("stream", "backed"):
+                print(f"  {mode} cs={cs} ...", file=sys.stderr, flush=True)
+                r = _run(mode, path, chunk_size=cs)
+                ok = _checksums_agree(load["checksum"], r["checksum"], args.rtol)
+                r["checksum_ok"] = ok
+                results[f"{name}/{mode}-cs{cs}"] = r
+                if not ok:
+                    failures.append(
+                        f"{name} {mode} cs={cs}: "
+                        f"load={load['checksum']!r} {mode}={r['checksum']!r}"
+                    )
 
     envelope = {
         "label": args.label,
