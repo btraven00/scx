@@ -135,3 +135,44 @@ def test_open_stream_early_stop(
     first = next(iter(stream))
     assert first.nrows > 0
     del stream  # background thread should drain gracefully
+
+
+def test_open_stream_bpcells_dir(bpcells_csr_path: Path) -> None:
+    # BPCells dir-format input exercises the pure-Rust BP-128 decode path,
+    # not the HDF5 readers covered above. synth_packed_uint_csr is a 4x5
+    # row-major uint matrix; reconstruct it densely and check exact values.
+    import numpy as np
+
+    if not bpcells_csr_path.exists():
+        pytest.skip(f"BPCells fixture not found: {bpcells_csr_path}")
+
+    expected = np.array(
+        [
+            [1, 0, 3, 0, 0],
+            [0, 2, 0, 4, 0],
+            [5, 0, 0, 0, 6],
+            [0, 0, 7, 0, 8],
+        ],
+        dtype=np.uint32,
+    )
+
+    chunks = list(pk.open_stream(bpcells_csr_path, chunk_size=2))
+    assert len(chunks) > 0
+
+    dense = np.zeros((expected.shape[0], expected.shape[1]), dtype=np.uint32)
+    offset = 0
+    for chunk in chunks:
+        assert chunk.n_vars == expected.shape[1]
+        assert chunk.row_offset == offset
+        assert chunk.indptr.dtype == np.uint64
+        assert chunk.indices.dtype == np.uint32
+        assert chunk.dtype == "uint32"
+        for r in range(chunk.nrows):
+            start, end = int(chunk.indptr[r]), int(chunk.indptr[r + 1])
+            cols = chunk.indices[start:end]
+            vals = chunk.data[start:end]
+            dense[offset + r, cols] = vals
+        offset += chunk.nrows
+
+    assert offset == expected.shape[0]
+    np.testing.assert_array_equal(dense, expected)
