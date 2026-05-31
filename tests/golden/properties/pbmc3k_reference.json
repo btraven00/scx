@@ -1,0 +1,85 @@
+{
+  "X": {
+    "digest": "f53290dbf1f505cc0afa285b29cc4fef8790067c9089485abc9a9a6f0cb9e4c0",
+    "nnz": 2282976,
+    "row0_spot": [
+      [
+        29,
+        1.0
+      ],
+      [
+        73,
+        1.0
+      ],
+      [
+        80,
+        2.0
+      ],
+      [
+        148,
+        1.0
+      ],
+      [
+        163,
+        1.0
+      ]
+    ],
+    "shape": [
+      2700,
+      13714
+    ]
+  },
+  "_source": {
+    "fixture": "pbmc3k_reference.h5ad",
+    "tool": "anndata"
+  },
+  "n_obs": 2700,
+  "n_vars": 13714,
+  "obs": {
+    "nCount_RNA": {
+      "digest": "7de69caaa7860374394bf4c23872082c8d0dfe7d754ccdb9e6cf81f22c47c99f",
+      "kind": "float"
+    },
+    "nFeature_RNA": {
+      "digest": "02072278130eaf1fba78f92526ffe1f974cb00a04d1e27b518e7361be302bec1",
+      "kind": "float"
+    },
+    "orig.ident": {
+      "digest": "97b02533f8571c23f56dad39fb63c5472dfb9b79e9321746e36c7f73a098cea9",
+      "kind": "categorical"
+    }
+  },
+  "obs_names": "c68847ef4fbf23a8bb3dd3d29692fdd4e0cdb4e979caabd355395fe4549b5316",
+  "obsm": {
+    "X_pca": {
+      "digest": "953caa2a716cc5f96ed73bc147bf3968014b19b1e8f9955cbb6e57a421ae3624",
+      "shape": [
+        2700,
+        30
+      ]
+    },
+    "X_umap": {
+      "digest": "28085f793be4c0cb9f9509c008130caf4a89b6c596476b6fedf0f5ce182a6ebe",
+      "shape": [
+        2700,
+        2
+      ]
+    }
+  },
+  "schema": 1,
+  "var": {
+    "vf.vst.mean": {
+      "digest": "08f8ec32f4c639e3f75bdb9da0bf9c58a538d27fb59799821d846cf876e75894",
+      "kind": "float"
+    },
+    "vf.vst.variable": {
+      "digest": "ecc3eb4194aaec4010b2be3573e82b9c920be1a677816abce4dc46a1d19f00ad",
+      "kind": "int"
+    },
+    "vf.vst.variance": {
+      "digest": "4a9402699418cb4f5d17ba046ebaf2d4f11726c1c62cb50ada24b3d3d7687ce1",
+      "kind": "float"
+    }
+  },
+  "var_names": "ef17c47ade9ec5f54fcc48bf15a795b508b4c98d51ee111d6533ca4c332adb69"
+}

@@ -1,0 +1,74 @@
+{
+  "X": {
+    "digest": "1533a3ed1c8a5b530125a216fd6dffebed770a749c239d30c81d45b1b21b983d",
+    "nnz": 6903,
+    "row0_spot": [
+      [
+        6,
+        0.7413011193275452
+      ],
+      [
+        21,
+        0.7413011193275452
+      ],
+      [
+        22,
+        0.7413011193275452
+      ],
+      [
+        23,
+        1.870774269104004
+      ],
+      [
+        35,
+        0.7413011193275452
+      ]
+    ],
+    "shape": [
+      500,
+      200
+    ]
+  },
+  "_source": {
+    "fixture": "norman_subset.h5ad",
+    "tool": "anndata"
+  },
+  "n_obs": 500,
+  "n_vars": 200,
+  "obs": {
+    "cell_type": {
+      "digest": "74a1af5e23e3e3ea7a53907024036172f524ec6a9d614a3c7bb590d193bf7cf9",
+      "kind": "categorical"
+    },
+    "condition": {
+      "digest": "25bfb3811c27f8347257ae24c8b4115f5ec0915d37d65683f0a262a4129297e6",
+      "kind": "categorical"
+    },
+    "condition_name": {
+      "digest": "0f78d1d3f06212a05c0e277eec3e45449aa8b5682528e3485b7e43a33243c754",
+      "kind": "categorical"
+    },
+    "control": {
+      "digest": "c66981c20ca5bea299a787f3341e5e62f565ee0a866811bf8be46417dbf3614d",
+      "kind": "int"
+    },
+    "dose_val": {
+      "digest": "44fdd03d9162c312f14f70b548f8ddd34242af5559d782da1ee4326b1d504a5a",
+      "kind": "categorical"
+    },
+    "split": {
+      "digest": "22bb870b20ae1ed015f58b2e93117de476206870c7ab38c81af7d334e26aabfd",
+      "kind": "categorical"
+    }
+  },
+  "obs_names": "c82f1a7bcc18d137fa0d4136a9afcfcabf2c1b75706f0ca3998111cb10cd7b87",
+  "obsm": {},
+  "schema": 1,
+  "var": {
+    "feature_name": {
+      "digest": "7a014a55ed01663950e1a34abc6463ba845e74909d6fb95d6bd52b5f988d2100",
+      "kind": "categorical"
+    }
+  },
+  "var_names": "180624834b68ea62a09a6d077161924c2b9ea6da0350eb11004a5f5f6f90b197"
+}
