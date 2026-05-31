@@ -99,7 +99,8 @@ scipy    = "*"
 pytest   = "*"
 
 [feature.py313.tasks]
-install-picklerick-py-native = { cmd = "python -m ensurepip && python -m pip install maturin && cd python/picklerick && python -m maturin develop", description = "Build and install the picklerick native PyO3 extension into the Python 3.13 env" }
+install-picklerick-py-native = { cmd = "python -m ensurepip && python -m pip install maturin && cd python/picklerick && python -m maturin develop", description = "Build and install the picklerick native PyO3 extension into the Python 3.13 env (debug — fast iteration)" }
+install-picklerick-py-native-release = { cmd = "python -m ensurepip && python -m pip install maturin && cd python/picklerick && python -m maturin develop --release", description = "Build the native extension optimized. REQUIRED before benchmarking — a debug build is ~3x slower on the HDF5 decode path." }
 verify-picklerick-py-native  = { cmd = "python -m pytest python/picklerick/tests/test_native.py -q", description = "Run native-backend smoke tests for the picklerick Python package" }
 
 # ---------------------------------------------------------------------------
