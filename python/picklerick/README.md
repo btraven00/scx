@@ -117,6 +117,7 @@ sense for Python:
 - `picklerick.write_h5ad(adata, path, compression="gzip")`
 - `picklerick.write_h5seurat(adata, path, assay="RNA", chunk_size=5000)`
 - `picklerick.convert(input, output, chunk_size=5000, dtype="f32", assay="RNA", layer="counts")`
+- `picklerick.open_stream(path, chunk_size=5000, assay="RNA", layer="counts")` — native backend only
 
 ## Examples
 
@@ -161,6 +162,62 @@ import picklerick as pk
 adata = pk.read_h5ad("pbmc3k_reference.h5ad")
 pk.write_h5seurat(adata, "pbmc3k_out.h5seurat")
 ```
+
+### Stream a matrix chunk-by-chunk (bounded memory)
+
+`open_stream` yields CSR row blocks without materializing the whole matrix or
+constructing an AnnData object, so peak memory is governed by `chunk_size`
+rather than dataset size. The same API works across H5AD, H5Seurat, ScxH5, and
+BPCells-dir inputs (native backend only). The `indptr`/`indices`/`data` arrays
+are zero-copy numpy arrays that own the decoded buffer (moved, not copied); they
+are writable and stay valid after the chunk is gone, so you can keep or mutate
+them freely.
+
+```python
+import numpy as np
+import picklerick as pk
+
+gene_sums = None
+for chunk in pk.open_stream("counts.h5seurat", chunk_size=5000):
+    if gene_sums is None:
+        gene_sums = np.zeros(chunk.n_vars, dtype=np.float64)
+    # chunk.indptr / chunk.indices / chunk.data are the CSR triplet.
+    # bincount accumulates in float64 internally, so the native f32 weights
+    # give a bit-identical result without a full-nnz astype copy.
+    gene_sums += np.bincount(chunk.indices, weights=chunk.data, minlength=chunk.n_vars)
+```
+
+For deflate-chunked H5AD `X`, the matrix is decoded by reading the raw gzip
+chunks and inflating them across cores, rather than through libhdf5's
+single-threaded filter; other filter pipelines (shuffle, blosc) fall back to the
+normal read. (anndata's `read_h5ad(backed="r")` + `chunked_X` is also a
+bounded-memory reader for h5ad, decoding on one core.)
+
+> Build the extension `--release` (`pixi run -e py313
+> install-picklerick-py-native-release`) for representative timings; a debug
+> `maturin develop` build is ~3× slower on the HDF5 decode path.
+
+Peak RSS / wall, per-gene-sum workload (`bench/python/`, release build, chunk 5000, 16 cores):
+
+| dataset | size | eager `read_h5ad` | anndata backed | `open_stream` |
+|---------|-----:|------------------:|---------------:|--------------:|
+| pbmc3k  | 29 MB  | 0.15 GB / 0.42 s | 0.15 GB / 0.43 s | 0.15 GB / 0.44 s |
+| norman  | 79 MB  | 0.24 GB / 1.16 s | 0.23 GB / 1.03 s | 0.11 GB / 0.42 s |
+| hlca    | 5.7 GB | 18.2 GB / 50 s   | 0.93 GB / 30 s   | 0.55 GB / 17 s   |
+
+Notes:
+
+- The multicore decode shows at scale (hlca): ~5 s to decode `X` vs ~21 s
+  single-threaded; the remaining time is the per-gene-sum reduction, not the
+  read. Small datasets are a single chunk at chunk 5000, so there is nothing to
+  parallelize.
+- Peak RSS grows with `chunk_size` (prefetch + per-row-block inflate buffers):
+  hlca is 0.55 GB at chunk 5000 but 3.6 GB at chunk 50000. Keep `chunk_size`
+  modest (a few thousand).
+
+Reach for `open_stream` when the matrix is in a non-anndata format (H5Seurat,
+BPCells-dir, ScxH5), when you want bounded-memory access without an anndata
+dependency, or for a bounded-memory read of deflate-chunked h5ad.
 
 ## Implementation notes
 
