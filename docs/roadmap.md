@@ -809,7 +809,7 @@ projects can depend on `scx-core` and delegate format writing.
 
 ---
 
-## 0.1.5 — Python streaming iterator → numpy
+## 0.1.5 (done) — Python streaming iterator → numpy
 
 **Goal: expose chunk-by-chunk matrix iteration to Python for benchmark
 and analysis workflows.**
@@ -826,24 +826,45 @@ for chunk in stream:
     # process this slice of cells, then GC
 ```
 
-### Implementation
+### What was delivered
 
-- `#[pyclass] PyMatrixStream` — owns `Box<dyn DatasetReader>` + an async
-  `x_stream()` handle; advances it via `block_on` in `__next__`
-- `#[pyclass] PyMatrixChunk` — exposes `row_offset`, `nrows`,
-  `indptr`/`indices`/`data` as numpy arrays (add `pyo3[numpy]` feature;
-  use `PyArray1::from_vec()` for zero-extra-copy conversion)
-- `open_stream(path, chunk_size)` — Python entry point, returns
-  `PyMatrixStream`; format auto-detected by `detect::sniff()`
+- `pk.open_stream(path, chunk_size, assay, layer)` yields `MatrixChunk` row
+  blocks; format auto-detected (`detect::sniff_dir` → `detect::sniff`), with
+  H5AD, H5Seurat (dgCMatrix), ScxH5, and BPCells-dir all feeding one CSR
+  `x_stream()` path. Implemented in `python/picklerick/rust/src/lib.rs`
+  (`PyMatrixStream` / `PyMatrixChunk`).
+- **Bounded memory.** A background reader thread feeds a bounded
+  `sync_channel(8)`; `__next__` releases the GIL while waiting and drains on
+  early drop. Peak RSS is governed by `chunk_size`, not dataset size.
+- **Zero-copy chunks.** `indptr`/`indices`/`data` are numpy arrays that own the
+  decoded Rust buffer (moved via rust-numpy `into_pyarray`), writable and valid
+  for the array's lifetime — no per-chunk copy.
+- **Multicore decode.** For deflate-chunked H5AD `X`, the raw gzip chunks are
+  read via `H5Dread_chunk` and inflated across cores (rayon + flate2,
+  `scx-core/src/h5_chunk.rs`), bypassing libhdf5's single-threaded filter
+  pipeline. Other filter pipelines (shuffle, blosc) fall back to the normal read.
+- **Correctness.** Native suite (`test_native.py`) plus bit-exact golden-property
+  digests (`test_golden_properties.py`) that match the read against an
+  oracle-derived ground truth.
 
-Note: scx's BPCells reader is **pure Rust** (scalar BP-128 decoder), not a
-wrapper around the C++ BPCells library. There are no C++ pointers to expose.
-The decoded numpy chunks are the equivalent — equally fast once decoded.
+R already has BPCells for lazy on-disk access; `open_stream` is the equivalent on
+the Python side, with one streaming API across every supported format.
 
-### Symmetry
+### Benchmark
 
-R does not need this: the BPCells R package already provides lazy on-disk
-matrix access. Python lacks an equivalent, so `open_stream` fills the gap.
+Per-gene-sum workload; peak RSS / wall, chunk 5000, release build, 16 cores
+(harness in `bench/python/`):
+
+| dataset | size | eager `read_h5ad` | anndata backed | `open_stream` |
+|---------|-----:|------------------:|---------------:|--------------:|
+| pbmc3k  | 29 MB  | 0.15 GB / 0.42 s | 0.15 GB / 0.43 s | 0.15 GB / 0.44 s |
+| norman  | 79 MB  | 0.24 GB / 1.16 s | 0.23 GB / 1.03 s | 0.11 GB / 0.42 s |
+| hlca    | 5.7 GB | 18.2 GB / 50 s   | 0.93 GB / 30 s   | 0.55 GB / 17 s   |
+
+Peak RSS is bounded by `chunk_size`, not dataset size. At larger chunk sizes
+(e.g. 50000) `open_stream`'s prefetch and per-row-block inflate buffers raise
+peak above the single-chunk backed reader (hlca: 3.6 GB vs 2.3 GB), so keep
+`chunk_size` modest.
 
 ---
 
