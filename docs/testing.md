@@ -2,18 +2,38 @@
 
 ## Overview
 
-Three layers of tests:
+Test layers (run all green before tagging a release):
 
-1. **Rust unit + integration tests** (`cargo test`) — format-specific logic,
-   sparse matrix arithmetic, IR correctness. No external dependencies.
-2. **Python pytest suite** (`pixi run -e test verify-python`) — loads
-   SCX-produced files with `anndata` and compares against a reference produced
-   by zellkonverter. The Python ecosystem is the primary consumer of H5AD.
-3. **R testthat suite** (`pixi run -e test verify-r`) — loads SCX-produced files
+1. **Rust unit + integration tests** (`cargo test -p scx-core`) — format-specific
+   logic, sparse matrix arithmetic, IR correctness. No external dependencies.
+2. **Python pytest oracle** (`pixi run -e test verify-python`) — loads
+   SCX-produced files with `anndata` and compares against a reference produced by
+   anndataR (`scripts/prepare_h5ad_reference.R`). The Python ecosystem is the
+   primary consumer of H5AD.
+3. **R testthat oracle** (`pixi run -e test verify-r`) — loads SCX-produced files
    with `anndataR` and validates slot-by-slot against the reference H5AD.
+4. **picklerick native suite** (`pixi run -e py313 verify-picklerick-py-native`,
+   = `pytest python/picklerick/tests/`) — exercises the PyO3 backend directly:
+   `test_native.py` (convert/inspect/`open_stream` across h5ad / h5seurat /
+   BPCells), plus `test_read|write|convert.py`.
+5. **Golden-property digests** (`test_golden_properties.py`) — the
+   differential-correctness gate for the read/decode path. Oracle-derived
+   canonical digests in `tests/golden/properties/*.json` (regenerate with
+   `pixi run -e py313 extract-golden-properties`) are matched **bit-for-bit** by
+   picklerick's `open_stream` decode — no oracle stack needed at test time. The
+   contract lives in `python/picklerick/tests/golden_props.py`; this is what
+   guards the parallel-inflate decode (`scx-core/src/h5_chunk.rs`).
 
-All three run in the `pixi test` environment. The full gate is
-`pixi run -e test roundtrip`, which chains: fixtures → convert → pytest → testthat.
+Layers 1–3 run in the `pixi test` environment; the full oracle gate is
+`pixi run -e test roundtrip` (fixtures → convert → pytest → testthat). Layers
+4–5 run in `py313` and need a `--release` native build
+(`pixi run -e py313 install-picklerick-py-native-release`).
+
+**Benchmarks** (separate from correctness) are documented in
+[`bench/README.md`](../bench/README.md): the release-build prerequisite, the Rust
+criterion benches (`crates/scx-core/benches/`), the Python stream-vs-anndata
+harness, and the rule that the golden-digest gate must pass before any speed
+number is trusted.
 
 ---
 
