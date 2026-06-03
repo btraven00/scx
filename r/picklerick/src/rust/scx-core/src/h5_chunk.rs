@@ -83,15 +83,17 @@ pub fn read_range_parallel(
             )));
         }
         let mut buf = vec![0u8; size as usize];
-        let mut buf_size = buf.len();
+        // Use the 5-arg H5Dread_chunk1 (no data_size out-param): it's present in
+        // every hdf5-metno-sys binding, whereas the 6-arg H5Dread_chunk2 only
+        // exists with the bundled HDF5 2.0.0 feature, not the system library.
+        // `buf` is already sized exactly from H5Dget_chunk_info_by_coord above.
         let rc = unsafe {
-            hdf5_sys::h5d::H5Dread_chunk(
+            hdf5_sys::h5d::H5Dread_chunk1(
                 dsid,
                 0, // H5P_DEFAULT
                 &off,
                 &mut filter_mask,
                 buf.as_mut_ptr().cast(),
-                &mut buf_size,
             )
         };
         if rc < 0 {
