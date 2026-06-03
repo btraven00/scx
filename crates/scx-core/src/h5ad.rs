@@ -1336,9 +1336,11 @@ fn ad_read_levels(file: &File, path: &str) -> Result<Vec<String>> {
         TypeDescriptor::Float(_) => {
             Ok(ds.read_1d::<f64>()?.iter().map(|v| v.to_string()).collect())
         }
-        TypeDescriptor::Boolean => {
-            Ok(ds.read_1d::<bool>()?.iter().map(|v| v.to_string()).collect())
-        }
+        TypeDescriptor::Boolean => Ok(ds
+            .read_1d::<bool>()?
+            .iter()
+            .map(|v| v.to_string())
+            .collect()),
         other => Err(ScxError::InvalidFormat(format!(
             "unsupported categorical level dtype {other:?} at '{path}'"
         ))),
