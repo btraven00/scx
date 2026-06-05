@@ -20,9 +20,15 @@ The async surface is therefore pure overhead today: runtime setup cost, `.await`
   `crates/scx-cli/Cargo.toml`.
 - `crates/scx-cli/tests/merge.rs` switched its per-test `tokio::runtime::Builder`
   to `futures::executor::block_on`.
-- `crates/scx-core/Cargo.toml` no longer declares `tokio` as a regular or
-  dev dependency. `#[tokio::test]` is no longer used; tests rely on the
-  unit-test attribute pattern provided by the existing harness.
+- `crates/scx-core/Cargo.toml` no longer declares `tokio` as a regular
+  (production) dependency, so it does not ship in any binary or wheel. It is
+  retained as a **dev-dependency** for the test/bench harness only —
+  `#[tokio::test]` (e.g. `validate.rs`, `h5.rs`, `npy.rs`,
+  `tests/bpcells_compat.rs`) and criterion's `async_tokio` feature +
+  `tokio::runtime::Builder` in `benches/conversion.rs` / `benches/h5_read.rs`.
+  This is fine: dev-dependencies compile only under `cargo test`/`cargo bench`
+  and never enter shipped artifacts, so they don't reintroduce the runtime cost
+  this cleanup targets.
 - `validate.rs` had no production `block_on`; only test code referenced tokio.
 
 ### 3. Gate tokio behind a `net` / `object-store` feature — PENDING
