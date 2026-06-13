@@ -4,6 +4,45 @@ SCX is a lean, format-to-format interoperability engine for single-cell data,
 optimized for reproducible benchmarking of conversion correctness, throughput,
 and memory use.
 
+## Next up — Robustness pass (error-path hardening + test discipline)
+
+Before further distribution (0.1.6) or the format-bench research deliverable,
+make the existing engine *trustworthy*: a format converter must never panic on a
+malformed input file — it must return a clean `ScxError`. This thread is about
+quality and discipline, not new features.
+
+**Sequenced workstreams (cheapest/highest-leverage first):**
+
+1. **Error-path hardening (the headline).** Audit `unwrap()` / `expect()` /
+   `panic!` in the reader paths (`h5ad`, `h5seurat`, `h5bpcells`, `npy`) and
+   convert every "malformed-input" case to `ScxError`; leave genuinely
+   infallible ones but make that explicit (`expect("…invariant…")`). Add
+   "garbage in → clean Err" regression tests. Motivated by the recon below and
+   by the existing class of bug already fixed once (`b54c0d2`, "raise clean R
+   errors instead of panicking on read failure").
+   - **Recon (2026-06-13):** ~448 `unwrap()` in `crates/*/src` (incl. inline
+     test modules), concentrated in `h5ad.rs` (127), `h5seurat.rs` (103),
+     `api/write.rs` (73), `h5bpcells.rs` (60); 24 `panic!`/`todo!`/`unreachable!`
+     in src. **Start point: `h5ad.rs` audit** (most-used reader, highest count)
+     to calibrate real-risk vs infallible before the full sweep.
+2. **Coverage ratchet.** Wire `cargo llvm-cov` into `ci.yml` for a baseline %
+   and a no-regression gate — there is currently no coverage signal, so "test
+   discipline" has no number to defend.
+3. **Cut tree slop.** `scratch/` (1.2 MB, 27 files incl. a 610 KB profvis HTML +
+   vendored minified d3/jQuery/highlight.js, swept in at `56fb96f`) does not
+   belong in a distributable library tree — `git rm` + `.gitignore`. Add a CI
+   check that the vendored `r/picklerick/src/rust/scx-core` copy is in sync with
+   `crates/scx-core` (run `sync-scx-core.sh` then `git diff --exit-code`) so it
+   can never silently drift again.
+4. **Structural tidy (optional, later).** Split the 2k-line files
+   (`h5ad.rs` 2444, `h5seurat.rs` 2085, `npy.rs` 1822) along reader/writer/
+   encoding seams — only if it pays for itself in readability.
+
+**Sequencing for the overall "make it solid" goal:** this hardening pass →
+distribution (0.1.6) → format-bench research deliverable. You don't ship a
+panic-prone library to PyPI/R-universe, and the benchmark contribution is only
+credible on a tool that's reproducibly installable and doesn't fall over.
+
 ## 0.0.1 (done)
 
 - `H5SeuratReader` — reads SeuratDisk `.h5seurat` files (Seurat v3/v4)
