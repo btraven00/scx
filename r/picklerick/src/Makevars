@@ -5,9 +5,12 @@ TARGET_DIR = ./rust/target
 LIBDIR     = $(TARGET_DIR)/release
 STATLIB    = $(LIBDIR)/libpicklerick_r.a
 
-# HDF5 + zlib are linked statically into libpicklerick_r.a via the
-# vendored-hdf5 feature on the vendored scx-core (see ./rust/scx-core).
-# No system libhdf5 / libz at link or load time.
+# scx-core links HDF5 + zlib into libpicklerick_r.a. With the default
+# vendored-hdf5 feature it builds them from source and links statically (no
+# system libhdf5 / libz needed). Packagers that set HDF5_DIR (e.g. the conda
+# recipe, host hdf5 1.12.*) make hdf5-metno-sys link that system library
+# instead; the chunk-read ABI is then chosen from the detected version, not the
+# feature (see scx-core/build.rs + h5_chunk.rs). -ldl/-lm cover the static case.
 PKG_LIBS   = $(STATLIB) -ldl -lm
 
 RUST_SRC = $(shell find ./rust/src ./rust/scx-core/src -name '*.rs' 2>/dev/null) ./rust/Cargo.toml

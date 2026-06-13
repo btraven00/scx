@@ -93,19 +93,21 @@ pub fn read_range_parallel(
             let mut buf = vec![0u8; size as usize];
             // The raw chunk-read symbol is versioned by the HDF5 ABI we link
             // against:
-            //   - System libhdf5 (pre-2.0, the `--no-default-features` path)
-            //     exports the 5-arg `H5Dread_chunk` and hdf5-metno-sys binds it
-            //     as `H5Dread_chunk1` (via a link_name override).
-            //   - The vendored/bundled HDF5 2.0.0 (the default `vendored-hdf5`
-            //     path) drops the deprecated `H5Dread_chunk1` symbol entirely and
-            //     exports only the 6-arg `H5Dread_chunk2` (extra in/out
-            //     `buf_size`).
-            // Gate on the same feature that selects the bundled library so each
-            // build calls a symbol that actually exists. `buf` is already sized
-            // exactly from H5Dget_chunk_info_by_coord above, so the chunk fits
-            // without resizing.
+            //   - HDF5 < 2.0 exports the 5-arg `H5Dread_chunk` and
+            //     hdf5-metno-sys binds it as `H5Dread_chunk1` (via a link_name
+            //     override).
+            //   - HDF5 >= 2.0 drops the deprecated `H5Dread_chunk1` symbol
+            //     entirely and exports only the 6-arg `H5Dread_chunk2` (extra
+            //     in/out `buf_size`); hdf5-metno-sys only declares the
+            //     `H5Dread_chunk2` binding when it detects that version.
+            // Gate on the actual linked version (the `hdf5_2_0` cfg set by
+            // build.rs from hdf5-metno-sys's `DEP_HDF5_VERSION_2_0_0` metadata),
+            // NOT on our `vendored-hdf5` feature — the feature only selects
+            // static-vs-system linking and a system HDF5 can be either ABI.
+            // `buf` is already sized exactly from H5Dget_chunk_info_by_coord
+            // above, so the chunk fits without resizing.
             let rc = unsafe {
-                #[cfg(feature = "vendored-hdf5")]
+                #[cfg(hdf5_2_0)]
                 {
                     let mut buf_size = buf.len();
                     hdf5_sys::h5d::H5Dread_chunk2(
@@ -117,7 +119,7 @@ pub fn read_range_parallel(
                         &mut buf_size,
                     )
                 }
-                #[cfg(not(feature = "vendored-hdf5"))]
+                #[cfg(not(hdf5_2_0))]
                 {
                     hdf5_sys::h5d::H5Dread_chunk1(
                         dsid,

@@ -13,10 +13,12 @@ if [ ! -d "$src" ]; then
     exit 1
 fi
 
-rm -rf "$dst/src" "$dst/Cargo.toml"
+rm -rf "$dst/src" "$dst/Cargo.toml" "$dst/build.rs"
 mkdir -p "$dst"
 cp -r "$src/src" "$dst/src"
 cp "$src/Cargo.toml" "$dst/Cargo.toml"
+# build.rs derives the HDF5-ABI cfg (hdf5_2_0) used by h5_chunk.rs; required.
+cp "$src/build.rs" "$dst/build.rs"
 
 # Strip dev-dependencies and bench targets — vendored copy is build-only.
 python3 - "$dst/Cargo.toml" <<'PY'
