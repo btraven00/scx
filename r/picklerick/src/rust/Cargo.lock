@@ -839,7 +839,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "scx-core"
 version = "0.1.0"
-source = "git+https://github.com/btraven00/scx?rev=e634c2adb19cf985791ae4e655ded08dda85c4c8#e634c2adb19cf985791ae4e655ded08dda85c4c8"
+source = "git+https://github.com/btraven00/scx?rev=3f4d45b31c987482e3884d416b0b34fec58e449d#3f4d45b31c987482e3884d416b0b34fec58e449d"
 dependencies = [
  "async-trait",
  "chrono",
