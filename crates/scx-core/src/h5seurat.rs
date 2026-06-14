@@ -992,14 +992,29 @@ impl DatasetReader for H5SeuratReader {
                 let chunk_size = self.chunk_size;
 
                 let bp_reader = {
-                    let file = File::open(&path)
-                        .expect("failed to open H5Seurat file for BPCells backend");
-                    let grp_path = candidate_group_paths(&assay, &layer)
+                    let file = match File::open(&path) {
+                        Ok(file) => file,
+                        Err(e) => {
+                            return Box::pin(stream::once(async move { Err(ScxError::from(e)) }));
+                        }
+                    };
+                    let grp_path = match candidate_group_paths(&assay, &layer)
                         .into_iter()
                         .find(|p| file.group(p).is_ok())
-                        .expect("missing assay/layer group for BPCells backend");
-                    crate::h5bpcells::open_bpcells_h5(&file, &grp_path, chunk_size)
-                        .expect("failed to open BPCells matrix backend")
+                    {
+                        Some(p) => p,
+                        None => {
+                            return Box::pin(stream::once(async move {
+                                Err(ScxError::InvalidFormat(
+                                    "missing assay/layer group for BPCells backend".into(),
+                                ))
+                            }));
+                        }
+                    };
+                    match crate::h5bpcells::open_bpcells_h5(&file, &grp_path, chunk_size) {
+                        Ok(reader) => reader,
+                        Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                    }
                 };
 
                 Box::pin(stream::unfold(0usize, move |cell_start| {

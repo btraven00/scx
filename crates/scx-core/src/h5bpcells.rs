@@ -511,7 +511,7 @@ pub fn write_bpcells_h5(
 
         // Encode this run's row indices.
         let (run_idx_data, mut run_idx_idx, run_idx_starts) =
-            encode_d1z(&index[nnz_start..nnz_end]);
+            encode_d1z(&index[nnz_start..nnz_end])?;
 
         // Adjust run-local idx offsets to be global (offset by data written so far).
         let idx_data_offset = all_index_data.len() as u32;
@@ -1256,7 +1256,7 @@ mod tests {
                     cur
                 })
                 .collect();
-            let (data, idx, starts) = encode_d1z(&values);
+            let (data, idx, starts) = encode_d1z(&values).unwrap();
             let decoded = decode_d1z(&data, &idx, &starts, values.len());
             assert_eq!(decoded, values, "failed D1Z roundtrip for len={len}");
         }

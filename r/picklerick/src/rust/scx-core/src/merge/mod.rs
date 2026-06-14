@@ -307,10 +307,14 @@ async fn apply_patches(
     chunk_size: usize,
 ) -> Result<()> {
     for patch in patches.iter_mut() {
-        if patch.source_sha256.is_none() {
-            patch.source_sha256 = Some(crate::provenance::sha256_file(&patch.source)?);
-        }
-        let sha256 = patch.source_sha256.clone().unwrap();
+        let sha256 = match &patch.source_sha256 {
+            Some(s) => s.clone(),
+            None => {
+                let s = crate::provenance::sha256_file(&patch.source)?;
+                patch.source_sha256 = Some(s.clone());
+                s
+            }
+        };
 
         let mut reader = open_patch_reader(&patch.source, chunk_size)?;
         let conflict = patch.conflict;

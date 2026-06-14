@@ -144,7 +144,7 @@ pub fn encode_for(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
 /// - `index_data` is the concatenated packed words for all chunks
 /// - `index_idx[k]` is the starting word offset of chunk `k`
 /// - `index_starts[k]` is the prefix value before chunk `k`
-pub fn encode_d1z(values: &[u32]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+pub fn encode_d1z(values: &[u32]) -> crate::error::Result<(Vec<u32>, Vec<u32>, Vec<u32>)> {
     let n_chunks = values.len().div_ceil(128);
     let mut data = Vec::new();
     let mut idx = Vec::with_capacity(n_chunks + 1);
@@ -159,7 +159,12 @@ pub fn encode_d1z(values: &[u32]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         let mut buf = [0u32; 128];
         for (i, &value) in chunk.iter().enumerate() {
             let delta = value as i64 - prev as i64;
-            let delta_i32 = i32::try_from(delta).expect("BPCells D1Z delta out of i32 range");
+            let delta_i32 = i32::try_from(delta).map_err(|_| {
+                crate::error::ScxError::InvalidFormat(format!(
+                    "BPCells D1Z delta out of i32 range ({delta}); row indices must be \
+                     sorted and within i32"
+                ))
+            })?;
             buf[i] = zigzag_encode(delta_i32);
             prev = value;
         }
@@ -171,7 +176,7 @@ pub fn encode_d1z(values: &[u32]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         idx.push(data.len() as u32);
     }
 
-    (data, idx, starts)
+    Ok((data, idx, starts))
 }
 
 // ─── Stream decoders ─────────────────────────────────────────────────────────

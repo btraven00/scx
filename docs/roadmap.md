@@ -13,18 +13,21 @@ quality and discipline, not new features.
 
 **Sequenced workstreams (cheapest/highest-leverage first):**
 
-1. **Error-path hardening (the headline).** Audit `unwrap()` / `expect()` /
-   `panic!` in the reader paths (`h5ad`, `h5seurat`, `h5bpcells`, `npy`) and
-   convert every "malformed-input" case to `ScxError`; leave genuinely
-   infallible ones but make that explicit (`expect("…invariant…")`). Add
-   "garbage in → clean Err" regression tests. Motivated by the recon below and
-   by the existing class of bug already fixed once (`b54c0d2`, "raise clean R
-   errors instead of panicking on read failure").
-   - **Recon (2026-06-13):** ~448 `unwrap()` in `crates/*/src` (incl. inline
-     test modules), concentrated in `h5ad.rs` (127), `h5seurat.rs` (103),
-     `api/write.rs` (73), `h5bpcells.rs` (60); 24 `panic!`/`todo!`/`unreachable!`
-     in src. **Start point: `h5ad.rs` audit** (most-used reader, highest count)
-     to calibrate real-risk vs infallible before the full sweep.
+1. **Error-path hardening — DONE (audited 2026-06-14).** The headline recon
+   number was a measurement artifact: ~95% of the ~448 `unwrap()` in `crates/*/src`
+   live in `#[cfg(test)]` modules (idiomatic). Production code has only **16
+   panic-sites**, of which exactly **one** was a real panic-on-malformed-input
+   risk: `H5SeuratReader::x_stream`'s BPCells arm `.expect()`-ed on a missing
+   file / missing assay group / unreadable backend. Fixed to return a clean
+   `ScxError` through the stream — matching the single-error-stream idiom the same
+   file already used elsewhere (same bug class as `b54c0d2`). Two minor tidies
+   applied: `encode_d1z` now returns `Result` (corrupt/unsorted indices →
+   `ScxError` instead of `expect`), and `merge::apply_patches` uses match-insert
+   instead of `is_none()`+`unwrap()`. Everything else is infallible-by-construction
+   (`indptr.last()` seeded with `[0]`; `try_into()` on `chunks_exact(N)`) or a
+   correct `unreachable!()`. **Conclusion: the engine was already disciplined;
+   no broad unwrap sweep needed.** The leverage now is keeping it that way
+   (workstream 2) rather than more auditing.
 2. **Coverage ratchet.** Wire `cargo llvm-cov` into `ci.yml` for a baseline %
    and a no-regression gate — there is currently no coverage signal, so "test
    discipline" has no number to defend.
