@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/scx")
+    PathBuf::from(env!("CARGO_BIN_EXE_scx"))
 }
 
 fn golden_path(filename: &str) -> PathBuf {

@@ -38,7 +38,7 @@ use tempfile::TempDir;
 // ---------------------------------------------------------------------------
 
 fn binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/scx")
+    PathBuf::from(env!("CARGO_BIN_EXE_scx"))
 }
 
 fn scx(args: &[&str]) -> std::process::Output {
