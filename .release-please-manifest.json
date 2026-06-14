@@ -1,4 +1,4 @@
 {
-  "crates/scx-core": "0.1.0",
-  "crates/scx-cli": "0.1.0"
+  "crates/scx-core": "0.2.0",
+  "crates/scx-cli": "0.2.0"
 }

@@ -10,6 +10,12 @@ jobs:
   release-please:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    # Needed to open/update the release PR and create release tags. Without this
+    # the default read-only GITHUB_TOKEN fails with "Resource not accessible by
+    # integration" when creating the branch/PR.
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       tag_name: ${{ steps.release.outputs['crates/scx-cli--tag_name'] }}
