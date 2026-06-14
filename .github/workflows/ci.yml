@@ -72,7 +72,9 @@ jobs:
       - name: Coverage gate
         env:
           HDF5_USE_FILE_LOCKING: "FALSE"
-        # Baseline 2026-06-14 was 67.86% lines (workspace-wide, incl. the
-        # python pyo3 crate which Rust tests don't cover). Floor set a few
-        # points below to ratchet without flaking; raise as coverage improves.
-        run: cargo llvm-cov --all --no-default-features --summary-only --fail-under-lines 65
+        # Excludes the python pyo3 crate (exercised via Python, not Rust tests,
+        # so its lines don't belong in a Rust coverage gate). CI-measured
+        # baseline on main (2026-06-15, incl. the streaming BPCells writer):
+        # 74.29% lines. Floor set a couple points below to ratchet without
+        # flaking; raise as it improves.
+        run: cargo llvm-cov --all --no-default-features --summary-only --ignore-filename-regex 'python/' --fail-under-lines 72
