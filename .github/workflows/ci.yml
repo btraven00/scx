@@ -56,27 +56,6 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         run: cargo test --all ${{ matrix.cargo_flags }}
 
-  # The R package builds a vendored copy of scx-core (r/picklerick ships only
-  # its own directory to R-universe, so it can't path-depend on crates/scx-core).
-  # This guard fails if that copy has drifted from the canonical source — run
-  # `bash r/picklerick/sync-scx-core.sh` and commit the result.
-  vendor-sync:
-    name: Vendored scx-core in sync
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Re-sync and check for drift
-        run: |
-          bash r/picklerick/sync-scx-core.sh
-          if [ -n "$(git status --porcelain -- r/picklerick/src/rust/scx-core)" ]; then
-            echo "::error::Vendored r/picklerick/src/rust/scx-core is out of sync with crates/scx-core."
-            echo "Run 'bash r/picklerick/sync-scx-core.sh' and commit the result."
-            git --no-pager diff --stat -- r/picklerick/src/rust/scx-core
-            git status --porcelain -- r/picklerick/src/rust/scx-core
-            exit 1
-          fi
-          echo "Vendored copy is in sync."
-
   # Coverage baseline. Runs against system HDF5 (fast: skips the from-source
   # vendored build). Report-only for now — set `--fail-under-lines N` from the
   # first run's reported % to turn this into a no-regression ratchet.

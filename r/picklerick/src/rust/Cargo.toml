@@ -4,10 +4,11 @@ version = "0.0.3"
 edition = "2021"
 
 # This crate is NOT part of the top-level Cargo workspace.
-# It is compiled separately by R's build system (src/Makevars.in) when
-# native bindings are activated.  scx-core is vendored at ./scx-core so
-# the package builds in isolation on r-universe (which only ships this
-# directory).  Re-sync via r/picklerick/sync-scx-core.sh.
+# It is compiled separately by R's build system (src/Makevars) when native
+# bindings are activated.  scx-core is pulled as a git dependency pinned to a
+# rev (see below) so the package is self-contained without a committed copy —
+# cargo fetches it at build time, like every other crates.io dependency. Build
+# environments (conda rattler-build, R-universe) have network access at build.
 [workspace]
 
 [lib]
@@ -15,11 +16,11 @@ crate-type = ["staticlib"]
 
 [dependencies]
 extendr-api = "0.7"
-# Vendored scx-core builds HDF5 + zlib statically by default (mirrors the
-# workspace's vendored-hdf5 feature flip in commit 5992b9a). This isolates
-# picklerick's HDF5 from rhdf5 / hdf5r and avoids ABI drift against the
-# system libhdf5 (e.g. H5Literate removed in 1.14+).
-scx-core    = { path = "./scx-core" }
+# scx-core builds HDF5 + zlib statically by default (vendored-hdf5 feature),
+# isolating picklerick's HDF5 from rhdf5 / hdf5r and avoiding ABI drift against
+# the system libhdf5 (e.g. H5Literate removed in 1.14+). Pinned to a rev for
+# reproducibility; bump on each release (a tag works too).
+scx-core    = { git = "https://github.com/btraven00/scx", rev = "e634c2adb19cf985791ae4e655ded08dda85c4c8" }
 ndarray     = "0.16"
 tokio       = { version = "1", features = ["rt"] }
 futures     = "0.3"

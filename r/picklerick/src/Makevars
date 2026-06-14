@@ -13,7 +13,9 @@ STATLIB    = $(LIBDIR)/libpicklerick_r.a
 # feature (see scx-core/build.rs + h5_chunk.rs). -ldl/-lm cover the static case.
 PKG_LIBS   = $(STATLIB) -ldl -lm
 
-RUST_SRC = $(shell find ./rust/src ./rust/scx-core/src -name '*.rs' 2>/dev/null) ./rust/Cargo.toml
+# scx-core is a pinned git dependency (./rust/Cargo.toml + Cargo.lock), fetched
+# by cargo — not vendored in-tree. Rebuild on local source or lockfile changes.
+RUST_SRC = $(shell find ./rust/src -name '*.rs' 2>/dev/null) ./rust/Cargo.toml ./rust/Cargo.lock
 
 $(SHLIB): $(STATLIB)
 
