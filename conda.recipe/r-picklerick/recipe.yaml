@@ -13,16 +13,18 @@ source:
 
 build:
   number: 0
+  # No HDF5_DIR / system hdf5: scx-core's vendored-hdf5 feature builds HDF5 +
+  # zlib from source and bundles them into the staticlib (Rust staticlibs only
+  # bundle *static* native deps, and Makevars passes no -lhdf5 — so a dynamic
+  # system HDF5 would leave symbols like H5Sselect_elements undefined at load).
+  # The from-source build needs cmake (see build requirements).
   script:
     - if: unix
       then:
-        - export HDF5_DIR="$PREFIX"
-        - export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
         - cd r/picklerick
         - R CMD INSTALL --build .
     - if: win
       then:
-        - set "HDF5_DIR=%LIBRARY_PREFIX%"
         - cd r\picklerick
         - R CMD INSTALL --build .
 
@@ -30,13 +32,15 @@ requirements:
   build:
     - ${{ compiler('rust') }}
     - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - cmake
     - if: unix
       then: pkg-config
     - make
   host:
+    # No hdf5 here: it is vendored statically into the staticlib (see build
+    # script note). zlib is likewise vendored via the hdf5/zlib feature.
     - r-base
-    - hdf5 1.12.*
-    - zlib
     - r-matrix
     - r-jsonlite
     - bioconductor-s4vectors
@@ -44,7 +48,6 @@ requirements:
     - bioconductor-summarizedexperiment
   run:
     - r-base
-    - hdf5 1.12.*
     - r-matrix
     - r-jsonlite
     - bioconductor-s4vectors
