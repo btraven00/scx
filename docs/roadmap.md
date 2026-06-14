@@ -944,20 +944,30 @@ peak above the single-chunk backed reader (hlca: 3.6 GB vs 2.3 GB), so keep
 
 ---
 
-## 0.1.7 — Truly streaming H5Seurat write
+## 0.3.0 (next) — Truly streaming BPCells write
 
-The 0.0.9 BPCells writer and the 0.0.4 dgCMatrix writer both buffer O(nnz)
-entries in RAM. For genuine atlas-scale (>1B nnz), implement a two-pass
-streaming approach:
+**Corrected premise (2026-06-14):** the dgCMatrix writer *already streams* —
+`H5SeuratWriter::write_x_chunk` appends `data`/`indices` to resizable HDF5
+datasets per chunk and holds only an O(n_obs) `indptr` (CSR cells×genes and CSC
+genes×cells share per-cell layout, so no transpose). The **only** O(nnz) buffer
+is the BPCells writer's `BpcellsCscAccumulator`, which collects every
+`(cell, gene, val)` entry and sorts. That buffer is avoidable: BPCells X is also
+stored cells-as-columns and streaming readers deliver cells in order, so no
+transpose is needed — the only real constraint is BP-128's 128-column run
+granularity.
 
-1. **Pass 1 (streaming)**: write a temporary H5AD (CSR, memory-bounded). Also
-   accumulate a per-gene nnz count to compute CSC `indptr`.
-2. **Pass 2 (streaming)**: read the temp H5AD column-by-column and write CSC
-   directly into the BPCells or dgCMatrix layout.
+**Approach (chosen): streaming per-run encoder.** Buffer only the trailing
+`<128`-cell partial run; encode complete 128-column runs as chunks arrive
+(reusing `encode_for`/`encode_d1z` unchanged), append to resizable HDF5 datasets,
+accumulate `idxptr` + per-run offsets, write those at `finalize`. No temp file,
+no sort, no transpose — mirrors the dgCMatrix writer. Peak drops from O(nnz) to
+O(n_obs + chunk) (the `idxptr` is the floor, same as the dgCMatrix writer
+already pays). Validate with a **golden-equivalence test**: streaming output
+byte-identical to the current buffered `write_bpcells_h5` across dtypes and chunk
+sizes (1, <128, =128, >128, non-multiples).
 
-This keeps peak RSS at O(chunk_size) throughout. Only necessary for datasets
-where nnz > ~500M; the current buffered writers handle everything up to
-~HLCA-scale on a typical compute node (16–32 GB RAM).
+(Renumbered from the old "0.1.7" — 0.2.0 already shipped. The buffered writer
+handles up to ~HLCA-scale on a 16–32 GB node; streaming targets >~500M nnz.)
 
 ---
 
@@ -1046,7 +1056,7 @@ wins.
 
 ---
 
-## 0.3.0 — Network-backed readers (Zarr, Parquet, ranged HDF5)
+## 0.4.0 — Network-backed readers (Zarr, Parquet, ranged HDF5)
 
 **Goal:** read directly from object stores (S3/GCS/HTTP) without staging files
 locally. Activates the async trait surface that has been structural-only since
@@ -1076,7 +1086,7 @@ stays sequential; this is a ~10-line change once a network reader exists.
 
 ---
 
-## 0.4.0 — TileDB-SOMA reader
+## 0.5.0 — TileDB-SOMA reader
 
 **Goal:** read `SOMAExperiment` collections (CZI + TileDB's single-cell spec,
 storage layer behind CELLxGENE Census).
