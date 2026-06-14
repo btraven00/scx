@@ -28,15 +28,16 @@ quality and discipline, not new features.
    correct `unreachable!()`. **Conclusion: the engine was already disciplined;
    no broad unwrap sweep needed.** The leverage now is keeping it that way
    (workstream 2) rather than more auditing.
-2. **Coverage ratchet.** Wire `cargo llvm-cov` into `ci.yml` for a baseline %
-   and a no-regression gate — there is currently no coverage signal, so "test
-   discipline" has no number to defend.
-3. **Cut tree slop.** `scratch/` (1.2 MB, 27 files incl. a 610 KB profvis HTML +
-   vendored minified d3/jQuery/highlight.js, swept in at `56fb96f`) does not
-   belong in a distributable library tree — `git rm` + `.gitignore`. Add a CI
-   check that the vendored `r/picklerick/src/rust/scx-core` copy is in sync with
-   `crates/scx-core` (run `sync-scx-core.sh` then `git diff --exit-code`) so it
-   can never silently drift again.
+2. **Coverage ratchet — baseline DONE (2026-06-14).** `cargo llvm-cov` runs in
+   `ci.yml` (system-HDF5 path) as a report-only baseline (`continue-on-error`).
+   Remaining: flip it to a no-regression gate via `--fail-under-lines N` once
+   the baseline % is trusted.
+3. **Cut tree slop — DONE (2026-06-14).** `scratch/` (1.2 MB incl. a 610 KB
+   profvis HTML + vendored minified JS) was purged from history and gitignored.
+   The vendored `r/picklerick/src/rust/scx-core` copy + `sync-scx-core.sh` were
+   removed entirely: the R package now depends on `scx-core` as a **pinned git
+   dependency** (see `docs/packaging.md`), so there is no copy to drift and no
+   sync guard needed.
 4. **Structural tidy (optional, later).** Split the 2k-line files
    (`h5ad.rs` 2444, `h5seurat.rs` 2085, `npy.rs` 1822) along reader/writer/
    encoding seams — only if it pays for itself in readability.
@@ -164,12 +165,17 @@ in the workspace. Current `hdf5-metno-src 0.10.2` pulls `libz-sys 1.1` with
 `default-features = false` + `static + libc` only — no `zlib-ng` feature,
 so libz-sys builds *stock* zlib that HDF5's `H5Z_filter_deflate` accepts.
 The workspace (`scx-cli`, `python/picklerick`) now defaults to vendored
-static HDF5 via the `vendored-hdf5` feature on `scx-core`; conda recipes
-opt out with `--no-default-features` to keep using the conda-provided
-`libhdf5`. The R `picklerick` package still builds dynamically against
-system HDF5 — it has a vendored copy of `scx-core` outside the workspace,
-and the rhdf5/`hdf5r` coexistence story needs to be re-validated before
-flipping that to vendored.
+static HDF5 via the `vendored-hdf5` feature on `scx-core`; the `scx` and
+`picklerick-python` conda recipes opt out with `--no-default-features` to use
+the conda-provided `libhdf5`.
+
+**Update (2026-06-14):** the R `picklerick` package now also builds **vendored
+static** HDF5 — it *must*, because it is a Rust `staticlib` and dynamic HDF5
+symbols don't survive R's separate `.so` link (`undefined symbol:
+H5Sselect_elements`). Its `conda.recipe/r-picklerick` recipe therefore does not
+set `HDF5_DIR` or depend on system `hdf5`. Separately, the in-tree vendored copy
+of `scx-core` was replaced by a **pinned git dependency**. See
+`docs/packaging.md` for both.
 
 ### What was delivered
 

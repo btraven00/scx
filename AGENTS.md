@@ -163,4 +163,31 @@ When in doubt, choose the option that is:
 - easier to explain,
 - and easier to delete later.
 
+---
+
+## Build & Packaging Gotchas
+
+Two non-obvious facts that have each caused a build failure. Full detail in
+`docs/packaging.md`; the short version for agents:
+
+### The R package must vendor HDF5 *statically*
+`picklerick-r` compiles to a Rust `staticlib` that R links into `picklerick.so`
+via `src/Makevars` (which passes no `-lhdf5`). A Rust staticlib only bundles
+**statically**-linked native deps, and cargo's dynamic-link directives do not
+reach R's separate `.so` link step. So linking HDF5 *dynamically* (system
+`libhdf5`) leaves its symbols undefined at load (`undefined symbol:
+H5Sselect_elements`). The `conda.recipe/r-picklerick` recipe therefore must
+**not** set `HDF5_DIR` or depend on system `hdf5`, and must include `cmake` +
+a C++ compiler for the from-source HDF5 build. (CLI/Python packages *can* use
+system HDF5 via `--no-default-features`; the R staticlib cannot.)
+
+### scx-core is a pinned git dependency for the R package
+`r/picklerick` depends on `scx-core` via a git dependency pinned to a rev on
+`btraven00/scx` — not a path dep and not an in-tree copy. There is no vendored
+`r/picklerick/src/rust/scx-core` and no `sync-scx-core.sh`; do not reintroduce
+them. The committed `r/picklerick/src/rust/Cargo.lock` is required (keep
+`hdf5-metno` pinned to a single-ndarray combination, currently `0.12.4`, or a
+fresh resolve pulls ndarray 0.17 → `Selection`/`SliceInfo` skew). Bump the
+pinned rev/tag when the R bindings need new scx-core changes.
+
 That bias is usually the correct one for SCX.
