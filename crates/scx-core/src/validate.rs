@@ -446,6 +446,42 @@ mod tests {
     }
 
     #[test]
+    fn test_qualifier_describe_all_variants() {
+        assert_eq!(Qualifier::Eq(5).describe(), "== 5");
+        assert_eq!(Qualifier::Ge(5).describe(), ">= 5");
+        assert_eq!(Qualifier::Gt(5).describe(), "> 5");
+        assert_eq!(Qualifier::Le(5).describe(), "<= 5");
+        assert_eq!(Qualifier::Lt(5).describe(), "< 5");
+    }
+
+    #[test]
+    fn test_validation_report_tallies() {
+        let mk = |name: &str, passed: bool| CheckResult {
+            name: name.into(),
+            passed,
+            detail: String::new(),
+        };
+        let report = ValidationReport {
+            file: "f.h5ad".into(),
+            schema: "s".into(),
+            checks: vec![mk("a", true), mk("b", false), mk("c", true)],
+        };
+        assert_eq!(report.n_passed(), 2);
+        assert_eq!(report.n_failed(), 1);
+        assert!(!report.passed());
+
+        let all_ok = ValidationReport {
+            file: String::new(),
+            schema: String::new(),
+            checks: vec![mk("a", true)],
+        };
+        assert!(all_ok.passed());
+
+        // An empty report vacuously passes.
+        assert!(ValidationReport::default().passed());
+    }
+
+    #[test]
     fn test_schema_deserialize_empty() {
         let schema: ValidationSchema = serde_json::from_str("{}").unwrap();
         assert!(schema.obs.is_none());

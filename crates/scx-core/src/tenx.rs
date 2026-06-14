@@ -514,3 +514,318 @@ impl DatasetReader for TenxH5Reader {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use futures::StreamExt;
+    use hdf5::{File, Group};
+    use ndarray::Array1;
+    use std::str::FromStr;
+
+    // ── fixture helpers ──────────────────────────────────────────────────────
+
+    fn wstr(g: &Group, name: &str, vals: &[&str]) {
+        let arr: Vec<VarLenUnicode> = vals
+            .iter()
+            .map(|s| VarLenUnicode::from_str(s).unwrap())
+            .collect();
+        g.new_dataset::<VarLenUnicode>()
+            .shape(arr.len())
+            .create(name)
+            .unwrap()
+            .write(&Array1::from_vec(arr))
+            .unwrap();
+    }
+
+    fn wi32(g: &Group, name: &str, vals: &[i32]) {
+        g.new_dataset::<i32>()
+            .shape(vals.len())
+            .create(name)
+            .unwrap()
+            .write(&Array1::from_vec(vals.to_vec()))
+            .unwrap();
+    }
+
+    fn wi64(g: &Group, name: &str, vals: &[i64]) {
+        g.new_dataset::<i64>()
+            .shape(vals.len())
+            .create(name)
+            .unwrap()
+            .write(&Array1::from_vec(vals.to_vec()))
+            .unwrap();
+    }
+
+    fn wu32(g: &Group, name: &str, vals: &[u32]) {
+        g.new_dataset::<u32>()
+            .shape(vals.len())
+            .create(name)
+            .unwrap()
+            .write(&Array1::from_vec(vals.to_vec()))
+            .unwrap();
+    }
+
+    fn wf32(g: &Group, name: &str, vals: &[f32]) {
+        g.new_dataset::<f32>()
+            .shape(vals.len())
+            .create(name)
+            .unwrap()
+            .write(&Array1::from_vec(vals.to_vec()))
+            .unwrap();
+    }
+
+    /// Canonical 4-cell × 3-gene fixture. CSR (cell-major):
+    ///   cell0: g0=5, g2=7 | cell1: g1=3 | cell2: (empty) | cell3: g0=1,g1=2,g2=4
+    fn write_standard(path: &Path) {
+        let f = File::create(path).unwrap();
+        let m = f.create_group("matrix").unwrap();
+        wstr(&m, "barcodes", &["AAA", "CCC", "GGG", "TTT"]);
+        let feat = m.create_group("features").unwrap();
+        wstr(&feat, "id", &["ENSG0", "ENSG1", "ENSG2"]);
+        wstr(&feat, "name", &["GeneA", "GeneB", "GeneC"]);
+        wstr(
+            &feat,
+            "feature_type",
+            &["Gene Expression", "Gene Expression", "Antibody Capture"],
+        );
+        wstr(&feat, "genome", &["GRCh38", "GRCh38", "GRCh38"]);
+        wi32(&m, "data", &[5, 7, 3, 1, 2, 4]);
+        wi32(&m, "indices", &[0, 2, 1, 0, 1, 2]);
+        wi32(&m, "indptr", &[0, 2, 3, 3, 6]);
+        wi32(&m, "shape", &[3, 4]);
+    }
+
+    /// Drive `x_stream` and reassemble the global CSR (indptr, indices, data-as-i64).
+    fn collect_csr(path: &Path, chunk_size: usize) -> (Vec<u64>, Vec<u32>, Vec<i64>) {
+        let mut reader = TenxH5Reader::open(path, chunk_size).unwrap();
+        let chunks: Vec<MatrixChunk> = block_on(async {
+            let mut s = reader.x_stream();
+            let mut v = Vec::new();
+            while let Some(c) = s.next().await {
+                v.push(c.unwrap());
+            }
+            v
+        });
+        let mut indptr = vec![0u64];
+        let mut indices = Vec::new();
+        let mut data = Vec::new();
+        for (i, ch) in chunks.iter().enumerate() {
+            assert_eq!(ch.row_offset, indptr.len() - 1, "row_offset chunk {i}");
+            let base = *indptr.last().unwrap();
+            for r in 1..=ch.nrows {
+                indptr.push(base + ch.data.indptr[r]);
+            }
+            indices.extend_from_slice(&ch.data.indices);
+            data.extend(ch.data.data.to_f64().into_iter().map(|x| x as i64));
+        }
+        (indptr, indices, data)
+    }
+
+    fn str_col<'a>(var: &'a VarTable, name: &str) -> Option<&'a Vec<String>> {
+        var.columns.iter().find(|c| c.name == name).and_then(|c| {
+            if let ColumnData::String(v) = &c.data {
+                Some(v)
+            } else {
+                None
+            }
+        })
+    }
+
+    // ── tests ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn open_reads_shape_dtype_indptr() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("std.h5");
+        write_standard(&p);
+        let r = TenxH5Reader::open(&p, 2).unwrap();
+        assert_eq!(r.shape(), (4, 3));
+        assert_eq!(r.dtype(), DataType::I32);
+        assert_eq!(r.x_indptr(), &[0, 2, 3, 3, 6]);
+    }
+
+    #[test]
+    fn obs_and_var_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("std.h5");
+        write_standard(&p);
+        let mut r = TenxH5Reader::open(&p, 2).unwrap();
+
+        let obs = block_on(r.obs()).unwrap();
+        assert_eq!(obs.index, ["AAA", "CCC", "GGG", "TTT"]);
+        assert!(obs.columns.is_empty());
+
+        let var = block_on(r.var()).unwrap();
+        assert_eq!(var.index, ["ENSG0", "ENSG1", "ENSG2"]); // prefers features/id
+        assert_eq!(
+            str_col(&var, "gene_symbols").unwrap(),
+            &["GeneA", "GeneB", "GeneC"]
+        );
+        assert_eq!(
+            str_col(&var, "feature_types").unwrap(),
+            &["Gene Expression", "Gene Expression", "Antibody Capture"]
+        );
+        assert_eq!(str_col(&var, "genome").unwrap(), &["GRCh38"; 3]);
+    }
+
+    #[test]
+    fn x_stream_roundtrip_all_chunk_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("std.h5");
+        write_standard(&p);
+        for cs in [1usize, 2, 3, 4, 10] {
+            let (indptr, indices, data) = collect_csr(&p, cs);
+            assert_eq!(indptr, vec![0, 2, 3, 3, 6], "indptr cs={cs}");
+            assert_eq!(indices, vec![0, 2, 1, 0, 1, 2], "indices cs={cs}");
+            assert_eq!(data, vec![5, 7, 3, 1, 2, 4], "data cs={cs}");
+        }
+    }
+
+    #[test]
+    fn summary_feature_types_and_genomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("std.h5");
+        write_standard(&p);
+        let s = read_tenx_summary(&p).unwrap();
+        // sorted by count desc, then name asc
+        assert_eq!(
+            s.feature_types,
+            vec![
+                ("Gene Expression".to_string(), 2),
+                ("Antibody Capture".to_string(), 1),
+            ]
+        );
+        assert_eq!(s.genomes, vec!["GRCh38".to_string()]);
+    }
+
+    #[test]
+    fn walk_h5_tree_and_depth_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("std.h5");
+        write_standard(&p);
+
+        let nodes = walk_h5(&p, 3).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "matrix");
+        match &nodes[0].kind {
+            H5NodeKind::Group {
+                children,
+                truncated,
+            } => {
+                assert_eq!(*truncated, 0);
+                let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+                for expected in ["barcodes", "data", "features", "indices", "indptr", "shape"] {
+                    assert!(names.contains(&expected), "missing {expected}: {names:?}");
+                }
+            }
+            _ => panic!("matrix should be a group"),
+        }
+
+        // depth 0: the matrix group's children are omitted but counted.
+        let shallow = walk_h5(&p, 0).unwrap();
+        match &shallow[0].kind {
+            H5NodeKind::Group {
+                children,
+                truncated,
+            } => {
+                assert!(children.is_empty());
+                assert!(*truncated > 0);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn open_missing_barcodes_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("nobc.h5");
+        {
+            let f = File::create(&p).unwrap();
+            f.create_group("matrix").unwrap();
+        }
+        assert!(matches!(
+            TenxH5Reader::open(&p, 2),
+            Err(ScxError::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn open_indptr_length_mismatch_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("badptr.h5");
+        {
+            let f = File::create(&p).unwrap();
+            let m = f.create_group("matrix").unwrap();
+            wstr(&m, "barcodes", &["AAA", "CCC", "GGG", "TTT"]);
+            let feat = m.create_group("features").unwrap();
+            wstr(&feat, "id", &["g0", "g1"]);
+            wi32(&m, "data", &[1]);
+            wi32(&m, "indices", &[0]);
+            wi32(&m, "indptr", &[0, 1]); // wrong: needs n_obs+1 = 5
+        }
+        assert!(matches!(
+            TenxH5Reader::open(&p, 2),
+            Err(ScxError::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn features_name_fallback_when_no_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("nameonly.h5");
+        {
+            let f = File::create(&p).unwrap();
+            let m = f.create_group("matrix").unwrap();
+            wstr(&m, "barcodes", &["b0", "b1"]);
+            let feat = m.create_group("features").unwrap();
+            wstr(&feat, "name", &["GeneA", "GeneB"]); // no `id`
+            wi32(&m, "data", &[1, 2]);
+            wi32(&m, "indices", &[0, 1]);
+            wi32(&m, "indptr", &[0, 1, 2]);
+        }
+        let mut r = TenxH5Reader::open(&p, 2).unwrap();
+        assert_eq!(r.shape(), (2, 2));
+        let var = block_on(r.var()).unwrap();
+        assert_eq!(var.index, ["GeneA", "GeneB"]); // falls back to name
+    }
+
+    #[test]
+    fn dtype_detection_float_and_uint_and_i64_indptr() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // float32 data + i64 indptr/indices (exercises read_int_dataset_u64 i64 path).
+        let pf = dir.path().join("float.h5");
+        {
+            let f = File::create(&pf).unwrap();
+            let m = f.create_group("matrix").unwrap();
+            wstr(&m, "barcodes", &["b0", "b1"]);
+            let feat = m.create_group("features").unwrap();
+            wstr(&feat, "id", &["g0", "g1"]);
+            wf32(&m, "data", &[1.5, 2.5]);
+            wi64(&m, "indices", &[0, 1]);
+            wi64(&m, "indptr", &[0, 1, 2]);
+        }
+        let r = TenxH5Reader::open(&pf, 8).unwrap();
+        assert_eq!(r.dtype(), DataType::F32);
+        assert_eq!(r.x_indptr(), &[0, 1, 2]);
+        let (_, idx, data) = collect_csr(&pf, 8);
+        assert_eq!(idx, vec![0, 1]);
+        assert_eq!(data, vec![1, 2]); // 1.5,2.5 truncated to i64 in the helper
+
+        // uint32 data.
+        let pu = dir.path().join("uint.h5");
+        {
+            let f = File::create(&pu).unwrap();
+            let m = f.create_group("matrix").unwrap();
+            wstr(&m, "barcodes", &["b0", "b1"]);
+            let feat = m.create_group("features").unwrap();
+            wstr(&feat, "id", &["g0", "g1"]);
+            wu32(&m, "data", &[10, 20]);
+            wi32(&m, "indices", &[0, 1]);
+            wi32(&m, "indptr", &[0, 1, 2]);
+        }
+        let r = TenxH5Reader::open(&pu, 8).unwrap();
+        assert_eq!(r.dtype(), DataType::U32);
+    }
+}
