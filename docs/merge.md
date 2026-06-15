@@ -78,6 +78,17 @@ file.h5ad:group/name[,group/name…]
 | `var/<col>` | Single var metadata column | n_vars |
 | `obsm/<name>` | Dense embedding matrix | n_obs × k |
 | `varm/<name>` | Dense gene embedding | n_vars × k |
+| `obsp/<name>` | Named sparse cell graph | n_obs × n_obs |
+| `uns/<key>` | Unstructured metadata entry | scalar / nested dict |
+
+`obsp` patches stream directly and assume the patch's obs order matches the
+base (same as `layers`). `uns` entries are global (no obs/var alignment);
+scalar and nested-dict values are written natively, arrays/nulls are skipped
+(same as the conversion path's uns encoding).
+
+> **`varp` is not supported.** It is not carried by the streaming
+> reader/writer pipeline (it exists only in the npy snapshot path), so it
+> cannot be patched; `varp/<name>` is rejected at parse time.
 
 Patches from any supported input format (h5ad, h5seurat, BPCells directory)
 are accepted — the source format is auto-detected.

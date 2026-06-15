@@ -208,6 +208,82 @@ fn make_h5ad_with_obsm(path: &Path, n_obs: usize, n_vars: usize, obsm_name: &str
     });
 }
 
+fn make_h5ad_with_obsp(path: &Path, n_obs: usize, n_vars: usize, obsp_name: &str) {
+    futures::executor::block_on(async {
+        let obs = ObsTable {
+            index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: (0..n_vars).map(|i| format!("gene_{i}")).collect(),
+            columns: vec![],
+        };
+        let mut writer = H5AdWriter::create(path, n_obs, n_vars, DataType::F32).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_obsm(&Embeddings::default()).await.unwrap();
+        writer.write_uns(&UnsTable::default()).await.unwrap();
+        writer.write_varm(&Varm::default()).await.unwrap();
+        writer
+            .write_x_chunk(&diag_chunk(n_obs, n_vars))
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+
+        // Append a square obsp (n_obs × n_obs) with diagonal connectivity.
+        let mut writer = H5AdWriter::open_for_append(path).unwrap();
+        let (indptr, indices, data) = diag_sparse(n_obs, n_obs);
+        let meta = SparseMatrixMeta {
+            name: obsp_name.to_string(),
+            shape: (n_obs, n_obs),
+            indptr: indptr.clone(),
+        };
+        writer.begin_sparse("obsp", obsp_name, &meta).await.unwrap();
+        let chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_obs),
+                indptr,
+                indices,
+                data: TypedVec::F32(data),
+            },
+        };
+        writer.write_sparse_chunk(&chunk).await.unwrap();
+        writer.end_sparse().await.unwrap();
+    });
+}
+
+fn make_h5ad_with_uns(path: &Path, n_obs: usize, n_vars: usize) {
+    futures::executor::block_on(async {
+        let obs = ObsTable {
+            index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: (0..n_vars).map(|i| format!("gene_{i}")).collect(),
+            columns: vec![],
+        };
+        let uns = UnsTable {
+            raw: serde_json::json!({
+                "neighbors": { "method": "umap", "n_neighbors": 15 }
+            }),
+        };
+        let mut writer = H5AdWriter::create(path, n_obs, n_vars, DataType::F32).unwrap();
+        writer.write_obs(&obs).await.unwrap();
+        writer.write_var(&var).await.unwrap();
+        writer.write_obsm(&Embeddings::default()).await.unwrap();
+        writer.write_uns(&uns).await.unwrap();
+        writer.write_varm(&Varm::default()).await.unwrap();
+        writer
+            .write_x_chunk(&diag_chunk(n_obs, n_vars))
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+    });
+}
+
 /// Diagonal sparse matrix: cell_i has exactly one nonzero at var_i (for i < min(n,m)).
 fn diag_sparse(n_obs: usize, n_vars: usize) -> (Vec<u64>, Vec<u32>, Vec<f32>) {
     let nnz = n_obs.min(n_vars);
@@ -354,6 +430,99 @@ fn test_merge_create_obsm() {
             assert_eq!(obsm.map["X_pca"].shape, (8, 3));
         });
     });
+}
+
+#[test]
+fn test_merge_create_obsp() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().join("base.h5ad");
+    let patch = dir.path().join("patch.h5ad");
+    let out = dir.path().join("merged.h5ad");
+
+    with_hdf5(|| {
+        make_base_h5ad(&base, 10, 8);
+        make_h5ad_with_obsp(&patch, 10, 8, "connectivities");
+    });
+
+    assert_success(&scx(&[
+        "merge",
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:obsp/connectivities", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
+    ]));
+
+    with_hdf5(|| {
+        futures::executor::block_on(async {
+            let mut reader = H5AdReader::open(&out, 5).unwrap();
+            let metas = reader.obsp_metas().await.unwrap();
+            let m = metas
+                .iter()
+                .find(|m| m.name == "connectivities")
+                .expect("obsp 'connectivities' missing from merged output");
+            assert_eq!(m.shape, (10, 10));
+        });
+    });
+}
+
+#[test]
+fn test_merge_create_uns() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().join("base.h5ad");
+    let patch = dir.path().join("patch.h5ad");
+    let out = dir.path().join("merged.h5ad");
+
+    with_hdf5(|| {
+        make_base_h5ad(&base, 6, 4);
+        make_h5ad_with_uns(&patch, 6, 4);
+    });
+
+    assert_success(&scx(&[
+        "merge",
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:uns/neighbors", patch.display()),
+        "--output",
+        out.to_str().unwrap(),
+    ]));
+
+    with_hdf5(|| {
+        futures::executor::block_on(async {
+            let mut reader = H5AdReader::open(&out, 5).unwrap();
+            let uns = reader.uns().await.unwrap();
+            let neighbors = uns
+                .raw
+                .get("neighbors")
+                .expect("uns 'neighbors' missing from merged output");
+            assert!(
+                neighbors.get("method").is_some(),
+                "nested uns key not preserved: {neighbors:?}"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_merge_varp_rejected() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().join("base.h5ad");
+    let out = dir.path().join("merged.h5ad");
+
+    with_hdf5(|| make_base_h5ad(&base, 5, 3));
+
+    // varp is not carried by the streaming pipeline; the slot parse must reject it.
+    assert_failure(&scx(&[
+        "merge",
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:varp/foo", base.display()),
+        "--output",
+        out.to_str().unwrap(),
+    ]));
 }
 
 // ---------------------------------------------------------------------------

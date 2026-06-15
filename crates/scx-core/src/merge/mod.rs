@@ -30,11 +30,13 @@ pub enum SlotSelector {
     VarColumn(String),
     Obsm(String),
     Varm(String),
+    Obsp(String),
+    Uns(String),
 }
 
 impl SlotSelector {
     /// Parse a slot string: `"layers/name"`, `"obs/col"`, `"var/col"`,
-    /// `"obsm/X_pca"`, or `"varm/PCs"`.
+    /// `"obsm/X_pca"`, `"varm/PCs"`, `"obsp/connectivities"`, or `"uns/key"`.
     pub fn parse(s: &str) -> Result<Self> {
         let (prefix, name) = s.split_once('/').ok_or_else(|| {
             ScxError::InvalidFormat(format!(
@@ -52,8 +54,17 @@ impl SlotSelector {
             "var" => Ok(Self::VarColumn(name.to_string())),
             "obsm" => Ok(Self::Obsm(name.to_string())),
             "varm" => Ok(Self::Varm(name.to_string())),
+            "obsp" => Ok(Self::Obsp(name.to_string())),
+            "uns" => Ok(Self::Uns(name.to_string())),
+            "varp" => Err(ScxError::InvalidFormat(
+                "varp slots are not supported by merge: varp is not carried by the \
+                 streaming reader/writer pipeline (it exists only in the npy snapshot \
+                 path). Supporting it requires extending DatasetReader across all \
+                 readers."
+                    .into(),
+            )),
             other => Err(ScxError::InvalidFormat(format!(
-                "unknown slot group '{other}'; expected layers, obs, var, obsm, or varm"
+                "unknown slot group '{other}'; expected layers, obs, var, obsm, varm, obsp, or uns"
             ))),
         }
     }
@@ -66,6 +77,8 @@ impl SlotSelector {
             Self::VarColumn(n) => format!("var/{n}"),
             Self::Obsm(n) => format!("obsm/{n}"),
             Self::Varm(n) => format!("varm/{n}"),
+            Self::Obsp(n) => format!("obsp/{n}"),
+            Self::Uns(n) => format!("uns/{n}"),
         }
     }
 }
@@ -347,6 +360,20 @@ async fn apply_patches(
                 SlotSelector::Varm(name) => {
                     apply_varm_patch(writer, name, reader.as_mut(), base_meta, conflict).await?
                 }
+                SlotSelector::Obsp(name) => {
+                    apply_obsp_patch(
+                        writer,
+                        name,
+                        reader.as_mut(),
+                        base_meta,
+                        conflict,
+                        chunk_size,
+                    )
+                    .await?
+                }
+                SlotSelector::Uns(name) => {
+                    apply_uns_patch(writer, name, reader.as_mut(), conflict).await?
+                }
             };
             if applied {
                 prov.add_slot(slot.hdf5_path(), source_str.clone(), sha256.clone());
@@ -509,6 +536,81 @@ async fn apply_varm_patch(
     })?;
     let reindex = align::build_var_reindex(&base_meta.var_index, &patch_var.index)?;
     writer.add_varm_entry(name, &reindex_dense_rows(mat, &reindex))?;
+    Ok(true)
+}
+
+/// Stream one named obsp (cell×cell) matrix from `reader` into `writer`.
+/// Mirrors the layer patch: requires the patch obsp to be `n_obs × n_obs` and
+/// streams it directly (no reindex — assumes matching obs order, as layers do).
+/// Returns `Ok(true)` if written, `Ok(false)` if skipped.
+async fn apply_obsp_patch(
+    writer: &mut H5AdWriter,
+    name: &str,
+    reader: &mut dyn DatasetReader,
+    base_meta: &BaseMeta,
+    conflict: ConflictPolicy,
+    chunk_size: usize,
+) -> Result<bool> {
+    let slot_path = format!("obsp/{name}");
+    if writer.group_exists(&slot_path) {
+        match conflict {
+            ConflictPolicy::Error => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "slot '{slot_path}' already exists (use --on-conflict skip|overwrite)"
+                )));
+            }
+            ConflictPolicy::Skip => {
+                tracing::info!(slot = slot_path, "skipping existing slot (conflict=skip)");
+                return Ok(false);
+            }
+            ConflictPolicy::Overwrite => {
+                writer.unlink_child("obsp", name)?;
+            }
+        }
+    }
+
+    let obsp_metas = reader.obsp_metas().await?;
+    let meta = obsp_metas
+        .iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| ScxError::InvalidFormat(format!("obsp '{name}' not found in patch source")))?
+        .clone();
+
+    if meta.shape.0 != base_meta.n_obs || meta.shape.1 != base_meta.n_obs {
+        return Err(ScxError::InvalidFormat(format!(
+            "shape mismatch for obsp '{name}': patch is {}×{}, base obsp must be {}×{}",
+            meta.shape.0, meta.shape.1, base_meta.n_obs, base_meta.n_obs
+        )));
+    }
+
+    writer.begin_sparse("obsp", name, &meta).await?;
+    let mut stream = Box::pin(reader.obsp_stream(&meta, chunk_size));
+    while let Some(chunk) = stream.next().await {
+        writer.write_sparse_chunk(&chunk?).await?;
+    }
+    writer.end_sparse().await?;
+
+    Ok(true)
+}
+
+/// Copy a single top-level `uns` entry from the patch into `writer`.
+/// uns is global metadata (no obs/var alignment). Scalar and nested-dict values
+/// are written natively; arrays/nulls are skipped (same as the conversion path's
+/// uns encoding). Returns `Ok(true)` if written, `Ok(false)` if skipped.
+async fn apply_uns_patch(
+    writer: &mut H5AdWriter,
+    name: &str,
+    reader: &mut dyn DatasetReader,
+    conflict: ConflictPolicy,
+) -> Result<bool> {
+    if !check_dict_conflict(writer, "uns", name, conflict)? {
+        return Ok(false);
+    }
+    let uns = reader.uns().await?;
+    let value = uns.raw.get(name).ok_or_else(|| {
+        ScxError::InvalidFormat(format!("uns entry '{name}' not found in patch source"))
+    })?;
+    writer.add_uns_entry(name, value)?;
     Ok(true)
 }
 
