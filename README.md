@@ -1,5 +1,7 @@
 # SCX — Single-Cell format conversion
 
+[![codecov](https://codecov.io/github/btraven00/scx/graph/badge.svg?token=NSMO60CRF5)](https://codecov.io/github/btraven00/scx)
+
 Swiss-army knife for single-cell format conversion, designed for reproducible benchmarks.
 
 ## Install
@@ -61,6 +63,12 @@ reproducibility is preserved.
 ## Docs
 
 Design notes, scope, formats, and developer workflows live in [`docs/`](docs/).
+
+## Coverage
+
+[![Coverage grid](https://codecov.io/github/btraven00/scx/graphs/tree.svg?token=NSMO60CRF5)](https://codecov.io/github/btraven00/scx)
+
+Each cell is a file; size = lines, color = coverage.
 
 ## License
 
