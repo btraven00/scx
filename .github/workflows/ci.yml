@@ -56,8 +56,9 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         run: cargo test --all ${{ matrix.cargo_flags }}
 
-  # Coverage gate. Runs against system HDF5 (fast: skips the from-source
-  # vendored build) and fails if line coverage regresses below the floor.
+  # Rust coverage → Codecov. Runs against system HDF5 (fast: skips the
+  # from-source vendored build). Gating is done by Codecov's project/patch
+  # status checks (see codecov.yml), not a static local floor.
   coverage:
     name: Coverage (system HDF5)
     runs-on: ubuntu-latest
@@ -69,12 +70,18 @@ jobs:
       - name: Install system HDF5
         run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Coverage gate
+      - name: Generate Rust coverage (lcov)
         env:
           HDF5_USE_FILE_LOCKING: "FALSE"
-        # Excludes the python pyo3 crate (exercised via Python, not Rust tests,
-        # so its lines don't belong in a Rust coverage gate). CI-measured
-        # baseline on main (2026-06-15, incl. the streaming BPCells writer):
-        # 74.29% lines. Floor set a couple points below to ratchet without
-        # flaking; raise as it improves.
-        run: cargo llvm-cov --all --no-default-features --summary-only --ignore-filename-regex 'python/' --fail-under-lines 72
+        # Strip the pyo3 bindings crate (exercised via Python, not the Rust
+        # suite) so the lcov is just crates/.
+        run: cargo llvm-cov --all --no-default-features --ignore-filename-regex 'python/' --lcov --output-path lcov.info
+      - name: Upload Rust coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./lcov.info
+          flags: rust
+          name: rust-coverage
+          fail_ci_if_error: false
+          verbose: true

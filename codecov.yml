@@ -1,0 +1,40 @@
+coverage:
+  precision: 2
+  round: down
+  range: "60...100"
+  status:
+    project:
+      default:
+        # Auto-ratchet: fail if project coverage drops more than the threshold
+        # below the PR base. Replaces the static --fail-under-lines floor.
+        target: auto
+        threshold: 1%
+      rust:
+        flags:
+          - rust
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        # New/changed lines in a PR must be covered (auto vs base).
+        target: auto
+        threshold: 1%
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+ignore:
+  - "tests/**/*"
+  - "docs/**/*"
+  - "crates/*/benches/**/*"
+  # The pyo3 bindings crate is exercised via Python, not the Rust suite; it is
+  # also stripped from the uploaded lcov (--ignore-filename-regex 'python/').
+  - "python/**/*"
+
+flags:
+  rust:
+    paths:
+      - crates/
+    carryforward: true
