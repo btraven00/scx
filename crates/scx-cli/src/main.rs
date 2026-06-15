@@ -229,7 +229,7 @@ enum Cli {
     ///   Append: --into merged.h5ad --patch ...
     ///
     /// Patch format: file.h5ad:slot/name[,slot/name...]
-    ///   Supported slot groups: layers, obs, var, obsm, varm
+    ///   Supported slot groups: layers, obs, var, obsm, varm, obsp, uns
     ///
     /// Examples:
     ///   scx merge --base raw.h5ad --patch norm.h5ad:layers/normalized --output merged.h5ad

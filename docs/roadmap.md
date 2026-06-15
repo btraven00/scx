@@ -985,7 +985,12 @@ Delivered:
 - `scx export` CSV / Parquet
 - Integration tests, HDF5 lock serialisation in test harness
 
-Deferred to 0.2.1: obsp / varp / uns slot support in merge.
+Slot follow-up (landed in the 0.3.0 cycle, 2026-06-15): `obsp` and `uns` slot
+patches added to `scx merge` (`obsp/<name>` streams like a layer; `uns/<key>`
+copies native scalar/dict entries). `varp` is **not** supported and is rejected
+at parse time — it is not carried by the streaming reader/writer pipeline (it
+exists only in the npy snapshot path), so supporting it would require extending
+`DatasetReader`/`DatasetWriter` and the convert driver across all readers.
 
 ---
 

@@ -193,6 +193,27 @@ impl H5AdWriter {
         add_dense_dict_entry(&self.file, "varm", name, mat)
     }
 
+    /// Add (or replace) a single top-level `/uns` entry from a JSON value.
+    ///
+    /// Mirrors the conversion path's uns encoding: scalars and nested dicts are
+    /// written as native AnnData entries; arrays and nulls are skipped (same
+    /// limitation as [`write_json_value`]). Creates `/uns` if absent and
+    /// replaces any existing entry of the same name.
+    pub fn add_uns_entry(&self, name: &str, value: &serde_json::Value) -> Result<()> {
+        let uns_grp = match self.file.group("uns") {
+            Ok(g) => g,
+            Err(_) => {
+                let g = self.file.create_group("uns")?;
+                write_encoding_on_group(&g, "dict", "0.1.0")?;
+                g
+            }
+        };
+        if uns_grp.group(name).is_ok() || uns_grp.dataset(name).is_ok() {
+            uns_grp.unlink(name)?;
+        }
+        write_json_value(&uns_grp, name, value)
+    }
+
     /// Write or replace `uns["scx_provenance"]` with `prov`.
     ///
     /// The value is serialised as a single JSON string scalar rather than a
