@@ -754,7 +754,24 @@ mod tests {
 
     #[test]
     fn error_unknown_group() {
-        assert!(parse_patch_spec("f.h5ad:obsp/nn").is_err());
+        assert!(parse_patch_spec("f.h5ad:bogus/nn").is_err());
+    }
+
+    #[test]
+    fn accepts_obsp_and_uns_groups() {
+        assert!(matches!(
+            SlotSelector::parse("obsp/connectivities"),
+            Ok(SlotSelector::Obsp(n)) if n == "connectivities"
+        ));
+        assert!(matches!(
+            SlotSelector::parse("uns/neighbors"),
+            Ok(SlotSelector::Uns(n)) if n == "neighbors"
+        ));
+    }
+
+    #[test]
+    fn rejects_varp_group() {
+        assert!(SlotSelector::parse("varp/distances").is_err());
     }
 
     #[test]
