@@ -721,17 +721,20 @@ async fn synthetic_roundtrip_all_slots() {
 
     let robs = r.obs().await.unwrap();
     assert_eq!(robs.index.len(), n_obs);
-    // Int/Float/String/Categorical round-trip. The Bool column ("passed") does
-    // NOT yet: the writer stores bool as unsigned u8 but ad_read_column has no
-    // Unsigned arm, so it's dropped on read. (Known reader gap — follow-up fix.)
+    // All five column types round-trip (Int/Float/String/Bool/Categorical).
+    assert_eq!(robs.columns.len(), 5, "all obs column types preserved");
     let names: Vec<&str> = robs.columns.iter().map(|c| c.name.as_str()).collect();
-    for n in ["n_counts", "score", "sample", "leiden"] {
+    for n in ["n_counts", "score", "sample", "passed", "leiden"] {
         assert!(names.contains(&n), "obs column '{n}' missing: {names:?}");
     }
     assert!(robs
         .columns
         .iter()
         .any(|c| c.name == "leiden" && matches!(c.data, ColumnData::Categorical { .. })));
+    assert!(robs
+        .columns
+        .iter()
+        .any(|c| c.name == "passed" && matches!(c.data, ColumnData::Bool(_))));
 
     assert_eq!(r.var().await.unwrap().index.len(), n_vars);
     assert_eq!(r.obsm().await.unwrap().map["X_pca"].shape, (n_obs, 2));
@@ -755,9 +758,7 @@ async fn synthetic_roundtrip_all_slots() {
 /// branches (write_x_chunk + read_x_data/bytes_to_typed) agree.
 #[tokio::test]
 async fn synthetic_roundtrip_dtypes() {
-    // U32 X is intentionally omitted: ad_detect_dtype has no Unsigned arm, so a
-    // u32-stored X reads back as F32 (known reader gap, follow-up fix).
-    for dt in [DataType::F32, DataType::F64, DataType::I32] {
+    for dt in [DataType::F32, DataType::F64, DataType::I32, DataType::U32] {
         let (n_obs, n_vars) = (4usize, 3usize);
         let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
         let path = tmp.path().to_path_buf();

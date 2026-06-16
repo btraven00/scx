@@ -158,6 +158,7 @@ pub(super) fn ad_detect_dtype(file: &File, path: &str) -> Result<DataType> {
         TypeDescriptor::Float(_) => DataType::F64,
         TypeDescriptor::Integer(IntSize::U4) => DataType::I32,
         TypeDescriptor::Integer(IntSize::U8) => DataType::I32, // i64 → i32 (counts fit)
+        TypeDescriptor::Unsigned(IntSize::U4) => DataType::U32,
         _ => DataType::F32,
     })
 }
@@ -470,9 +471,14 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
         TypeDescriptor::Float(_) => Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec())),
         // Native HDF5 boolean type (anndata >= 0.10 uses this for bool columns)
         TypeDescriptor::Boolean => Ok(ColumnData::Bool(ds.read_1d::<bool>()?.to_vec())),
-        // uint8 is used for bool columns (AnnData encodes bool as u8 0/1)
-        TypeDescriptor::Integer(IntSize::U1) => {
+        // 1-byte ints encode bool columns: our writer emits unsigned u8 0/1;
+        // some sources use signed i8. (AnnData >= 0.10 uses native Boolean above.)
+        TypeDescriptor::Unsigned(IntSize::U1) => {
             let v: Vec<u8> = ds.read_1d::<u8>()?.to_vec();
+            Ok(ColumnData::Bool(v.into_iter().map(|x| x != 0).collect()))
+        }
+        TypeDescriptor::Integer(IntSize::U1) => {
+            let v: Vec<i8> = ds.read_1d::<i8>()?.to_vec();
             Ok(ColumnData::Bool(v.into_iter().map(|x| x != 0).collect()))
         }
         TypeDescriptor::Integer(_) => Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec())),
