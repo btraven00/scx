@@ -808,3 +808,202 @@ async fn synthetic_roundtrip_dtypes() {
         assert_eq!(nnz, n_obs, "nnz for dtype {dt:?}");
     }
 }
+
+// --- gzip (deflate) compression ---
+
+/// Write a small all-slots synthetic dataset at the given compression level and
+/// return the temp file (kept alive so the caller can read/inspect it).
+async fn write_synthetic_compressed(compression: Option<u8>) -> NamedTempFile {
+    let (n_obs, n_vars) = (6usize, 4usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let obs = ObsTable {
+        index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
+        columns: vec![
+            Column {
+                name: "n_counts".into(),
+                data: ColumnData::Int((0..n_obs as i32).collect()),
+            },
+            Column {
+                name: "passed".into(),
+                data: ColumnData::Bool((0..n_obs).map(|i| i % 2 == 0).collect()),
+            },
+            Column {
+                name: "leiden".into(),
+                data: ColumnData::Categorical {
+                    codes: (0..n_obs as u32).map(|i| i % 3).collect(),
+                    levels: vec!["A".into(), "B".into(), "C".into()],
+                },
+            },
+        ],
+    };
+    let var = VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    };
+    let mut obsm = Embeddings::default();
+    obsm.map.insert(
+        "X_pca".into(),
+        DenseMatrix {
+            shape: (n_obs, 2),
+            data: (0..n_obs * 2).map(|i| i as f64).collect(),
+        },
+    );
+    let (indptr, indices, data) = diag_csr(n_obs, n_vars);
+    let mut w =
+        H5AdWriter::create_compressed(tmp.path(), n_obs, n_vars, DataType::F32, compression)
+            .unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_var(&var).await.unwrap();
+    w.write_obsm(&obsm).await.unwrap();
+    w.write_x_chunk(&MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
+    })
+    .await
+    .unwrap();
+    w.finalize().await.unwrap();
+    tmp
+}
+
+async fn count_nnz(path: &std::path::Path) -> usize {
+    let mut r = H5AdReader::open(path, 3).unwrap();
+    let mut nnz = 0usize;
+    let mut s = r.x_stream();
+    while let Some(c) = s.next().await {
+        nnz += c.unwrap().data.indices.len();
+    }
+    nnz
+}
+
+/// A gzip-compressed file round-trips to the same structure as an uncompressed
+/// one (compression is transparent to the reader via libhdf5's filter pipeline).
+#[tokio::test]
+async fn compressed_roundtrip_equals_uncompressed() {
+    let comp = write_synthetic_compressed(Some(6)).await;
+    let plain = write_synthetic_compressed(None).await;
+
+    let mut rc = H5AdReader::open(comp.path(), 3).unwrap();
+    let mut rp = H5AdReader::open(plain.path(), 3).unwrap();
+    assert_eq!(rc.shape(), rp.shape());
+
+    let oc = rc.obs().await.unwrap();
+    let op = rp.obs().await.unwrap();
+    assert_eq!(oc.index, op.index);
+    assert_eq!(oc.columns.len(), op.columns.len());
+    assert!(oc
+        .columns
+        .iter()
+        .any(|c| c.name == "leiden" && matches!(c.data, ColumnData::Categorical { .. })));
+    assert!(oc
+        .columns
+        .iter()
+        .any(|c| c.name == "passed" && matches!(c.data, ColumnData::Bool(_))));
+
+    assert_eq!(
+        rc.obsm().await.unwrap().map["X_pca"].shape,
+        rp.obsm().await.unwrap().map["X_pca"].shape
+    );
+
+    let nnz_c = count_nnz(comp.path()).await;
+    let nnz_p = count_nnz(plain.path()).await;
+    assert_eq!(nnz_c, nnz_p, "nnz differs between compressed and plain");
+    // diag_csr(6, 4) fills min(n_obs, n_vars) = 4 diagonal entries.
+    assert_eq!(nnz_c, 4, "diagonal nnz preserved under compression");
+}
+
+/// Write a large, highly compressible payload uncompressed vs gzip and assert
+/// the compressed file is smaller.
+async fn write_big_compressible(path: &std::path::Path, compression: Option<u8>) {
+    let (n_obs, n_vars) = (20_000usize, 50usize);
+    let obs = ObsTable {
+        index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+        // Constant column compresses to almost nothing.
+        columns: vec![Column {
+            name: "const".into(),
+            data: ColumnData::Float(vec![1.0; n_obs]),
+        }],
+    };
+    let var = VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    };
+    // One nnz per row, all value 1.0 at column 0 → extremely compressible.
+    let indptr: Vec<u64> = (0..=n_obs as u64).collect();
+    let indices = vec![0u32; n_obs];
+    let data = vec![1.0f32; n_obs];
+    let mut w =
+        H5AdWriter::create_compressed(path, n_obs, n_vars, DataType::F32, compression).unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_var(&var).await.unwrap();
+    w.write_x_chunk(&MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
+    })
+    .await
+    .unwrap();
+    w.finalize().await.unwrap();
+}
+
+#[tokio::test]
+async fn compressed_file_is_smaller() {
+    let plain = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let comp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    write_big_compressible(plain.path(), None).await;
+    write_big_compressible(comp.path(), Some(6)).await;
+
+    let ps = std::fs::metadata(plain.path()).unwrap().len();
+    let cs = std::fs::metadata(comp.path()).unwrap().len();
+    assert!(
+        cs < ps,
+        "compressed file ({cs} bytes) should be smaller than plain ({ps} bytes)"
+    );
+}
+
+/// The deflate filter lands on numeric datasets but not on vlen string datasets.
+#[tokio::test]
+async fn deflate_filter_applied_to_x_not_vlen() {
+    use hdf5::filters::Filter;
+    let comp = write_synthetic_compressed(Some(6)).await;
+    let f = File::open(comp.path()).unwrap();
+
+    let xdata = f.dataset("X/data").unwrap();
+    assert!(
+        xdata.is_chunked(),
+        "X/data should be chunked when compressed"
+    );
+    assert!(
+        xdata
+            .filters()
+            .iter()
+            .any(|fl| matches!(fl, Filter::Deflate(_))),
+        "X/data should carry a deflate filter"
+    );
+
+    // The obs index is a variable-length string dataset — left uncompressed.
+    let idx = f.dataset("obs/index").unwrap();
+    assert!(
+        !idx.filters()
+            .iter()
+            .any(|fl| matches!(fl, Filter::Deflate(_))),
+        "vlen string index must stay uncompressed"
+    );
+}
+
+#[tokio::test]
+async fn compression_level_out_of_range_errors() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let r = H5AdWriter::create_compressed(tmp.path(), 2, 2, DataType::F32, Some(10));
+    assert!(r.is_err(), "gzip level 10 must be rejected");
+}

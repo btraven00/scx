@@ -53,6 +53,8 @@ pub struct H5AdWriter {
     n_obs: usize,
     n_vars: usize,
     dtype: DataType,
+    /// gzip (deflate) level applied to numeric datasets. `None` = uncompressed.
+    compression: Option<u8>,
     /// Accumulated CSR indptr across all written chunks (n_obs + 1 entries when done).
     x_indptr: Vec<u64>,
     /// State for the currently open streaming sparse matrix, if any.
@@ -61,12 +63,37 @@ pub struct H5AdWriter {
 }
 
 impl H5AdWriter {
+    /// Create an uncompressed writer (gzip off).
     pub fn create<P: AsRef<Path>>(
         path: P,
         n_obs: usize,
         n_vars: usize,
         dtype: DataType,
     ) -> Result<Self> {
+        Self::create_compressed(path, n_obs, n_vars, dtype, None)
+    }
+
+    /// Create a writer, optionally gzip-compressing numeric datasets.
+    ///
+    /// `compression` is a deflate level in `0..=9`; `None` writes uncompressed.
+    /// Variable-length string datasets (index, string columns, categories) are
+    /// always written uncompressed — HDF5 filters don't apply to the global heap
+    /// where vlen data lives.
+    pub fn create_compressed<P: AsRef<Path>>(
+        path: P,
+        n_obs: usize,
+        n_vars: usize,
+        dtype: DataType,
+        compression: Option<u8>,
+    ) -> Result<Self> {
+        if let Some(level) = compression {
+            if level > 9 {
+                return Err(ScxError::InvalidFormat(format!(
+                    "gzip compression level must be 0..=9, got {level}"
+                )));
+            }
+        }
+
         let file = File::create(path.as_ref())?;
 
         // Root attrs
@@ -81,19 +108,20 @@ impl H5AdWriter {
         // shape attr written in finalize() once we know n_obs
 
         match dtype {
-            DataType::F32 => init_resizable_1d::<f32>(&file, "X/data")?,
-            DataType::F64 => init_resizable_1d::<f64>(&file, "X/data")?,
-            DataType::I32 => init_resizable_1d::<i32>(&file, "X/data")?,
-            DataType::U32 => init_resizable_1d::<u32>(&file, "X/data")?,
+            DataType::F32 => init_resizable_1d::<f32>(&file, "X/data", compression)?,
+            DataType::F64 => init_resizable_1d::<f64>(&file, "X/data", compression)?,
+            DataType::I32 => init_resizable_1d::<i32>(&file, "X/data", compression)?,
+            DataType::U32 => init_resizable_1d::<u32>(&file, "X/data", compression)?,
         }
         // AnnData spec requires indices as i32
-        init_resizable_1d::<i32>(&file, "X/indices")?;
+        init_resizable_1d::<i32>(&file, "X/indices", compression)?;
 
         Ok(Self {
             file,
             n_obs,
             n_vars,
             dtype,
+            compression,
             x_indptr: vec![0u64],
             sparse_state: None,
             mode: WriterMode::Create,
@@ -131,6 +159,9 @@ impl H5AdWriter {
             n_obs,
             n_vars,
             dtype,
+            // Append-mode never creates the X arrays and we don't compress
+            // merge-appended slots; keep their layout matching the base file.
+            compression: None,
             x_indptr: Vec::new(),
             sparse_state: None,
             mode: WriterMode::Append,
@@ -172,22 +203,22 @@ impl H5AdWriter {
     ///
     /// Safe to call on both Create and Append mode writers.
     pub fn add_obs_column(&self, name: &str, data: &ColumnData) -> Result<()> {
-        add_dataframe_column(&self.file, "obs", name, data)
+        add_dataframe_column(&self.file, "obs", name, data, self.compression)
     }
 
     /// Add a single column to `/var`, updating the `column-order` attribute.
     pub fn add_var_column(&self, name: &str, data: &ColumnData) -> Result<()> {
-        add_dataframe_column(&self.file, "var", name, data)
+        add_dataframe_column(&self.file, "var", name, data, self.compression)
     }
 
     /// Add a single entry to `/obsm` (creates the group if absent).
     pub fn add_obsm_entry(&self, name: &str, mat: &DenseMatrix) -> Result<()> {
-        add_dense_dict_entry(&self.file, "obsm", name, mat)
+        add_dense_dict_entry(&self.file, "obsm", name, mat, self.compression)
     }
 
     /// Add a single entry to `/varm` (creates the group if absent).
     pub fn add_varm_entry(&self, name: &str, mat: &DenseMatrix) -> Result<()> {
-        add_dense_dict_entry(&self.file, "varm", name, mat)
+        add_dense_dict_entry(&self.file, "varm", name, mat, self.compression)
     }
 
     /// Add (or replace) a single top-level `/uns` entry from a JSON value.
@@ -316,17 +347,59 @@ fn write_encoding_on_ds(ds: &Dataset, enc_type: &str, enc_version: &str) -> Resu
 // Dataset creation helpers
 // ---------------------------------------------------------------------------
 
-fn init_resizable_1d<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()> {
-    file.new_dataset::<T>()
-        .chunk(CHUNK_ELEMS)
+fn init_resizable_1d<T: hdf5::H5Type>(
+    file: &File,
+    path: &str,
+    compression: Option<u8>,
+) -> Result<()> {
+    // Resizable datasets are always chunked, so deflate applies directly.
+    let mut builder = file.new_dataset::<T>().chunk(CHUNK_ELEMS);
+    if let Some(level) = compression {
+        builder = builder.deflate(level);
+    }
+    builder
         .shape(SimpleExtents::resizable([0usize]))
         .create(path)?;
     Ok(())
 }
 
-fn write_1d<T: hdf5::H5Type>(grp: &Group, name: &str, data: Array1<T>) -> Result<Dataset> {
-    let ds = grp.new_dataset::<T>().shape(data.len()).create(name)?;
+fn write_1d<T: hdf5::H5Type>(
+    grp: &Group,
+    name: &str,
+    data: Array1<T>,
+    compression: Option<u8>,
+) -> Result<Dataset> {
+    let len = data.len();
+    let mut builder = grp.new_dataset::<T>();
+    // Compression requires chunked storage; an empty dataset can't be chunked
+    // and wouldn't benefit anyway.
+    if let Some(level) = compression {
+        if len > 0 {
+            builder = builder.chunk(len.min(CHUNK_ELEMS)).deflate(level);
+        }
+    }
+    let ds = builder.shape(len).create(name)?;
     ds.write(&data)?;
+    Ok(ds)
+}
+
+/// Write a dense 2-D `f64` matrix, optionally gzip-compressed (chunked by rows).
+fn write_2d_f64(
+    grp: &Group,
+    name: &str,
+    arr: &Array2<f64>,
+    compression: Option<u8>,
+) -> Result<Dataset> {
+    let (nrows, ncols) = arr.dim();
+    let mut builder = grp.new_dataset::<f64>();
+    if let Some(level) = compression {
+        if nrows > 0 && ncols > 0 {
+            let rows_per_chunk = (CHUNK_ELEMS / ncols.max(1)).clamp(1, nrows);
+            builder = builder.chunk((rows_per_chunk, ncols)).deflate(level);
+        }
+    }
+    let ds = builder.shape((nrows, ncols)).create(name)?;
+    ds.write(arr)?;
     Ok(ds)
 }
 
@@ -356,6 +429,7 @@ fn write_dataframe(
     group_name: &str,
     index: &[String],
     columns: &[Column],
+    compression: Option<u8>,
 ) -> Result<()> {
     let grp = file.create_group(group_name)?;
     write_encoding_on_group(&grp, "dataframe", "0.2.0")?;
@@ -378,25 +452,25 @@ fn write_dataframe(
 
     // columns
     for col in columns {
-        write_column(&grp, &col.name, &col.data)?;
+        write_column(&grp, &col.name, &col.data, compression)?;
     }
 
     Ok(())
 }
 
-fn write_column(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
+fn write_column(grp: &Group, name: &str, data: &ColumnData, compression: Option<u8>) -> Result<()> {
     match data {
         ColumnData::Float(v) => {
-            let ds = write_1d(grp, name, Array1::from_vec(v.clone()))?;
+            let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::Int(v) => {
-            let ds = write_1d(grp, name, Array1::from_vec(v.clone()))?;
+            let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::Bool(v) => {
             let vi: Vec<u8> = v.iter().map(|&b| b as u8).collect();
-            let ds = write_1d(grp, name, Array1::from_vec(vi))?;
+            let ds = write_1d(grp, name, Array1::from_vec(vi), compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::String(v) => {
@@ -414,11 +488,11 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
             // codes (i8 for ≤127 categories, i16 otherwise)
             if levels.len() <= 127 {
                 let c: Vec<i8> = codes.iter().map(|&x| x as i8).collect();
-                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c))?;
+                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?;
                 write_encoding_on_ds(&ds, "array", "0.2.0")?;
             } else {
                 let c: Vec<i16> = codes.iter().map(|&x| x as i16).collect();
-                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c))?;
+                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?;
                 write_encoding_on_ds(&ds, "array", "0.2.0")?;
             }
 
@@ -436,11 +510,23 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
 #[async_trait]
 impl DatasetWriter for H5AdWriter {
     async fn write_obs(&mut self, obs: &ObsTable) -> Result<()> {
-        write_dataframe(&self.file, "obs", &obs.index, &obs.columns)
+        write_dataframe(
+            &self.file,
+            "obs",
+            &obs.index,
+            &obs.columns,
+            self.compression,
+        )
     }
 
     async fn write_var(&mut self, var: &VarTable) -> Result<()> {
-        write_dataframe(&self.file, "var", &var.index, &var.columns)
+        write_dataframe(
+            &self.file,
+            "var",
+            &var.index,
+            &var.columns,
+            self.compression,
+        )
     }
 
     async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
@@ -454,11 +540,7 @@ impl DatasetWriter for H5AdWriter {
             let (nrows, ncols) = mat.shape;
             let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
                 .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-            let ds = grp
-                .new_dataset::<f64>()
-                .shape((nrows, ncols))
-                .create(name.as_str())?;
-            ds.write(&arr)?;
+            let ds = write_2d_f64(&grp, name.as_str(), &arr, self.compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
 
@@ -497,11 +579,15 @@ impl DatasetWriter for H5AdWriter {
         write_encoding_on_group(&mat_grp, "csr_matrix", "0.1.0")?;
 
         // Pre-create resizable data/indices datasets.
-        init_resizable_1d::<f32>(&self.file, &format!("{group_path}/data"))?;
+        init_resizable_1d::<f32>(&self.file, &format!("{group_path}/data"), self.compression)?;
         let ds = self.file.dataset(&format!("{group_path}/data"))?;
         write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
-        init_resizable_1d::<i32>(&self.file, &format!("{group_path}/indices"))?;
+        init_resizable_1d::<i32>(
+            &self.file,
+            &format!("{group_path}/indices"),
+            self.compression,
+        )?;
         let ds = self.file.dataset(&format!("{group_path}/indices"))?;
         write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
@@ -560,11 +646,11 @@ impl DatasetWriter for H5AdWriter {
         let max_val = state.indptr.iter().copied().max().unwrap_or(0);
         if max_val > i32::MAX as u64 {
             let v: Vec<i64> = state.indptr.iter().map(|&x| x as i64).collect();
-            let ds = write_1d(&grp, "indptr", Array1::from_vec(v))?;
+            let ds = write_1d(&grp, "indptr", Array1::from_vec(v), self.compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         } else {
             let v: Vec<i32> = state.indptr.iter().map(|&x| x as i32).collect();
-            let ds = write_1d(&grp, "indptr", Array1::from_vec(v))?;
+            let ds = write_1d(&grp, "indptr", Array1::from_vec(v), self.compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         Ok(())
@@ -580,11 +666,7 @@ impl DatasetWriter for H5AdWriter {
             let (nrows, ncols) = mat.shape;
             let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
                 .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-            let ds = grp
-                .new_dataset::<f64>()
-                .shape((nrows, ncols))
-                .create(name.as_str())?;
-            ds.write(&arr)?;
+            let ds = write_2d_f64(&grp, name.as_str(), &arr, self.compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         Ok(())
@@ -721,10 +803,10 @@ impl DatasetWriter for H5AdWriter {
         let max_val = self.x_indptr.iter().copied().max().unwrap_or(0);
         if max_val > i32::MAX as u64 {
             let v: Vec<i64> = self.x_indptr.iter().map(|&x| x as i64).collect();
-            write_1d(&x_grp, "indptr", Array1::from_vec(v))?;
+            write_1d(&x_grp, "indptr", Array1::from_vec(v), self.compression)?;
         } else {
             let v: Vec<i32> = self.x_indptr.iter().map(|&x| x as i32).collect();
-            write_1d(&x_grp, "indptr", Array1::from_vec(v))?;
+            write_1d(&x_grp, "indptr", Array1::from_vec(v), self.compression)?;
         }
 
         // Write X/shape attribute: [n_obs, n_vars] (required by AnnData spec)
@@ -754,6 +836,7 @@ fn add_dataframe_column(
     group_name: &str,
     col_name: &str,
     data: &ColumnData,
+    compression: Option<u8>,
 ) -> Result<()> {
     let grp = file.group(group_name)?;
 
@@ -785,7 +868,7 @@ fn add_dataframe_column(
         attr.write(&ndarray::Array1::from_vec(vals))?;
     }
 
-    write_column(&grp, col_name, data)
+    write_column(&grp, col_name, data, compression)
 }
 
 /// Add a dense 2-D matrix as a named entry inside `/obsm` or `/varm`.
@@ -795,6 +878,7 @@ fn add_dense_dict_entry(
     group_name: &str,
     entry_name: &str,
     mat: &DenseMatrix,
+    compression: Option<u8>,
 ) -> Result<()> {
     let grp = match file.group(group_name) {
         Ok(g) => g,
@@ -807,11 +891,7 @@ fn add_dense_dict_entry(
     let (nrows, ncols) = mat.shape;
     let arr = ndarray::Array2::from_shape_vec((nrows, ncols), mat.data.clone())
         .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-    let ds = grp
-        .new_dataset::<f64>()
-        .shape((nrows, ncols))
-        .create(entry_name)?;
-    ds.write(&arr)?;
+    let ds = write_2d_f64(&grp, entry_name, &arr, compression)?;
     write_encoding_on_ds(&ds, "array", "0.2.0")?;
     Ok(())
 }
