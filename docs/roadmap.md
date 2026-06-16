@@ -30,7 +30,9 @@ the following are merged:
 - **0.3.0 engine work (DONE, unreleased).** Streaming BPCells writer (peak
   O(nnz)→O(n_obs+chunk)); `scx merge` gained `obsp` + `uns` slot patches (`varp`
   rejected — not carried by the streaming pipeline); h5ad reader fixed to
-  round-trip bool (unsigned u8) and u32 X (#19).
+  round-trip bool (unsigned u8) and u32 X (#19); opt-in h5ad gzip (deflate)
+  compression on write — `H5AdOptions::compression` + `scx convert --compress`,
+  off by default, vlen strings left uncompressed (scanpy file-size parity).
 
 ## Next up — pick one
 

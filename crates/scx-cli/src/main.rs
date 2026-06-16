@@ -89,6 +89,12 @@ enum Cli {
         /// compute the hash on download.
         #[arg(long)]
         source_sha256: Option<String>,
+
+        /// gzip-compress `.h5ad` output. Pass `--compress` for the default
+        /// level 6, or `--compress N` for level N (0..=9). Off by default.
+        /// Ignored for `.h5seurat` output.
+        #[arg(long, num_args = 0..=1, default_missing_value = "6")]
+        compress: Option<u8>,
     },
 
     /// Inspect a single-cell file
@@ -420,6 +426,7 @@ async fn run() -> anyhow::Result<()> {
             seuratdisk_compat,
             source_url,
             source_sha256: source_sha256_arg,
+            compress,
         } => {
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
@@ -477,6 +484,7 @@ async fn run() -> anyhow::Result<()> {
                         &input,
                         source_url.as_deref(),
                         source_sha256.clone(),
+                        compress,
                     )
                     .await?
                 }
@@ -500,6 +508,7 @@ async fn run() -> anyhow::Result<()> {
                         &input,
                         source_url.as_deref(),
                         source_sha256.clone(),
+                        compress,
                     )
                     .await?
                 }
@@ -520,6 +529,7 @@ async fn run() -> anyhow::Result<()> {
                         &input,
                         source_url.as_deref(),
                         source_sha256.clone(),
+                        compress,
                     )
                     .await?
                 }
@@ -541,6 +551,7 @@ async fn run() -> anyhow::Result<()> {
                         &input,
                         source_url.as_deref(),
                         source_sha256.clone(),
+                        compress,
                     )
                     .await?
                 }
@@ -561,6 +572,7 @@ async fn run() -> anyhow::Result<()> {
                         &input,
                         source_url.as_deref(),
                         source_sha256.clone(),
+                        compress,
                     )
                     .await?
                 }
@@ -581,6 +593,7 @@ async fn run() -> anyhow::Result<()> {
                         &input,
                         source_url.as_deref(),
                         source_sha256.clone(),
+                        compress,
                     )
                     .await?
                 }
@@ -749,11 +762,16 @@ async fn convert_with_reader(
     source_path: &str,
     source_url: Option<&str>,
     source_sha256: Option<String>,
+    compress: Option<u8>,
 ) -> anyhow::Result<(usize, usize)> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
 
     let is_h5seurat = output.extension().and_then(|e| e.to_str()) == Some("h5seurat");
+
+    if compress.is_some() && is_h5seurat {
+        tracing::warn!("--compress only applies to .h5ad output; ignored for .h5seurat");
+    }
 
     let obs = reader.obs().await?;
     let var = reader.var().await?;
@@ -848,7 +866,9 @@ async fn convert_with_reader(
             )?)
         }
     } else {
-        Box::new(H5AdWriter::create(output, n_obs, n_vars, out_dtype)?)
+        Box::new(H5AdWriter::create_compressed(
+            output, n_obs, n_vars, out_dtype, compress,
+        )?)
     };
 
     writer.write_obs(&obs).await?;

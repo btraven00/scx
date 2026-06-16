@@ -33,8 +33,8 @@ const DEFAULT_CHUNK_SIZE: usize = 5000;
 /// Options for writing `.h5ad`.
 #[derive(Default, Clone, Debug)]
 pub struct H5AdOptions {
-    /// gzip level (0..=9). `None` writes uncompressed. (Reserved for future use;
-    /// current `H5AdWriter` does not yet expose compression.)
+    /// gzip (deflate) level `0..=9` applied to numeric datasets; `None` writes
+    /// uncompressed. Variable-length string datasets are always uncompressed.
     pub compression: Option<u8>,
     /// Rows per streaming chunk. Defaults to 5000 when `None`.
     pub chunk_size: Option<usize>,
@@ -198,7 +198,9 @@ impl H5AdBuilder {
         n_vars: usize,
         opts: &H5AdOptions,
     ) -> Result<Self, ScxError> {
-        let inner = H5AdWriter::create(path, n_obs, n_vars, DataType::F32).map_err(map_err)?;
+        let inner =
+            H5AdWriter::create_compressed(path, n_obs, n_vars, DataType::F32, opts.compression)
+                .map_err(map_err)?;
         Ok(Self {
             inner,
             n_obs,
@@ -735,6 +737,34 @@ mod tests {
 
         let (nnz, _indptr, indices, data) = read_back_h5ad(&path);
         assert_eq!(nnz, expected_nnz, "nnz mismatch");
+        assert_eq!(indices, expected_indices);
+        assert_eq!(data, expected_data);
+    }
+
+    #[test]
+    fn h5ad_csr_round_trip_compressed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("h5ad");
+        let x = synthetic_csr(40, 25, 0.2);
+        let (obs, var) = obs_var(40, 25);
+        let expected_nnz = x.nnz();
+        let expected_data: Vec<f32> = x.data().to_vec();
+        let expected_indices: Vec<u32> = x.indices().to_vec();
+
+        write_h5ad_csr(
+            &path,
+            x.view(),
+            obs,
+            var,
+            &H5AdOptions {
+                compression: Some(6),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (nnz, _indptr, indices, data) = read_back_h5ad(&path);
+        assert_eq!(nnz, expected_nnz, "nnz mismatch under gzip");
         assert_eq!(indices, expected_indices);
         assert_eq!(data, expected_data);
     }
