@@ -4,48 +4,44 @@ SCX is a lean, format-to-format interoperability engine for single-cell data,
 optimized for reproducible benchmarking of conversion correctness, throughput,
 and memory use.
 
-## Next up — Robustness pass (error-path hardening + test discipline)
+## Status (2026-06-16) — robustness pass + 0.3.0 engine work shipped
 
-Before further distribution (0.1.6) or the format-bench research deliverable,
-make the existing engine *trustworthy*: a format converter must never panic on a
-malformed input file — it must return a clean `ScxError`. This thread is about
-quality and discipline, not new features.
+The "make it solid" robustness pass is **complete**, and the 0.3.0 cycle's
+engine work has landed on `main` (a 0.3.0 release tag is not yet cut). All of
+the following are merged:
 
-**Sequenced workstreams (cheapest/highest-leverage first):**
+- **Error-path hardening (DONE).** Audited unwrap/expect/panic across scx-core:
+  ~95% were idiomatic test-module unwraps; one real panic-on-malformed-input
+  (`H5SeuratReader::x_stream` BPCells arm) fixed, plus two tidies (`encode_d1z`
+  → `Result`; `merge::apply_patches` match-insert). The engine was already
+  disciplined — no broad sweep needed.
+- **Coverage + Codecov (DONE).** `cargo llvm-cov` runs in `ci.yml`; gating moved
+  off a static `--fail-under-lines` floor to **Codecov** `project`/`patch`
+  status checks (`codecov.yml`, `rust` flag, `CODECOV_TOKEN` repo secret + the
+  Codecov GitHub App). `tenx.rs` 0%→84% and self-contained h5ad round-trips
+  added so CI coverage no longer hinges on the gitignored golden fixtures.
+- **Cut tree slop (DONE).** `scratch/` purged from history + gitignored; the
+  vendored `scx-core` copy + `sync-scx-core.sh` removed in favour of a **pinned
+  git dependency** for the R package (see `docs/packaging.md`).
+- **Structural tidy (DONE).** The three 2k-line modules split along
+  reader/writer seams into `foo.rs` thin roots + `foo/{reader,writer,…}.rs`
+  submodules — h5ad (#16), h5seurat (#17), npy (#18, also `meta`/`format`). No
+  module over ~1100 lines; public paths unchanged.
+- **0.3.0 engine work (DONE, unreleased).** Streaming BPCells writer (peak
+  O(nnz)→O(n_obs+chunk)); `scx merge` gained `obsp` + `uns` slot patches (`varp`
+  rejected — not carried by the streaming pipeline); h5ad reader fixed to
+  round-trip bool (unsigned u8) and u32 X (#19).
 
-1. **Error-path hardening — DONE (audited 2026-06-14).** The headline recon
-   number was a measurement artifact: ~95% of the ~448 `unwrap()` in `crates/*/src`
-   live in `#[cfg(test)]` modules (idiomatic). Production code has only **16
-   panic-sites**, of which exactly **one** was a real panic-on-malformed-input
-   risk: `H5SeuratReader::x_stream`'s BPCells arm `.expect()`-ed on a missing
-   file / missing assay group / unreadable backend. Fixed to return a clean
-   `ScxError` through the stream — matching the single-error-stream idiom the same
-   file already used elsewhere (same bug class as `b54c0d2`). Two minor tidies
-   applied: `encode_d1z` now returns `Result` (corrupt/unsorted indices →
-   `ScxError` instead of `expect`), and `merge::apply_patches` uses match-insert
-   instead of `is_none()`+`unwrap()`. Everything else is infallible-by-construction
-   (`indptr.last()` seeded with `[0]`; `try_into()` on `chunks_exact(N)`) or a
-   correct `unreachable!()`. **Conclusion: the engine was already disciplined;
-   no broad unwrap sweep needed.** The leverage now is keeping it that way
-   (workstream 2) rather than more auditing.
-2. **Coverage ratchet — baseline DONE (2026-06-14).** `cargo llvm-cov` runs in
-   `ci.yml` (system-HDF5 path) as a report-only baseline (`continue-on-error`).
-   Remaining: flip it to a no-regression gate via `--fail-under-lines N` once
-   the baseline % is trusted.
-3. **Cut tree slop — DONE (2026-06-14).** `scratch/` (1.2 MB incl. a 610 KB
-   profvis HTML + vendored minified JS) was purged from history and gitignored.
-   The vendored `r/picklerick/src/rust/scx-core` copy + `sync-scx-core.sh` were
-   removed entirely: the R package now depends on `scx-core` as a **pinned git
-   dependency** (see `docs/packaging.md`), so there is no copy to drift and no
-   sync guard needed.
-4. **Structural tidy (optional, later).** Split the 2k-line files
-   (`h5ad.rs` 2444, `h5seurat.rs` 2085, `npy.rs` 1822) along reader/writer/
-   encoding seams — only if it pays for itself in readability.
+## Next up — pick one
 
-**Sequencing for the overall "make it solid" goal:** this hardening pass →
-distribution (0.1.6) → format-bench research deliverable. You don't ship a
-panic-prone library to PyPI/R-universe, and the benchmark contribution is only
-credible on a tool that's reproducibly installable and doesn't fall over.
+Distribution and broader format support are the open strategic threads:
+
+1. **0.4.0 — Network-backed readers** (Zarr/Parquet over `object_store`); lands
+   the `net` feature + tokio runtime gating (`docs/tech-debt-async.md`).
+2. **R-universe distribution** — now unblocked by vendored-static HDF5; PyPI is
+   the sibling (both deferred per maintainer steer, but R-universe is close).
+3. **Format benchmarking** — characterize zero-copy vs decode trade-offs across
+   access patterns and dataset scales; tooling (`open_stream`, `.scxd`) is ready.
 
 ## 0.0.1 (done)
 
@@ -944,7 +940,7 @@ peak above the single-chunk backed reader (hlca: 3.6 GB vs 2.3 GB), so keep
 
 ---
 
-## 0.3.0 (next) — Truly streaming BPCells write
+## 0.3.0 (done, unreleased) — Truly streaming BPCells write
 
 **Corrected premise (2026-06-14):** the dgCMatrix writer *already streams* —
 `H5SeuratWriter::write_x_chunk` appends `data`/`indices` to resizable HDF5
@@ -1031,8 +1027,7 @@ What we learned (the negative result that shapes the next step):
   compressed storage rules it out — you can't mmap `/X/data` and treat
   the bytes as `double*`. The h5ad equivalent of "lazy zero-copy" is
   `HDF5Array::H5SparseMatrix` + DelayedArray, which picklerick's
-  `lazy = TRUE` path already uses. See `scratch/r-altrep.md` for full
-  reasoning.
+  `lazy = TRUE` path already uses.
 
 Candidate next steps (none committed; pick one when picking this back up):
 
@@ -1048,11 +1043,9 @@ Candidate next steps (none committed; pick one when picking this back up):
   dgCMatrix to be allocated R-side (knowing nnz from a metadata pass)
   and its slot pointers handed to Rust. Bigger surgery.
 - **(c) Build real ALTREP+mmap for `.npy` (or the `.scxd` probe).** The
-  pattern in `scratch/r-altrep.md` works for native-layout payloads.
-  Doesn't optimise h5ad at all but builds the zero-copy primitive on
-  formats where it's structurally valid. This is also the PhD-benchmark
-  contribution thread (see `scratch/format-bench.md`,
-  `scratch/format_comparison.md`).
+  ALTREP+mmap pattern works for native-layout payloads. Doesn't optimise
+  h5ad at all but builds the zero-copy primitive on formats where it's
+  structurally valid, and feeds the format-benchmarking thread above.
 
 Branch state: `feat/picklerick-zerocopy` ready to merge or iterate from.
 The Makevars fix and HDF5 vendoring should land regardless of which (if
