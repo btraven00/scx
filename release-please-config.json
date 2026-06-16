@@ -10,5 +10,12 @@
       "package-name": "scx-cli"
     }
   },
-  "linked-versions": true
+  "plugins": [
+    "cargo-workspace",
+    {
+      "type": "linked-versions",
+      "groupName": "scx",
+      "components": ["scx-core", "scx-cli"]
+    }
+  ]
 }
