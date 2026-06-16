@@ -187,3 +187,54 @@ pub(super) fn obsp_key_dir(root: &Path, k: &str) -> PathBuf {
 pub(super) fn varp_key_dir(root: &Path, k: &str) -> PathBuf {
     root.join("varp").join(k)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dtype_str_roundtrips_through_parse_dtype() {
+        for dt in [DataType::F32, DataType::F64, DataType::I32, DataType::U32] {
+            assert_eq!(parse_dtype(dtype_str(dt)).unwrap(), dt);
+        }
+        assert!(parse_dtype("nope").is_err());
+    }
+
+    #[test]
+    fn col_kind_all_variants() {
+        assert_eq!(col_kind(&ColumnData::Int(vec![1])), "int");
+        assert_eq!(col_kind(&ColumnData::Float(vec![1.0])), "float");
+        assert_eq!(col_kind(&ColumnData::Bool(vec![true])), "bool");
+        assert_eq!(col_kind(&ColumnData::String(vec!["a".into()])), "string");
+        assert_eq!(
+            col_kind(&ColumnData::Categorical {
+                codes: vec![0],
+                levels: vec!["a".into()],
+            }),
+            "categorical"
+        );
+    }
+
+    #[test]
+    fn slot_matches_exact_and_prefixed() {
+        assert!(slot_matches("obsm", "obsm"));
+        assert!(slot_matches("obsm", "obsm:X_pca"));
+        assert!(!slot_matches("obsm", "obsp"));
+        assert!(!slot_matches("obsm", "obsmx"));
+    }
+
+    #[test]
+    fn slot_filter_only_and_exclude() {
+        assert!(SlotFilter::all().includes("X"));
+
+        let only = SlotFilter::from_only("X, obs:cell_type");
+        assert!(only.includes("X"));
+        assert!(only.includes("obs:cell_type"));
+        assert!(!only.includes("var"));
+
+        let excl = SlotFilter::from_exclude("layers,obsp");
+        assert!(excl.includes("X"));
+        assert!(!excl.includes("layers:spliced"));
+        assert!(!excl.includes("obsp"));
+    }
+}

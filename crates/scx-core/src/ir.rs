@@ -159,3 +159,32 @@ pub struct SingleCellDataset {
     pub varp: Varp,
     pub varm: Varm,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn columndata_len_is_empty_dtype_str() {
+        let cols: [(ColumnData, usize, &str); 5] = [
+            (ColumnData::Int(vec![1, 2]), 2, "int32"),
+            (ColumnData::Float(vec![1.0]), 1, "float64"),
+            (ColumnData::Bool(vec![true, false, true]), 3, "bool"),
+            (ColumnData::String(vec!["a".into()]), 1, "string"),
+            (
+                ColumnData::Categorical {
+                    codes: vec![0, 1],
+                    levels: vec!["x".into(), "y".into()],
+                },
+                2,
+                "categorical",
+            ),
+        ];
+        for (col, len, dtype) in &cols {
+            assert_eq!(col.len(), *len);
+            assert_eq!(col.is_empty(), *len == 0);
+            assert_eq!(col.dtype_str(), *dtype);
+        }
+        assert!(ColumnData::Int(vec![]).is_empty());
+    }
+}

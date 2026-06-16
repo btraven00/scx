@@ -72,3 +72,45 @@ impl TypedVec {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn datatype_display_all_variants() {
+        assert_eq!(DataType::F32.to_string(), "float32");
+        assert_eq!(DataType::F64.to_string(), "float64");
+        assert_eq!(DataType::I32.to_string(), "int32");
+        assert_eq!(DataType::U32.to_string(), "uint32");
+    }
+
+    #[test]
+    fn typedvec_dtype_len_is_empty() {
+        assert_eq!(TypedVec::F32(vec![1.0, 2.0]).dtype(), DataType::F32);
+        assert_eq!(TypedVec::F64(vec![1.0]).dtype(), DataType::F64);
+        assert_eq!(TypedVec::I32(vec![1, 2, 3]).dtype(), DataType::I32);
+        assert_eq!(TypedVec::U32(vec![]).dtype(), DataType::U32);
+
+        assert_eq!(TypedVec::F32(vec![1.0, 2.0]).len(), 2);
+        assert_eq!(TypedVec::F64(vec![1.0]).len(), 1);
+        assert_eq!(TypedVec::I32(vec![1, 2, 3]).len(), 3);
+
+        assert!(!TypedVec::I32(vec![1]).is_empty());
+        assert!(TypedVec::U32(vec![]).is_empty());
+    }
+
+    #[test]
+    fn typedvec_to_f64_serial_and_parallel_agree() {
+        let expected = vec![1.0_f64, 2.0, 3.0];
+        for v in [
+            TypedVec::F32(vec![1.0, 2.0, 3.0]),
+            TypedVec::F64(vec![1.0, 2.0, 3.0]),
+            TypedVec::I32(vec![1, 2, 3]),
+            TypedVec::U32(vec![1, 2, 3]),
+        ] {
+            assert_eq!(v.to_f64(), expected);
+            assert_eq!(v.to_f64_par(), expected);
+        }
+    }
+}
