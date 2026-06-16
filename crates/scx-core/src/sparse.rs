@@ -128,6 +128,51 @@ mod tests {
     }
 
     #[test]
+    fn test_csc_to_csr_preserves_dtype() {
+        // [[1,0,2],[0,3,0]] in CSC — same layout, varying value dtype.
+        for data in [
+            TypedVec::F64(vec![1.0, 3.0, 2.0]),
+            TypedVec::I32(vec![1, 3, 2]),
+            TypedVec::U32(vec![1, 3, 2]),
+        ] {
+            let want = data.dtype();
+            let csc = SparseMatrixCSC {
+                shape: (2, 3),
+                indptr: vec![0, 1, 2, 3],
+                indices: vec![0, 1, 0],
+                data,
+            };
+            let csr = csc_to_csr(&csc);
+            assert_eq!(csr.data.dtype(), want, "dtype preserved through CSC->CSR");
+            assert_eq!(csr.indices, vec![0, 2, 1]);
+        }
+    }
+
+    #[test]
+    fn test_csr_slice_rows_preserves_dtype() {
+        for data in [
+            TypedVec::F64(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+            TypedVec::I32(vec![1, 2, 3, 4, 5]),
+            TypedVec::U32(vec![1, 2, 3, 4, 5]),
+        ] {
+            let want = data.dtype();
+            let csr = SparseMatrixCSR {
+                shape: (3, 3),
+                indptr: vec![0, 2, 3, 5],
+                indices: vec![0, 2, 1, 0, 2],
+                data,
+            };
+            let slice = csr_slice_rows(&csr, 1, 3);
+            assert_eq!(
+                slice.data.dtype(),
+                want,
+                "dtype preserved through row slice"
+            );
+            assert_eq!(slice.indices, vec![1, 0, 2]);
+        }
+    }
+
+    #[test]
     fn test_csr_slice_rows() {
         // 3x3 matrix: [[1,0,2],[0,3,0],[4,0,5]] in CSR
         let csr = SparseMatrixCSR {
