@@ -1078,6 +1078,11 @@ Land the `net` / `object-store` feature flag from `docs/tech-debt-async.md` firs
 so the tokio runtime is constructed only when a network reader is actually
 instantiated. Local HDF5 conversion stays runtime-free.
 
+**Status:** the `net` feature scaffold has landed in `scx-core` — it gates an
+optional tokio dependency and is off by default. `object_store` and the format
+crates (`zarrs`, `parquet`) join this feature when the first network reader is
+implemented.
+
 ### Merge implications
 
 `scx merge` becomes the obvious beneficiary: wrap the per-input pipeline in
