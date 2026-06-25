@@ -14,6 +14,12 @@ default = ["vendored-hdf5"]
 # Distro packagers (conda, debian) can opt out with --no-default-features to
 # link against the system HDF5 instead.
 vendored-hdf5 = ["hdf5/static", "hdf5/zlib"]
+# Network-backed readers (Zarr/Parquet over object_store, 0.4.0). Pulls in the
+# tokio runtime so the existing async trait surface gets a real reactor and can
+# pipeline cloud I/O (buffer_unordered / tokio::spawn). Off by default: local
+# HDF5 conversion stays runtime-free (see docs/tech-debt-async.md). object_store
+# and the format crates join this feature when the first network reader lands.
+net = ["dep:tokio"]
 
 [dependencies]
 async-trait = "0.1"
@@ -34,6 +40,8 @@ sprs = "0.11"
 chrono = "0.4"
 thiserror = "2"
 tracing = "0.1"
+# Async runtime for network-backed readers; enabled by the `net` feature.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
