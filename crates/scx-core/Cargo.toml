@@ -17,9 +17,9 @@ vendored-hdf5 = ["hdf5/static", "hdf5/zlib"]
 # Network-backed readers (Zarr/Parquet over object_store, 0.4.0). Pulls in the
 # tokio runtime so the existing async trait surface gets a real reactor and can
 # pipeline cloud I/O (buffer_unordered / tokio::spawn). Off by default: local
-# HDF5 conversion stays runtime-free (see docs/tech-debt-async.md). object_store
-# and the format crates join this feature when the first network reader lands.
-net = ["dep:tokio"]
+# HDF5 conversion stays runtime-free (see docs/tech-debt-async.md). The first
+# network reader (Parquet over object_store) lands the format crates here.
+net = ["dep:tokio", "dep:object_store", "dep:parquet", "dep:arrow", "dep:async-stream"]
 
 [dependencies]
 async-trait = "0.1"
@@ -42,6 +42,18 @@ thiserror = "2"
 tracing = "0.1"
 # Async runtime for network-backed readers; enabled by the `net` feature.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+# Network reader stack (net feature). object_store abstracts S3/GCS/Azure/local/
+# in-memory behind one trait; parquet's async reader streams RecordBatches off it;
+# arrow gives the columnar batch types we unpack into CSR chunks.
+# Pinned to the version parquet's `object_store` feature re-exports, so the
+# ObjectStore trait our InMemory/S3 handles satisfy is the same type the
+# parquet async reader consumes (a version split would break the trait object).
+object_store = { version = "0.13", optional = true }
+parquet = { version = "59", features = ["async", "object_store"], optional = true }
+arrow = { version = "59", optional = true }
+# Lets x_stream() defer the async footer read into the returned Stream (the
+# DatasetReader::x_stream signature is sync-returns-stream).
+async-stream = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -11,6 +11,8 @@ pub mod h5seurat;
 pub mod ir;
 pub mod merge;
 pub mod npy;
+#[cfg(feature = "net")]
+pub mod parquet;
 pub mod provenance;
 pub mod sparse;
 pub mod stream;
