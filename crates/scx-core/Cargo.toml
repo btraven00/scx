@@ -19,7 +19,20 @@ vendored-hdf5 = ["hdf5/static", "hdf5/zlib"]
 # pipeline cloud I/O (buffer_unordered / tokio::spawn). Off by default: local
 # HDF5 conversion stays runtime-free (see docs/tech-debt-async.md). The first
 # network reader (Parquet over object_store) lands the format crates here.
-net = ["dep:tokio", "dep:object_store", "dep:parquet", "dep:arrow", "dep:async-stream"]
+net = [
+    "dep:tokio",
+    "dep:object_store",
+    "dep:parquet",
+    "dep:arrow",
+    "dep:async-stream",
+    "dep:url",
+    # Backends object_store::parse_url dispatches to. http is mandatory (the
+    # Tahoe-100M benchmark is public HTTPS on HuggingFace); aws+gcp for general
+    # cloud. azure skipped in v1 to limit dep weight (each pulls reqwest/hyper).
+    "object_store/http",
+    "object_store/aws",
+    "object_store/gcp",
+]
 
 [dependencies]
 async-trait = "0.1"
@@ -54,6 +67,8 @@ arrow = { version = "59", optional = true }
 # Lets x_stream() defer the async footer read into the returned Stream (the
 # DatasetReader::x_stream signature is sync-returns-stream).
 async-stream = { version = "0.3", optional = true }
+# URL parsing for the net transport (object_store::parse_url takes a url::Url).
+url = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

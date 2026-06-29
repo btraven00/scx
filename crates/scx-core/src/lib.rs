@@ -10,6 +10,8 @@ pub mod h5bpcells;
 pub mod h5seurat;
 pub mod ir;
 pub mod merge;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod npy;
 #[cfg(feature = "net")]
 pub mod parquet;
