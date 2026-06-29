@@ -14,9 +14,14 @@ path = "src/main.rs"
 [features]
 default = ["vendored-hdf5"]
 vendored-hdf5 = ["scx-core/vendored-hdf5"]
+# Network-backed input (Parquet over object_store). Forwards to scx-core/net and
+# pulls a tokio runtime so cloud readers get a real reactor at the CLI entry point.
+net = ["scx-core/net", "dep:tokio"]
 
 [dependencies]
 scx-core = { path = "../scx-core", version = "0.1.0", default-features = false }
+# Runtime constructed in main() only under the `net` feature.
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,3 +35,6 @@ polars = { version = "0.46", default-features = false, features = ["csv", "parqu
 
 [dev-dependencies]
 tempfile = "3"
+# Build a Tahoe-shaped Parquet fixture in the net e2e test (gated by cfg(net)).
+arrow = "59"
+parquet = "59"

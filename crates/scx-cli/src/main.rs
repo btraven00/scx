@@ -47,6 +47,12 @@ enum Cli {
         #[arg(long, default_value = "5000")]
         chunk_size: usize,
 
+        /// Number of genes (var axis) — required for Parquet input, which does
+        /// not carry the full gene axis in the expression file. For Tahoe-100M
+        /// this is the row count of the gene_metadata subset (~62710).
+        #[arg(long)]
+        n_vars: Option<usize>,
+
         /// Output data type [f32, f64, i32, u32]
         #[arg(long, default_value = "f32")]
         dtype: String,
@@ -283,10 +289,33 @@ fn main() {
         )
         .init();
 
-    if let Err(e) = futures::executor::block_on(run()) {
+    if let Err(e) = drive(run()) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Drive the async CLI to completion.
+///
+/// With `net`, object-store backends (S3/GCS/HTTP) need a live tokio reactor, so
+/// the whole CLI runs inside a multi-thread tokio runtime — the single entry
+/// point where the runtime is constructed. Multi-thread (not current-thread) is
+/// deliberate: the merge/export paths nest `futures::executor::block_on`, which
+/// would deadlock a single-threaded runtime but merely parks one worker here.
+#[cfg(feature = "net")]
+fn drive<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(fut)
+}
+
+/// Without `net` there is no tokio dependency and all I/O is local/synchronous,
+/// so the lightweight futures executor is sufficient.
+#[cfg(not(feature = "net"))]
+fn drive<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> anyhow::Result<()> {
+    futures::executor::block_on(fut)
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -345,6 +374,9 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — use 'scx inspect' to explore its structure", input)
+                }
+                Some(Format::Parquet) => {
+                    anyhow::bail!("validating Parquet input is not supported yet — use 'scx convert'")
                 }
             };
 
@@ -410,6 +442,9 @@ async fn run() -> anyhow::Result<()> {
                     let nodes = walk_h5(input_path, 2)?;
                     inspect_plain_h5(&nodes, &input);
                 }
+                Some(Format::Parquet) => {
+                    anyhow::bail!("inspecting Parquet input is not supported yet — use 'scx convert'")
+                }
             }
         }
 
@@ -417,6 +452,7 @@ async fn run() -> anyhow::Result<()> {
             input,
             output,
             chunk_size,
+            n_vars: n_vars_arg,
             dtype,
             assay,
             layer,
@@ -438,14 +474,27 @@ async fn run() -> anyhow::Result<()> {
 
             let input_path = Path::new(&input);
 
-            // NPY snapshot directory takes priority.
-            let fmt = detect::sniff_dir(input_path)
-                .or_else(|| detect::sniff(input_path))
-                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
-                    Some("h5seurat") => Some(Format::H5Seurat),
-                    Some("h5ad") => Some(Format::H5Ad),
-                    _ => Some(Format::ScxH5),
-                });
+            // Network URLs (s3://, https://, …) bypass the local HDF5 sniffers
+            // and route straight to the object-store Parquet reader.
+            #[cfg(feature = "net")]
+            let is_net = scx_core::net::is_network_url(&input);
+            #[cfg(not(feature = "net"))]
+            let is_net = false;
+
+            // NPY snapshot directory takes priority; a local `.parquet` file
+            // falls through sniffing to the extension arm.
+            let fmt = if is_net {
+                Some(Format::Parquet)
+            } else {
+                detect::sniff_dir(input_path)
+                    .or_else(|| detect::sniff(input_path))
+                    .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
+                        Some("h5seurat") => Some(Format::H5Seurat),
+                        Some("h5ad") => Some(Format::H5Ad),
+                        Some("parquet") => Some(Format::Parquet),
+                        _ => Some(Format::ScxH5),
+                    })
+            };
 
             let source_sha256 = if let Some(hex) = source_sha256_arg {
                 if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -490,6 +539,46 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot convert; use 'scx inspect' to explore its structure", input)
+                }
+                Some(Format::Parquet) => {
+                    #[cfg(feature = "net")]
+                    {
+                        let n_vars_in = n_vars_arg.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--n-vars is required for Parquet input (the expression file has no gene axis)"
+                            )
+                        })?;
+                        tracing::info!(path = %input, "detected format: Parquet (object_store)");
+                        let (store, store_path) = scx_core::net::resolve_store(&input)?;
+                        let mut reader = scx_core::parquet::ParquetReader::open(
+                            store, store_path, n_vars_in, chunk_size,
+                        )
+                        .await?;
+                        convert_with_reader(
+                            &mut reader,
+                            output_path,
+                            out_dtype,
+                            &assay,
+                            &layer,
+                            &x_slot,
+                            &project,
+                            chunk_size,
+                            dgcmatrix,
+                            seuratdisk_compat,
+                            &input,
+                            source_url.as_deref(),
+                            source_sha256.clone(),
+                            compress,
+                        )
+                        .await?
+                    }
+                    #[cfg(not(feature = "net"))]
+                    {
+                        let _ = n_vars_arg;
+                        anyhow::bail!(
+                            "Parquet/network input requires building with --features net"
+                        );
+                    }
                 }
                 Some(Format::NpyDir) => {
                     tracing::info!(path = %input, "detected format: NPY snapshot directory");
@@ -656,6 +745,9 @@ async fn run() -> anyhow::Result<()> {
             let (n_obs, n_vars) = match fmt {
                 Some(Format::PlainH5) => {
                     anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot snapshot; use 'scx inspect' to explore its structure", input)
+                }
+                Some(Format::Parquet) => {
+                    anyhow::bail!("snapshotting Parquet input is not supported yet — use 'scx convert'")
                 }
                 Some(Format::TenxH5) => {
                     let mut r = TenxH5Reader::open(input_path, chunk_size)?;

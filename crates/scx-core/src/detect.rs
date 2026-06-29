@@ -28,6 +28,8 @@ pub enum Format {
     BPCells,
     /// 10x Genomics HDF5 feature-barcode matrix (Cell Ranger output).
     TenxH5,
+    /// Parquet (one cell per row, sparse list columns) — local or object-store.
+    Parquet,
     /// Valid HDF5 file with no recognized single-cell format fingerprint.
     PlainH5,
 }
@@ -41,6 +43,7 @@ impl Format {
             Format::NpyDir => "NpyDir",
             Format::BPCells => "BPCells",
             Format::TenxH5 => "10x HDF5",
+            Format::Parquet => "Parquet",
             Format::PlainH5 => "HDF5 (unrecognized)",
         }
     }
