@@ -1,11 +1,13 @@
 //! Streaming Parquet reader over an [`object_store`] handle.
+//!
+//! The matrix encoding (per-cell lists, dense, …) is sniffed at [`open`](ParquetReader::open)
+//! into a [`ParquetLayout`] and dispatched per batch — see [`super::layout`].
 
 use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, ListArray,
-    StringArray,
+    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
 };
 use arrow::datatypes::DataType as ArrowType;
 use arrow::record_batch::RecordBatch;
@@ -15,22 +17,26 @@ use object_store::path::Path as StorePath;
 use object_store::ObjectStore;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
-use crate::dtype::{DataType, TypedVec};
-use crate::error::{Result, ScxError};
+use super::layout::ParquetLayout;
+use super::net_err;
+use crate::dtype::DataType;
+use crate::error::Result;
 use crate::ir::{
-    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta,
-    UnsTable, VarTable, Varm,
+    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable,
+    Varm,
 };
 use crate::stream::DatasetReader;
 
 /// Column whose values become the obs index, when present (Tahoe-100M barcode).
 const INDEX_COLUMN: &str = "BARCODE_SUB_LIB_ID";
 
-/// Streams a Parquet dataset (one cell per row, sparse list columns) off any
-/// `object_store` backend — in-memory, local filesystem, or cloud (S3/GCS/Azure).
+/// Streams a Parquet dataset off any `object_store` backend — in-memory, local
+/// filesystem, or cloud (S3/GCS/HTTP). The on-disk matrix encoding is detected
+/// at open time; see [`ParquetLayout`].
 pub struct ParquetReader {
     store: Arc<dyn ObjectStore>,
     path: StorePath,
+    layout: ParquetLayout,
     n_obs: usize,
     n_vars: usize,
     chunk_size: usize,
@@ -39,15 +45,16 @@ pub struct ParquetReader {
 impl ParquetReader {
     /// Open a Parquet object for streaming.
     ///
-    /// Reads only the file footer (row count) up front — the row groups stream
-    /// lazily via [`DatasetReader::x_stream`]. `n_vars` is supplied by the
-    /// caller because the expression file does not carry the full gene axis
-    /// (Tahoe sources it from the `gene_metadata` subset); `chunk_size` is the
-    /// Parquet batch size, i.e. rows per emitted [`MatrixChunk`].
+    /// Reads only the footer (schema + row count) up front; row groups stream
+    /// lazily via [`DatasetReader::x_stream`]. The layout is sniffed from the
+    /// schema. `n_vars` is **required** for layouts that don't carry the gene
+    /// axis (per-cell lists) and **derived** for those that do (dense); passing
+    /// a value that contradicts a dense layout's column count is an error.
+    /// `chunk_size` is the Parquet batch size — rows per emitted [`MatrixChunk`].
     pub async fn open(
         store: Arc<dyn ObjectStore>,
         path: impl Into<StorePath>,
-        n_vars: usize,
+        n_vars: Option<usize>,
         chunk_size: usize,
     ) -> Result<Self> {
         let path = path.into();
@@ -55,17 +62,40 @@ impl ParquetReader {
         let builder = ParquetRecordBatchStreamBuilder::new(object_reader)
             .await
             .map_err(net_err)?;
+
+        let layout = ParquetLayout::sniff(builder.schema().as_ref())?;
+        let n_vars = match layout.intrinsic_n_vars() {
+            Some(derived) => {
+                if let Some(req) = n_vars {
+                    if req != derived {
+                        return Err(net_err(format!(
+                            "n_vars={req} was provided but the dense layout has {derived} gene columns"
+                        )));
+                    }
+                }
+                derived
+            }
+            None => n_vars.ok_or_else(|| {
+                net_err(
+                    "this Parquet layout does not carry the gene axis; n_vars must be \
+                     provided (e.g. --n-vars)",
+                )
+            })?,
+        };
+        // For the supported one-cell-per-row layouts, footer rows == n_obs.
         let n_obs = builder.metadata().file_metadata().num_rows().max(0) as usize;
+
         Ok(Self {
             store,
             path,
+            layout,
             n_obs,
             n_vars,
             chunk_size,
         })
     }
 
-    /// Full-pass scan of the scalar (non-list) columns into an [`ObsTable`].
+    /// Full-pass scan of the non-matrix scalar columns into an [`ObsTable`].
     async fn read_obs(&self) -> Result<ObsTable> {
         let object_reader = ParquetObjectReader::new(self.store.clone(), self.path.clone());
         let builder = ParquetRecordBatchStreamBuilder::new(object_reader)
@@ -73,11 +103,12 @@ impl ParquetReader {
             .map_err(net_err)?;
         let schema = builder.schema().clone();
 
-        // Pick out scalar columns we know how to materialise; list columns
-        // (genes/expressions) carry X and are streamed separately, not here.
+        // Materialise scalar columns that aren't matrix data (the layout knows
+        // which columns carry X — list columns, or dense gene columns).
         let mut accs: Vec<ColumnAcc> = schema
             .fields()
             .iter()
+            .filter(|f| !self.layout.is_matrix_column(f.name()))
             .filter_map(|f| ColumnAcc::for_field(f.name(), f.data_type()))
             .collect();
 
@@ -123,7 +154,7 @@ impl DatasetReader for ParquetReader {
     }
 
     fn dtype(&self) -> DataType {
-        // `expressions` is float32 in the Tahoe schema.
+        // Both supported layouts emit f32 (dense f64 columns are cast).
         DataType::F32
     }
 
@@ -173,11 +204,12 @@ impl DatasetReader for ParquetReader {
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
         let n_vars = self.n_vars;
-        // Clone the cheap handles so the stream owns them — the async footer
-        // read is deferred into the stream body (x_stream is sync-returns-stream).
+        // Clone the cheap handles + layout so the stream owns them — the async
+        // footer read is deferred into the stream body (x_stream is sync-returns-stream).
         let store = self.store.clone();
         let path = self.path.clone();
         let chunk_size = self.chunk_size;
+        let layout = self.layout.clone();
         Box::pin(async_stream::try_stream! {
             let object_reader = ParquetObjectReader::new(store, path);
             let builder = ParquetRecordBatchStreamBuilder::new(object_reader)
@@ -188,7 +220,7 @@ impl DatasetReader for ParquetReader {
             let mut row_offset = 0usize;
             while let Some(batch) = stream.next().await {
                 let batch = batch.map_err(net_err)?;
-                let chunk = batch_to_chunk(&batch, n_vars, row_offset)?;
+                let chunk = layout.batch_to_chunk(&batch, n_vars, row_offset)?;
                 row_offset += chunk.nrows;
                 yield chunk;
             }
@@ -196,88 +228,8 @@ impl DatasetReader for ParquetReader {
     }
 }
 
-/// Convert a network-stack error into [`ScxError::Net`] (keeps the variant free
-/// of the `net`-only crate types).
-fn net_err<E: std::fmt::Display>(e: E) -> ScxError {
-    ScxError::Net(e.to_string())
-}
-
 fn string_index_from(n: usize) -> Vec<String> {
     (0..n).map(|i| i.to_string()).collect()
-}
-
-/// Turn one Parquet `RecordBatch` (parallel `genes`/`expressions` lists) into a
-/// CSR row-chunk. Each batch row is one cell, i.e. one CSR row.
-fn batch_to_chunk(batch: &RecordBatch, n_vars: usize, row_offset: usize) -> Result<MatrixChunk> {
-    let genes = list_column(batch, "genes")?;
-    let exprs = list_column(batch, "expressions")?;
-
-    let nrows = batch.num_rows();
-    let mut indptr: Vec<u64> = Vec::with_capacity(nrows + 1);
-    indptr.push(0);
-    let mut indices: Vec<u32> = Vec::new();
-    let mut data: Vec<f32> = Vec::new();
-
-    for r in 0..nrows {
-        if genes.is_null(r) {
-            indptr.push(indices.len() as u64);
-            continue;
-        }
-        let row_genes = genes.value(r);
-        let row_genes = row_genes
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| net_err("`genes` list values are not Int64"))?;
-        let row_exprs = exprs.value(r);
-        let row_exprs = row_exprs
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .ok_or_else(|| net_err("`expressions` list values are not Float32"))?;
-
-        if row_genes.len() != row_exprs.len() {
-            return Err(net_err(format!(
-                "row {}: genes/expressions length mismatch ({} vs {})",
-                row_offset + r,
-                row_genes.len(),
-                row_exprs.len()
-            )));
-        }
-
-        for k in 0..row_genes.len() {
-            let col = row_genes.value(k);
-            if col < 0 || col as usize >= n_vars {
-                return Err(net_err(format!(
-                    "row {}: gene index {} out of range for n_vars={}",
-                    row_offset + r,
-                    col,
-                    n_vars
-                )));
-            }
-            indices.push(col as u32);
-            data.push(row_exprs.value(k));
-        }
-        indptr.push(indices.len() as u64);
-    }
-
-    Ok(MatrixChunk {
-        row_offset,
-        nrows,
-        data: SparseMatrixCSR {
-            shape: (nrows, n_vars),
-            indptr,
-            indices,
-            data: TypedVec::F32(data),
-        },
-    })
-}
-
-fn list_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| ScxError::MissingField(name.to_string()))?
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .ok_or_else(|| net_err(format!("`{name}` column is not a List")))
 }
 
 /// Accumulates one scalar obs column across record batches.
@@ -288,7 +240,7 @@ struct ColumnAcc {
 
 impl ColumnAcc {
     /// Returns an accumulator for scalar columns we can materialise; `None` for
-    /// list columns (X) and unsupported arrow types (skipped from obs).
+    /// list columns and unsupported arrow types (skipped from obs).
     fn for_field(name: &str, dtype: &ArrowType) -> Option<Self> {
         let data = match dtype {
             ArrowType::Utf8 | ArrowType::LargeUtf8 => ColumnData::String(Vec::new()),

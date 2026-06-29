@@ -28,9 +28,17 @@
 //!   direct 0-based column indices.
 //! - Only `x` + scalar obs columns are read; `var`/`obsm`/`uns`/layers are empty.
 
+mod layout;
 mod reader;
 
 #[cfg(test)]
 mod tests;
 
 pub use reader::ParquetReader;
+
+/// Convert a network-stack error (object_store / parquet / arrow) into
+/// [`ScxError::Net`](crate::error::ScxError::Net), keeping the variant free of
+/// the `net`-only crate types. Shared by the reader and the layout converters.
+pub(crate) fn net_err<E: std::fmt::Display>(e: E) -> crate::error::ScxError {
+    crate::error::ScxError::Net(e.to_string())
+}

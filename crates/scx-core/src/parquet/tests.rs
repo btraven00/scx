@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float32Builder, Int64Builder, ListBuilder, StringArray};
+use arrow::array::{
+    ArrayRef, Float32Array, Float32Builder, Int64Builder, ListBuilder, StringArray,
+};
 use arrow::datatypes::{DataType as ArrowType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use futures::StreamExt;
@@ -97,7 +99,7 @@ async fn streams_csr_matching_fixture() {
     let (store, path) = fixture_store().await;
     // chunk_size = 3 forces more than one batch over 4 rows, exercising the
     // row_offset accumulation across chunks.
-    let mut reader = ParquetReader::open(store, path, N_VARS, 3)
+    let mut reader = ParquetReader::open(store, path, Some(N_VARS), 3)
         .await
         .expect("open");
 
@@ -139,7 +141,7 @@ async fn streams_csr_matching_fixture() {
 #[tokio::test]
 async fn reads_scalar_obs_columns() {
     let (store, path) = fixture_store().await;
-    let mut reader = ParquetReader::open(store, path, N_VARS, 1024)
+    let mut reader = ParquetReader::open(store, path, Some(N_VARS), 1024)
         .await
         .expect("open");
 
@@ -169,7 +171,7 @@ async fn reads_scalar_obs_columns() {
 async fn rejects_gene_index_out_of_range() {
     // n_vars deliberately too small: gene id 5 exceeds it -> Net error.
     let (store, path) = fixture_store().await;
-    let mut reader = ParquetReader::open(store, path, 3, 1024)
+    let mut reader = ParquetReader::open(store, path, Some(3), 1024)
         .await
         .expect("open");
 
@@ -182,4 +184,129 @@ async fn rejects_gene_index_out_of_range() {
         }
     }
     assert!(hit_err, "expected an out-of-range gene index error");
+}
+
+// --- Dense layout (one float column per gene) ---
+
+/// 3 cells × 4 genes, dense float columns + a string id column.
+fn dense_fixture_bytes() -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cell_id", ArrowType::Utf8, false),
+        Field::new("g0", ArrowType::Float32, false),
+        Field::new("g1", ArrowType::Float32, false),
+        Field::new("g2", ArrowType::Float32, false),
+        Field::new("g3", ArrowType::Float32, false),
+    ]));
+    let cell_id: ArrayRef = Arc::new(StringArray::from(vec!["c0", "c1", "c2"]));
+    let g0: ArrayRef = Arc::new(Float32Array::from(vec![1.0, 0.0, 4.0]));
+    let g1: ArrayRef = Arc::new(Float32Array::from(vec![0.0, 2.0, 0.0]));
+    let g2: ArrayRef = Arc::new(Float32Array::from(vec![0.0, 0.0, 5.0]));
+    let g3: ArrayRef = Arc::new(Float32Array::from(vec![3.0, 0.0, 0.0]));
+
+    let batch =
+        RecordBatch::try_new(schema.clone(), vec![cell_id, g0, g1, g2, g3]).expect("batch");
+    let mut buf = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buf, schema, None).expect("writer");
+    writer.write(&batch).expect("write");
+    writer.close().expect("close");
+    buf
+}
+
+#[tokio::test]
+async fn dense_layout_round_trips_and_derives_n_vars() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = StorePath::from("dense.parquet");
+    store
+        .put(&path, dense_fixture_bytes().into())
+        .await
+        .expect("put");
+
+    // n_vars = None: the dense layout derives it from the 4 float columns.
+    let mut reader = ParquetReader::open(store, path, None, 1024)
+        .await
+        .expect("open");
+    assert_eq!(reader.shape(), (3, 4));
+    assert_eq!(reader.dtype(), DataType::F32);
+
+    // obs: the string column survives; gene columns are excluded.
+    let obs = reader.obs().await.expect("obs");
+    assert!(obs.columns.iter().any(|c| c.name == "cell_id"));
+    assert!(obs.columns.iter().all(|c| !c.name.starts_with('g')));
+
+    let expected = [
+        [1.0f32, 0.0, 0.0, 3.0],
+        [0.0, 2.0, 0.0, 0.0],
+        [4.0, 0.0, 5.0, 0.0],
+    ];
+    let mut dense = vec![vec![0.0f32; 4]; 3];
+    let mut stream = reader.x_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("chunk");
+        let TypedVec::F32(values) = &chunk.data.data else {
+            panic!("expected f32 CSR data");
+        };
+        for local in 0..chunk.nrows {
+            let g = chunk.row_offset + local;
+            let start = chunk.data.indptr[local] as usize;
+            let end = chunk.data.indptr[local + 1] as usize;
+            for k in start..end {
+                dense[g][chunk.data.indices[k] as usize] = values[k];
+            }
+        }
+    }
+    for (r, want) in expected.iter().enumerate() {
+        assert_eq!(dense[r], want.to_vec(), "dense row {r} mismatch");
+    }
+}
+
+// --- Schema sniffing ---
+
+use super::layout::ParquetLayout;
+
+fn field(name: &str, dt: ArrowType) -> Field {
+    Field::new(name, dt, true)
+}
+
+fn list_field(name: &str, item: ArrowType) -> Field {
+    Field::new(
+        name,
+        ArrowType::List(Arc::new(Field::new("item", item, true))),
+        true,
+    )
+}
+
+#[test]
+fn sniff_detects_per_cell_lists() {
+    let schema = Schema::new(vec![
+        list_field("genes", ArrowType::Int64),
+        list_field("expressions", ArrowType::Float32),
+        field("drug", ArrowType::Utf8),
+    ]);
+    let layout = ParquetLayout::sniff(&schema).expect("sniff");
+    assert!(matches!(layout, ParquetLayout::PerCellLists { .. }));
+    assert_eq!(layout.intrinsic_n_vars(), None);
+}
+
+#[test]
+fn sniff_detects_dense() {
+    let schema = Schema::new(vec![
+        field("cell_id", ArrowType::Utf8),
+        field("g0", ArrowType::Float32),
+        field("g1", ArrowType::Float64),
+    ]);
+    let layout = ParquetLayout::sniff(&schema).expect("sniff");
+    assert_eq!(layout.intrinsic_n_vars(), Some(2));
+    assert!(layout.is_matrix_column("g0"));
+    assert!(!layout.is_matrix_column("cell_id"));
+}
+
+#[test]
+fn sniff_rejects_unrecognized_schema() {
+    // No list pair and no float columns → unknown encoding (e.g. long-format).
+    let schema = Schema::new(vec![
+        field("cell_id", ArrowType::Utf8),
+        field("gene_id", ArrowType::Int64),
+        field("count", ArrowType::Int64),
+    ]);
+    assert!(ParquetLayout::sniff(&schema).is_err());
 }

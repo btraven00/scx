@@ -47,9 +47,9 @@ enum Cli {
         #[arg(long, default_value = "5000")]
         chunk_size: usize,
 
-        /// Number of genes (var axis) — required for Parquet input, which does
-        /// not carry the full gene axis in the expression file. For Tahoe-100M
-        /// this is the row count of the gene_metadata subset (~62710).
+        /// Number of genes (var axis) for Parquet input. Required for the
+        /// per-cell-list layout (e.g. Tahoe-100M: the gene_metadata row count,
+        /// ~62710); derived automatically for dense (one column per gene).
         #[arg(long)]
         n_vars: Option<usize>,
 
@@ -543,15 +543,12 @@ async fn run() -> anyhow::Result<()> {
                 Some(Format::Parquet) => {
                     #[cfg(feature = "net")]
                     {
-                        let n_vars_in = n_vars_arg.ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "--n-vars is required for Parquet input (the expression file has no gene axis)"
-                            )
-                        })?;
                         tracing::info!(path = %input, "detected format: Parquet (object_store)");
                         let (store, store_path) = scx_core::net::resolve_store(&input)?;
+                        // n_vars is required for per-cell-list layouts and derived
+                        // for dense; the reader validates and reports if missing.
                         let mut reader = scx_core::parquet::ParquetReader::open(
-                            store, store_path, n_vars_in, chunk_size,
+                            store, store_path, n_vars_arg, chunk_size,
                         )
                         .await?;
                         convert_with_reader(
