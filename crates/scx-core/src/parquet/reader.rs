@@ -18,7 +18,7 @@ use object_store::ObjectStore;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
 use super::layout::ParquetLayout;
-use super::net_err;
+use super::{net_err, GeneDict};
 use crate::dtype::DataType;
 use crate::error::Result;
 use crate::ir::{
@@ -40,6 +40,11 @@ pub struct ParquetReader {
     n_obs: usize,
     n_vars: usize,
     chunk_size: usize,
+    /// `token_id → column` map when reading via a gene dictionary; `None` means
+    /// the `genes` integers are used as direct column indices.
+    token_map: Option<Arc<[i32]>>,
+    /// Gene axis from the dictionary; empty when no dictionary was supplied.
+    var: VarTable,
 }
 
 impl ParquetReader {
@@ -47,14 +52,20 @@ impl ParquetReader {
     ///
     /// Reads only the footer (schema + row count) up front; row groups stream
     /// lazily via [`DatasetReader::x_stream`]. The layout is sniffed from the
-    /// schema. `n_vars` is **required** for layouts that don't carry the gene
-    /// axis (per-cell lists) and **derived** for those that do (dense); passing
-    /// a value that contradicts a dense layout's column count is an error.
-    /// `chunk_size` is the Parquet batch size — rows per emitted [`MatrixChunk`].
+    /// schema.
+    ///
+    /// `gene_dict` (a loaded `gene_metadata`) applies to the per-cell-list
+    /// layout: it supplies the token→column map and the `var` axis, and
+    /// **derives `n_vars`** (so `n_vars` may be `None`). Without a dictionary,
+    /// `n_vars` is **required** for per-cell lists (the file has no gene axis)
+    /// and **derived** for dense; a value contradicting a dense layout's column
+    /// count is an error. `chunk_size` is the Parquet batch size — rows per
+    /// emitted [`MatrixChunk`].
     pub async fn open(
         store: Arc<dyn ObjectStore>,
         path: impl Into<StorePath>,
         n_vars: Option<usize>,
+        gene_dict: Option<GeneDict>,
         chunk_size: usize,
     ) -> Result<Self> {
         let path = path.into();
@@ -64,24 +75,47 @@ impl ParquetReader {
             .map_err(net_err)?;
 
         let layout = ParquetLayout::sniff(builder.schema().as_ref())?;
-        let n_vars = match layout.intrinsic_n_vars() {
-            Some(derived) => {
-                if let Some(req) = n_vars {
-                    if req != derived {
-                        return Err(net_err(format!(
-                            "n_vars={req} was provided but the dense layout has {derived} gene columns"
-                        )));
-                    }
-                }
-                derived
+        let is_per_cell = matches!(layout, ParquetLayout::PerCellLists { .. });
+
+        // A gene dictionary only applies to the per-cell-list layout.
+        let gene_dict = match gene_dict {
+            Some(d) if is_per_cell => Some(d),
+            Some(_) => {
+                tracing::warn!(
+                    "--genes ignored: the gene dictionary applies only to the per-cell-list \
+                     layout, but this file is not in that layout"
+                );
+                None
             }
-            None => n_vars.ok_or_else(|| {
-                net_err(
-                    "this Parquet layout does not carry the gene axis; n_vars must be \
-                     provided (e.g. --n-vars)",
-                )
-            })?,
+            None => None,
         };
+
+        let (n_vars, token_map, var) = match &gene_dict {
+            // Dictionary present: it owns the gene axis.
+            Some(dict) => (dict.n_vars(), Some(dict.token_to_col.clone()), dict.var.clone()),
+            None => {
+                let n_vars = match layout.intrinsic_n_vars() {
+                    Some(derived) => {
+                        if let Some(req) = n_vars {
+                            if req != derived {
+                                return Err(net_err(format!(
+                                    "n_vars={req} was provided but the dense layout has {derived} gene columns"
+                                )));
+                            }
+                        }
+                        derived
+                    }
+                    None => n_vars.ok_or_else(|| {
+                        net_err(
+                            "this Parquet layout does not carry the gene axis; provide n_vars \
+                             (--n-vars) or a gene dictionary (--genes)",
+                        )
+                    })?,
+                };
+                (n_vars, None, VarTable::default())
+            }
+        };
+
         // For the supported one-cell-per-row layouts, footer rows == n_obs.
         let n_obs = builder.metadata().file_metadata().num_rows().max(0) as usize;
 
@@ -92,6 +126,8 @@ impl ParquetReader {
             n_obs,
             n_vars,
             chunk_size,
+            token_map,
+            var,
         })
     }
 
@@ -163,7 +199,8 @@ impl DatasetReader for ParquetReader {
     }
 
     async fn var(&mut self) -> Result<VarTable> {
-        Ok(VarTable::default())
+        // Populated from the gene dictionary when one was supplied; else empty.
+        Ok(self.var.clone())
     }
 
     async fn obsm(&mut self) -> Result<Embeddings> {
@@ -210,6 +247,7 @@ impl DatasetReader for ParquetReader {
         let path = self.path.clone();
         let chunk_size = self.chunk_size;
         let layout = self.layout.clone();
+        let token_map = self.token_map.clone();
         Box::pin(async_stream::try_stream! {
             let object_reader = ParquetObjectReader::new(store, path);
             let builder = ParquetRecordBatchStreamBuilder::new(object_reader)
@@ -220,7 +258,7 @@ impl DatasetReader for ParquetReader {
             let mut row_offset = 0usize;
             while let Some(batch) = stream.next().await {
                 let batch = batch.map_err(net_err)?;
-                let chunk = layout.batch_to_chunk(&batch, n_vars, row_offset)?;
+                let chunk = layout.batch_to_chunk(&batch, n_vars, row_offset, token_map.as_deref())?;
                 row_offset += chunk.nrows;
                 yield chunk;
             }

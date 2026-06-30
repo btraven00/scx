@@ -100,15 +100,20 @@ impl ParquetLayout {
 
     /// Convert one `RecordBatch` (one cell per row, for both supported layouts)
     /// into a CSR row-chunk starting at `row_offset`.
+    ///
+    /// `token_map`, when present, remaps per-cell-list `genes` token IDs to
+    /// columns (`token_map[token]`, skipping `-1`); without it those integers
+    /// are used as direct column indices. It is ignored by the dense layout.
     pub(crate) fn batch_to_chunk(
         &self,
         batch: &RecordBatch,
         n_vars: usize,
         row_offset: usize,
+        token_map: Option<&[i32]>,
     ) -> Result<MatrixChunk> {
         match self {
             Self::PerCellLists { genes, exprs } => {
-                per_cell_lists_chunk(batch, genes, exprs, n_vars, row_offset)
+                per_cell_lists_chunk(batch, genes, exprs, n_vars, row_offset, token_map)
             }
             Self::Dense { gene_cols } => dense_chunk(batch, gene_cols, row_offset),
         }
@@ -123,6 +128,7 @@ fn per_cell_lists_chunk(
     exprs_col: &str,
     n_vars: usize,
     row_offset: usize,
+    token_map: Option<&[i32]>,
 ) -> Result<MatrixChunk> {
     let genes = list_column(batch, genes_col)?;
     let exprs = list_column(batch, exprs_col)?;
@@ -159,14 +165,33 @@ fn per_cell_lists_chunk(
         }
 
         for k in 0..row_genes.len() {
-            let col = row_genes.value(k);
-            if col < 0 || col as usize >= n_vars {
-                return Err(net_err(format!(
-                    "row {}: gene index {col} out of range for n_vars={n_vars}",
-                    row_offset + r,
-                )));
-            }
-            indices.push(col as u32);
+            let token = row_genes.value(k);
+            // With a token map, translate token → column (dropping tokens not in
+            // the dictionary, e.g. the marker). Without one, the integer is a
+            // direct column index and is bounds-checked.
+            let col = match token_map {
+                Some(map) => {
+                    let mapped = if token >= 0 && (token as usize) < map.len() {
+                        map[token as usize]
+                    } else {
+                        -1
+                    };
+                    if mapped < 0 {
+                        continue; // reserved/marker/out-of-vocabulary token
+                    }
+                    mapped as u32
+                }
+                None => {
+                    if token < 0 || token as usize >= n_vars {
+                        return Err(net_err(format!(
+                            "row {}: gene index {token} out of range for n_vars={n_vars}",
+                            row_offset + r,
+                        )));
+                    }
+                    token as u32
+                }
+            };
+            indices.push(col);
             data.push(row_exprs.value(k));
         }
         indptr.push(indices.len() as u64);

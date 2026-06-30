@@ -28,12 +28,14 @@
 //!   direct 0-based column indices.
 //! - Only `x` + scalar obs columns are read; `var`/`obsm`/`uns`/layers are empty.
 
+mod genes;
 mod layout;
 mod reader;
 
 #[cfg(test)]
 mod tests;
 
+pub use genes::GeneDict;
 pub use reader::ParquetReader;
 
 /// Convert a network-stack error (object_store / parquet / arrow) into
