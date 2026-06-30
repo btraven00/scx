@@ -16,6 +16,7 @@ use futures::{pin_mut, Stream, StreamExt};
 use object_store::path::Path as StorePath;
 use object_store::ObjectStore;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use parquet::arrow::ProjectionMask;
 
 use super::layout::ParquetLayout;
 use super::{net_err, GeneDict};
@@ -148,8 +149,26 @@ impl ParquetReader {
             .filter_map(|f| ColumnAcc::for_field(f.name(), f.data_type()))
             .collect();
 
+        // No obs columns: skip the scan entirely (a sequential index is enough).
+        if accs.is_empty() {
+            return Ok(ObsTable {
+                index: string_index_from(self.n_obs),
+                columns: Vec::new(),
+            });
+        }
+
+        // Project only the obs columns so this pass doesn't also download the
+        // (large) matrix columns — over the network that would be a second full
+        // fetch on top of x_stream's.
+        let roots: Vec<usize> = accs
+            .iter()
+            .filter_map(|a| schema.index_of(a.name.as_str()).ok())
+            .collect();
+        let mask = ProjectionMask::roots(builder.parquet_schema(), roots);
+
         let stream = builder
             .with_batch_size(self.chunk_size)
+            .with_projection(mask)
             .build()
             .map_err(net_err)?;
         pin_mut!(stream);
@@ -253,7 +272,18 @@ impl DatasetReader for ParquetReader {
             let builder = ParquetRecordBatchStreamBuilder::new(object_reader)
                 .await
                 .map_err(net_err)?;
-            let stream = builder.with_batch_size(chunk_size).build().map_err(net_err)?;
+            // Project only the matrix columns so the X read skips the obs columns.
+            let roots: Vec<usize> = layout
+                .matrix_column_names()
+                .iter()
+                .filter_map(|n| builder.schema().index_of(n).ok())
+                .collect();
+            let mask = ProjectionMask::roots(builder.parquet_schema(), roots);
+            let stream = builder
+                .with_batch_size(chunk_size)
+                .with_projection(mask)
+                .build()
+                .map_err(net_err)?;
             pin_mut!(stream);
             let mut row_offset = 0usize;
             while let Some(batch) = stream.next().await {
