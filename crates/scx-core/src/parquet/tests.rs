@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float32Array, Float32Builder, Int64Builder, ListBuilder, StringArray,
+    ArrayRef, Float32Array, Float32Builder, Int64Array, Int64Builder, ListBuilder, StringArray,
 };
 use arrow::datatypes::{DataType as ArrowType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -99,7 +99,7 @@ async fn streams_csr_matching_fixture() {
     let (store, path) = fixture_store().await;
     // chunk_size = 3 forces more than one batch over 4 rows, exercising the
     // row_offset accumulation across chunks.
-    let mut reader = ParquetReader::open(store, path, Some(N_VARS), 3)
+    let mut reader = ParquetReader::open(store, path, Some(N_VARS), None, 3)
         .await
         .expect("open");
 
@@ -141,7 +141,7 @@ async fn streams_csr_matching_fixture() {
 #[tokio::test]
 async fn reads_scalar_obs_columns() {
     let (store, path) = fixture_store().await;
-    let mut reader = ParquetReader::open(store, path, Some(N_VARS), 1024)
+    let mut reader = ParquetReader::open(store, path, Some(N_VARS), None, 1024)
         .await
         .expect("open");
 
@@ -171,7 +171,7 @@ async fn reads_scalar_obs_columns() {
 async fn rejects_gene_index_out_of_range() {
     // n_vars deliberately too small: gene id 5 exceeds it -> Net error.
     let (store, path) = fixture_store().await;
-    let mut reader = ParquetReader::open(store, path, Some(3), 1024)
+    let mut reader = ParquetReader::open(store, path, Some(3), None, 1024)
         .await
         .expect("open");
 
@@ -222,7 +222,7 @@ async fn dense_layout_round_trips_and_derives_n_vars() {
         .expect("put");
 
     // n_vars = None: the dense layout derives it from the 4 float columns.
-    let mut reader = ParquetReader::open(store, path, None, 1024)
+    let mut reader = ParquetReader::open(store, path, None, None, 1024)
         .await
         .expect("open");
     assert_eq!(reader.shape(), (3, 4));
@@ -309,4 +309,116 @@ fn sniff_rejects_unrecognized_schema() {
         field("count", ArrowType::Int64),
     ]);
     assert!(ParquetLayout::sniff(&schema).is_err());
+}
+
+// --- Gene dictionary (token → column remap) ---
+
+/// gene_metadata fixture: 3 genes with non-positional token ids (3, 7, 9).
+fn gene_dict_bytes() -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("token_id", ArrowType::Int64, false),
+        Field::new("ensembl_id", ArrowType::Utf8, false),
+        Field::new("gene_symbol", ArrowType::Utf8, false),
+    ]));
+    let token_id: ArrayRef = Arc::new(Int64Array::from(vec![3i64, 7, 9]));
+    let ensembl: ArrayRef = Arc::new(StringArray::from(vec!["ENSG_A", "ENSG_B", "ENSG_C"]));
+    let symbol: ArrayRef = Arc::new(StringArray::from(vec!["GENEA", "GENEB", "GENEC"]));
+    let batch = RecordBatch::try_new(schema.clone(), vec![token_id, ensembl, symbol]).expect("batch");
+    let mut buf = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buf, schema, None).expect("writer");
+    writer.write(&batch).expect("write");
+    writer.close().expect("close");
+    buf
+}
+
+#[tokio::test]
+async fn gene_dict_load_builds_dense_map_and_var() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = StorePath::from("gene_metadata.parquet");
+    store
+        .put(&path, gene_dict_bytes().into())
+        .await
+        .expect("put");
+
+    let dict = super::GeneDict::load(store, path, 1024).await.expect("load");
+
+    assert_eq!(dict.n_vars(), 3);
+    assert_eq!(dict.var.index, vec!["ENSG_A", "ENSG_B", "ENSG_C"]);
+    // Dense map sized to max(token)=9 → 10 slots; tokens map to row index.
+    assert_eq!(dict.token_to_col.len(), 10);
+    assert_eq!(dict.token_to_col[3], 0);
+    assert_eq!(dict.token_to_col[7], 1);
+    assert_eq!(dict.token_to_col[9], 2);
+    // Reserved / marker / gap tokens are sentinels.
+    assert_eq!(dict.token_to_col[0], -1);
+    assert_eq!(dict.token_to_col[1], -1);
+    assert_eq!(dict.token_to_col[5], -1);
+}
+
+/// Build a one-cell per-cell-list batch (genes + expressions lists).
+fn single_cell_batch(genes: &[i64], exprs: &[f32]) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "genes",
+            ArrowType::List(Arc::new(Field::new("item", ArrowType::Int64, true))),
+            true,
+        ),
+        Field::new(
+            "expressions",
+            ArrowType::List(Arc::new(Field::new("item", ArrowType::Float32, true))),
+            true,
+        ),
+    ]));
+    let mut gb = ListBuilder::new(Int64Builder::new());
+    let mut eb = ListBuilder::new(Float32Builder::new());
+    for &g in genes {
+        gb.values().append_value(g);
+    }
+    gb.append(true);
+    for &e in exprs {
+        eb.values().append_value(e);
+    }
+    eb.append(true);
+    let g: ArrayRef = Arc::new(gb.finish());
+    let e: ArrayRef = Arc::new(eb.finish());
+    RecordBatch::try_new(schema, vec![g, e]).expect("batch")
+}
+
+#[test]
+fn per_cell_remap_maps_tokens_and_drops_marker() {
+    // tokens 3→0, 7→1, 9→2; everything else sentinel (incl. marker token 1).
+    let map: Vec<i32> = vec![-1, -1, -1, 0, -1, -1, -1, 1, -1, 2];
+    let layout = ParquetLayout::PerCellLists {
+        genes: "genes".to_string(),
+        exprs: "expressions".to_string(),
+    };
+    // cell: [marker, gene3, gene9]
+    let batch = single_cell_batch(&[1, 3, 9], &[-2.0, 5.0, 2.0]);
+    let chunk = layout
+        .batch_to_chunk(&batch, 3, 0, Some(&map))
+        .expect("chunk");
+
+    assert_eq!(chunk.nrows, 1);
+    assert_eq!(chunk.data.indptr, vec![0, 2]); // marker dropped → 2 entries
+    assert_eq!(chunk.data.indices, vec![0, 2]); // token3→col0, token9→col2
+    match &chunk.data.data {
+        TypedVec::F32(v) => assert_eq!(v, &vec![5.0, 2.0]),
+        other => panic!("expected f32, got {other:?}"),
+    }
+}
+
+#[test]
+fn per_cell_without_map_uses_direct_index() {
+    // No token map → integers are direct column indices (legacy behavior).
+    let layout = ParquetLayout::PerCellLists {
+        genes: "genes".to_string(),
+        exprs: "expressions".to_string(),
+    };
+    let batch = single_cell_batch(&[0, 2], &[1.0, 3.0]);
+    let chunk = layout.batch_to_chunk(&batch, 3, 0, None).expect("chunk");
+    assert_eq!(chunk.data.indices, vec![0, 2]);
+    match &chunk.data.data {
+        TypedVec::F32(v) => assert_eq!(v, &vec![1.0, 3.0]),
+        other => panic!("expected f32, got {other:?}"),
+    }
 }

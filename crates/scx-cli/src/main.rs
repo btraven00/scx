@@ -49,9 +49,18 @@ enum Cli {
 
         /// Number of genes (var axis) for Parquet input. Required for the
         /// per-cell-list layout (e.g. Tahoe-100M: the gene_metadata row count,
-        /// ~62710); derived automatically for dense (one column per gene).
+        /// ~62710); derived automatically for dense (one column per gene) or
+        /// when --genes is given.
         #[arg(long)]
         n_vars: Option<usize>,
+
+        /// Gene dictionary for per-cell-list Parquet input: a path or URL to the
+        /// gene_metadata Parquet (columns token_id, ensembl_id, gene_symbol).
+        /// Remaps `genes` token ids to real columns, drops the marker token,
+        /// fills var, and derives n_vars. For Tahoe-100M this is the
+        /// gene_metadata subset alongside expression_data.
+        #[arg(long)]
+        genes: Option<String>,
 
         /// Output data type [f32, f64, i32, u32]
         #[arg(long, default_value = "f32")]
@@ -453,6 +462,7 @@ async fn run() -> anyhow::Result<()> {
             output,
             chunk_size,
             n_vars: n_vars_arg,
+            genes: genes_arg,
             dtype,
             assay,
             layer,
@@ -544,11 +554,24 @@ async fn run() -> anyhow::Result<()> {
                     #[cfg(feature = "net")]
                     {
                         tracing::info!(path = %input, "detected format: Parquet (object_store)");
+                        // Optional gene dictionary (Tahoe gene_metadata): a second
+                        // object-store location, loaded via the same transport.
+                        let gene_dict = match genes_arg.as_deref() {
+                            Some(loc) => {
+                                tracing::info!(genes = %loc, "loading gene dictionary");
+                                let (gstore, gpath) = scx_core::net::resolve_store(loc)?;
+                                Some(
+                                    scx_core::parquet::GeneDict::load(gstore, gpath, chunk_size)
+                                        .await?,
+                                )
+                            }
+                            None => None,
+                        };
                         let (store, store_path) = scx_core::net::resolve_store(&input)?;
-                        // n_vars is required for per-cell-list layouts and derived
-                        // for dense; the reader validates and reports if missing.
+                        // With --genes, n_vars/var come from the dictionary; else
+                        // n_vars is required for per-cell lists and derived for dense.
                         let mut reader = scx_core::parquet::ParquetReader::open(
-                            store, store_path, n_vars_arg, chunk_size,
+                            store, store_path, n_vars_arg, gene_dict, chunk_size,
                         )
                         .await?;
                         convert_with_reader(
@@ -571,7 +594,7 @@ async fn run() -> anyhow::Result<()> {
                     }
                     #[cfg(not(feature = "net"))]
                     {
-                        let _ = n_vars_arg;
+                        let _ = (n_vars_arg, &genes_arg);
                         anyhow::bail!(
                             "Parquet/network input requires building with --features net"
                         );
