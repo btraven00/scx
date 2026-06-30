@@ -49,6 +49,18 @@ pub fn is_network_url(s: &str) -> bool {
 /// `(store, path)` pair to the reader's `open()`.
 pub fn resolve_store(location: &str) -> Result<(Arc<dyn ObjectStore>, StorePath)> {
     if is_network_url(location) {
+        // object_store percent-decodes the path, turning a `%2F` into a real
+        // `/`. That silently corrupts refs that contain slashes — notably
+        // HuggingFace's auto-converted parquet ref `refs%2Fconvert%2Fparquet`,
+        // which becomes `refs/convert/parquet` and 404s ("Invalid rev id"). Fail
+        // early with guidance rather than emit a confusing not-found.
+        if location.to_ascii_lowercase().contains("%2f") {
+            return Err(ScxError::Net(format!(
+                "URL '{location}' contains a percent-encoded slash (%2F), which object_store \
+                 decodes to '/' and corrupts the ref. Use a ref without a slash — e.g. the \
+                 dataset's main branch: .../resolve/main/<path>"
+            )));
+        }
         let url = Url::parse(location)
             .map_err(|e| ScxError::Net(format!("invalid URL '{location}': {e}")))?;
         // TODO creds: thread AWS_*/GOOGLE_* env (or explicit config) into the
@@ -92,6 +104,20 @@ mod tests {
         // routing (Ok + the key), not a round-trip.
         let (_store, path) = resolve_store("memory:///some/key.parquet").expect("resolve memory");
         assert_eq!(path.as_ref(), "some/key.parquet");
+    }
+
+    #[test]
+    fn rejects_percent_encoded_slash_in_ref() {
+        // HuggingFace auto-convert URLs use refs%2Fconvert%2Fparquet — object_store
+        // would decode the %2F and 404. We reject early with guidance.
+        let err = resolve_store(
+            "https://huggingface.co/datasets/x/y/resolve/refs%2Fconvert%2Fparquet/a/0.parquet",
+        )
+        .unwrap_err();
+        match err {
+            ScxError::Net(msg) => assert!(msg.contains("%2F"), "message should mention %2F: {msg}"),
+            other => panic!("expected ScxError::Net, got {other:?}"),
+        }
     }
 
     #[test]

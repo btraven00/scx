@@ -98,6 +98,15 @@ impl ParquetLayout {
         }
     }
 
+    /// Names of the columns carrying matrix data — used to project the X read so
+    /// it fetches only those columns (and the obs read only the rest).
+    pub(crate) fn matrix_column_names(&self) -> Vec<String> {
+        match self {
+            Self::PerCellLists { genes, exprs } => vec![genes.clone(), exprs.clone()],
+            Self::Dense { gene_cols } => gene_cols.clone(),
+        }
+    }
+
     /// Convert one `RecordBatch` (one cell per row, for both supported layouts)
     /// into a CSR row-chunk starting at `row_offset`.
     ///
