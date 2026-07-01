@@ -274,12 +274,12 @@ async fn test_roundtrip_pbmc3k() {
         .to_string();
     assert_eq!(obs_enc, "dataframe");
     let obs_idx: ndarray::Array1<VarLenUnicode> =
-        out.dataset("obs/index").unwrap().read_1d().unwrap();
+        out.dataset("obs/_index").unwrap().read_1d().unwrap();
     assert_eq!(obs_idx.len(), n_obs);
 
     // var
     let var_idx: ndarray::Array1<VarLenUnicode> =
-        out.dataset("var/index").unwrap().read_1d().unwrap();
+        out.dataset("var/_index").unwrap().read_1d().unwrap();
     assert_eq!(var_idx.len(), n_vars);
 
     // obsm
@@ -992,7 +992,7 @@ async fn deflate_filter_applied_to_x_not_vlen() {
     );
 
     // The obs index is a variable-length string dataset — left uncompressed.
-    let idx = f.dataset("obs/index").unwrap();
+    let idx = f.dataset("obs/_index").unwrap();
     assert!(
         !idx.filters()
             .iter()
