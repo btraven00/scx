@@ -49,6 +49,23 @@ impl Format {
     }
 }
 
+/// Full format detection: directory markers first, then HDF5 content sniffing,
+/// then an extension-based fallback (defaulting to the internal ScxH5 schema).
+///
+/// This is the chain every consumer (CLI subcommands, the Python/R bindings)
+/// used to inline; use it — or the higher-level [`crate::open`] factory — rather
+/// than re-deriving it.
+pub fn detect(path: &Path) -> Option<Format> {
+    sniff_dir(path)
+        .or_else(|| sniff(path))
+        .or_else(|| match path.extension().and_then(|e| e.to_str()) {
+            Some("h5seurat") => Some(Format::H5Seurat),
+            Some("h5ad") => Some(Format::H5Ad),
+            Some("parquet") => Some(Format::Parquet),
+            _ => Some(Format::ScxH5),
+        })
+}
+
 /// Sniff the format of a directory.
 ///
 /// - `Format::NpyDir`  — directory contains `meta.json`
@@ -165,6 +182,15 @@ mod tests {
             return;
         }
         assert_eq!(sniff(Path::new(SCX_H5)), Some(Format::ScxH5));
+    }
+
+    #[test]
+    fn detect_extension_fallback() {
+        // Nonexistent paths: sniff_dir/sniff fail, so the extension decides.
+        assert_eq!(detect(Path::new("x.h5ad")), Some(Format::H5Ad));
+        assert_eq!(detect(Path::new("x.h5seurat")), Some(Format::H5Seurat));
+        assert_eq!(detect(Path::new("x.parquet")), Some(Format::Parquet));
+        assert_eq!(detect(Path::new("x.unknown")), Some(Format::ScxH5));
     }
 
     #[test]
