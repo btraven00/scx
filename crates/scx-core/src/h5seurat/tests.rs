@@ -262,6 +262,71 @@ async fn test_data_layer() {
 }
 
 // -----------------------------------------------------------------------
+// assay-resolution regression: a file whose only assay is "SCT" (as in the
+// Azimuth pbmc_multimodal reference) must resolve rather than crash on the
+// hardcoded default "RNA" (missing assays/RNA → H5Gopen2 component not found).
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_missing_assay_falls_back() {
+    let n_obs = 3usize;
+    let n_vars = 4usize;
+    let obs = ObsTable {
+        index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+        columns: vec![],
+    };
+    let var = VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    };
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr: vec![0, 2, 4, 6],
+            indices: vec![0, 2, 1, 3, 0, 3],
+            data: TypedVec::F32(vec![1.1, 2.2, 3.3, 4.4, 5.5, 6.6]),
+        },
+    };
+
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let out = tmp.path().to_path_buf();
+
+    // Write the matrix under an "SCT" assay only — there is no "RNA".
+    let mut writer = H5SeuratWriter::create(
+        &out,
+        n_obs,
+        n_vars,
+        DataType::F32,
+        Some("SCT"),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    writer.write_obs(&obs).await.unwrap();
+    writer.write_var(&var).await.unwrap();
+    writer.write_obsm(&Embeddings::default()).await.unwrap();
+    writer.write_uns(&UnsTable::default()).await.unwrap();
+    writer.write_x_chunk(&chunk).await.unwrap();
+    writer.finalize().await.unwrap();
+    drop(writer);
+
+    // Default assay "RNA" is absent — the reader must resolve to "SCT" instead
+    // of failing. (Pre-fix this panicked on H5Gopen2 "component not found".)
+    let mut reader = H5SeuratReader::open(&out, 100, None, None).unwrap();
+    assert_eq!(reader.shape(), (n_obs, n_vars));
+
+    let mut total_nnz = 0usize;
+    let mut stream = reader.x_stream();
+    while let Some(c) = stream.next().await {
+        total_nnz += c.unwrap().data.indices.len();
+    }
+    assert_eq!(total_nnz, 6, "should stream the SCT assay's matrix");
+}
+
+// -----------------------------------------------------------------------
 // uns / misc pass-through test
 // -----------------------------------------------------------------------
 

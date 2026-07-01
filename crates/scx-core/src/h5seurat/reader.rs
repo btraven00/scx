@@ -69,8 +69,13 @@ impl H5SeuratReader {
         let layer = layer.unwrap_or("counts").to_string();
 
         let file = File::open(&path)?;
+        // The requested assay may not exist (e.g. multimodal references default
+        // to "SCT", not "RNA"); fall back to the file's active/first assay.
+        let assay = resolve_assay(&file, &assay)?;
         let dims_path = format!("assays/{assay}/{layer}");
-        let dims_grp = file.group(&dims_path)?;
+        let dims_grp = file
+            .group(&dims_path)
+            .map_err(|_| missing_layer_err(&file, &assay, &layer))?;
 
         // Standard dgCMatrix groups carry a `dims` attribute [ngenes, ncells].
         // BPCells-backed groups instead store a `shape` dataset [nrow, ncol],
@@ -131,6 +136,76 @@ impl H5SeuratReader {
 // ---------------------------------------------------------------------------
 // Sync helpers
 // ---------------------------------------------------------------------------
+
+/// Names of the assays present under `/assays`.
+fn list_assays(file: &File) -> Vec<String> {
+    file.group("assays")
+        .and_then(|g| g.member_names())
+        .unwrap_or_default()
+}
+
+/// The file's active assay (root `active.assay` attribute), if any. SeuratDisk
+/// may store it as variable- or fixed-length ASCII/UTF-8, so try each.
+fn active_assay(file: &File) -> Option<String> {
+    let attr = file.group("/").ok()?.attr("active.assay").ok()?;
+    if let Ok(s) = attr.read_scalar::<VarLenUnicode>() {
+        return Some(s.to_string());
+    }
+    if let Ok(s) = attr.read_scalar::<hdf5::types::VarLenAscii>() {
+        return Some(s.to_string());
+    }
+    if let Ok(s) = attr.read_scalar::<hdf5::types::FixedAscii<64>>() {
+        return Some(s.to_string());
+    }
+    None
+}
+
+/// Conventional main-expression assays, preferred over ancillary ones (e.g. the
+/// antibody `ADT` assay) when the file has no readable active assay.
+const PREFERRED_ASSAYS: &[&str] = &["SCT", "RNA", "originalexp", "spliced"];
+
+/// Resolve which assay to read: the requested one if present, else the file's
+/// active assay, else a conventional main assay, else the first. Errors only
+/// when there are no assays.
+fn resolve_assay(file: &File, requested: &str) -> Result<String> {
+    if file.group(&format!("assays/{requested}")).is_ok() {
+        return Ok(requested.to_string());
+    }
+    let available = list_assays(file);
+    if available.is_empty() {
+        return Err(ScxError::InvalidFormat(
+            "no assays found under /assays in this H5Seurat file".into(),
+        ));
+    }
+    let chosen = active_assay(file)
+        .filter(|a| available.iter().any(|x| x == a))
+        .or_else(|| {
+            PREFERRED_ASSAYS
+                .iter()
+                .find(|p| available.iter().any(|a| a == *p))
+                .map(|p| p.to_string())
+        })
+        .unwrap_or_else(|| available[0].clone());
+    tracing::warn!(
+        requested = %requested,
+        chosen = %chosen,
+        available = ?available,
+        "assay '{requested}' not found; using assay '{chosen}' — pass --assay to override"
+    );
+    Ok(chosen)
+}
+
+/// A helpful error for a missing layer: name the assay and list what's there.
+fn missing_layer_err(file: &File, assay: &str, layer: &str) -> ScxError {
+    let layers = file
+        .group(&format!("assays/{assay}"))
+        .and_then(|g| g.member_names())
+        .unwrap_or_default();
+    ScxError::InvalidFormat(format!(
+        "layer '{layer}' not found in assay '{assay}' (looked for assays/{assay}/{layer}); \
+         available layers: {layers:?} — pass --layer to choose one"
+    ))
+}
 
 fn read_indptr_from(file: &File, path: &str) -> Result<Vec<u64>> {
     let ds = file.dataset(path)?;
