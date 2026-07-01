@@ -3,6 +3,8 @@ pub mod bpcells;
 pub mod detect;
 pub mod dtype;
 pub mod error;
+mod factory;
+pub use factory::{open, OpenOptions};
 pub mod h5;
 pub mod h5_chunk;
 pub mod h5ad;

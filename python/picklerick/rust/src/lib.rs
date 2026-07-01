@@ -7,11 +7,9 @@ use numpy::IntoPyArray;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use scx_core::{
-    bpcells::BpcellsDatasetReader,
     detect,
     detect::Format,
     dtype::{DataType, TypedVec},
-    h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5seurat::H5SeuratWriter,
     ir::{ColumnData, MatrixChunk},
@@ -38,63 +36,34 @@ fn parse_dtype(dtype: &str) -> anyhow::Result<DataType> {
     }
 }
 
-fn detect_format(path: &Path) -> Option<Format> {
-    detect::sniff_dir(path)
-        .or_else(|| detect::sniff(path))
-        .or_else(|| match path.extension().and_then(|e| e.to_str()) {
-            Some("h5seurat") => Some(Format::H5Seurat),
-            Some("h5ad") => Some(Format::H5Ad),
-            _ => Some(Format::ScxH5),
-        })
-}
-
 fn open_reader(
     input_path: &Path,
     chunk_size: usize,
     assay: &str,
     layer: &str,
 ) -> anyhow::Result<Box<dyn DatasetReader>> {
-    let fmt = detect_format(input_path);
-    match fmt {
-        Some(Format::H5Seurat) => {
-            let reader = scx_core::h5seurat::open_h5seurat(
-                input_path,
-                chunk_size,
-                Some(assay),
-                Some(layer),
-            )?;
-            Ok(reader)
-        }
-        Some(Format::H5Ad) | None => {
-            let reader = H5AdReader::open(input_path, chunk_size)?;
-            Ok(Box::new(reader))
-        }
-        Some(Format::ScxH5) => {
-            let reader = ScxH5Reader::open(input_path, chunk_size)?;
-            Ok(Box::new(reader))
-        }
-        Some(Format::BPCells) => {
-            let reader = BpcellsDatasetReader::open(input_path, chunk_size)?;
-            Ok(Box::new(reader))
-        }
-        other => Err(anyhow::anyhow!("unsupported input format: {other:?}")),
-    }
+    let input = path_str(input_path)?;
+    let opts = scx_core::OpenOptions {
+        chunk_size,
+        assay: Some(assay.to_string()),
+        layer: Some(layer.to_string()),
+        ..scx_core::OpenOptions::new(chunk_size)
+    };
+    Ok(block_on(scx_core::open(input, &opts))?)
 }
 
 fn open_reader_metadata_only(input_path: &Path) -> anyhow::Result<Box<dyn DatasetReader>> {
-    let fmt = detect_format(input_path);
-    match fmt {
-        Some(Format::H5Seurat) => {
-            let reader = scx_core::h5seurat::open_h5seurat(input_path, 1, None, None)?;
-            Ok(reader)
-        }
-        Some(Format::H5Ad) | None => Ok(Box::new(H5AdReader::open(input_path, 1)?)),
-        Some(Format::ScxH5) => Ok(Box::new(ScxH5Reader::open(input_path, 1)?)),
-        Some(Format::BPCells) => Ok(Box::new(BpcellsDatasetReader::open_metadata_only(
-            input_path,
-        )?)),
-        other => Err(anyhow::anyhow!("unsupported input format: {other:?}")),
-    }
+    let input = path_str(input_path)?;
+    let opts = scx_core::OpenOptions {
+        metadata_only: true,
+        ..scx_core::OpenOptions::new(1)
+    };
+    Ok(block_on(scx_core::open(input, &opts))?)
+}
+
+fn path_str(path: &Path) -> anyhow::Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
 }
 
 async fn collect_inspect_info(
@@ -365,7 +334,7 @@ fn scx_write_h5seurat_native(
 #[pyfunction]
 fn scx_inspect_native(py: Python<'_>, input: &str, _chunk_size: usize) -> PyResult<PyObject> {
     let input_path = Path::new(input);
-    let fmt = detect_format(input_path);
+    let fmt = detect::detect(input_path);
     let format_name = match fmt {
         Some(Format::H5Seurat) => "H5Seurat",
         Some(Format::H5Ad) => "H5AD",

@@ -483,28 +483,7 @@ async fn run() -> anyhow::Result<()> {
             };
 
             let input_path = Path::new(&input);
-
-            // Network URLs (s3://, https://, …) bypass the local HDF5 sniffers
-            // and route straight to the object-store Parquet reader.
-            #[cfg(feature = "net")]
-            let is_net = scx_core::net::is_network_url(&input);
-            #[cfg(not(feature = "net"))]
-            let is_net = false;
-
-            // NPY snapshot directory takes priority; a local `.parquet` file
-            // falls through sniffing to the extension arm.
-            let fmt = if is_net {
-                Some(Format::Parquet)
-            } else {
-                detect::sniff_dir(input_path)
-                    .or_else(|| detect::sniff(input_path))
-                    .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
-                        Some("h5seurat") => Some(Format::H5Seurat),
-                        Some("h5ad") => Some(Format::H5Ad),
-                        Some("parquet") => Some(Format::Parquet),
-                        _ => Some(Format::ScxH5),
-                    })
-            };
+            let output_path = Path::new(&output);
 
             let source_sha256 = if let Some(hex) = source_sha256_arg {
                 if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -523,190 +502,37 @@ async fn run() -> anyhow::Result<()> {
                 None
             };
 
-            let output_path = Path::new(&output);
-
-            let (n_obs, n_vars) = match fmt {
-                Some(Format::TenxH5) => {
-                    tracing::info!(path = %input, "detected format: 10x HDF5 (Cell Ranger)");
-                    let mut reader = TenxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(
-                        &mut reader,
-                        output_path,
-                        out_dtype,
-                        &assay,
-                        &layer,
-                        &x_slot,
-                        &project,
-                        chunk_size,
-                        dgcmatrix,
-                        seuratdisk_compat,
-                        &input,
-                        source_url.as_deref(),
-                        source_sha256.clone(),
-                        compress,
-                    )
-                    .await?
-                }
-                Some(Format::PlainH5) => {
-                    anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot convert; use 'scx inspect' to explore its structure", input)
-                }
-                Some(Format::Parquet) => {
-                    #[cfg(feature = "net")]
-                    {
-                        tracing::info!(path = %input, "detected format: Parquet (object_store)");
-                        // Optional gene dictionary (Tahoe gene_metadata): a second
-                        // object-store location, loaded via the same transport.
-                        let gene_dict = match genes_arg.as_deref() {
-                            Some(loc) => {
-                                tracing::info!(genes = %loc, "loading gene dictionary");
-                                let (gstore, gpath) = scx_core::net::resolve_store(loc)?;
-                                Some(
-                                    scx_core::parquet::GeneDict::load(gstore, gpath, chunk_size)
-                                        .await?,
-                                )
-                            }
-                            None => None,
-                        };
-                        let (store, store_path) = scx_core::net::resolve_store(&input)?;
-                        // With --genes, n_vars/var come from the dictionary; else
-                        // n_vars is required for per-cell lists and derived for dense.
-                        let mut reader = scx_core::parquet::ParquetReader::open(
-                            store, store_path, n_vars_arg, gene_dict, chunk_size,
-                        )
-                        .await?;
-                        convert_with_reader(
-                            &mut reader,
-                            output_path,
-                            out_dtype,
-                            &assay,
-                            &layer,
-                            &x_slot,
-                            &project,
-                            chunk_size,
-                            dgcmatrix,
-                            seuratdisk_compat,
-                            &input,
-                            source_url.as_deref(),
-                            source_sha256.clone(),
-                            compress,
-                        )
-                        .await?
-                    }
-                    #[cfg(not(feature = "net"))]
-                    {
-                        let _ = (n_vars_arg, &genes_arg);
-                        anyhow::bail!(
-                            "Parquet/network input requires building with --features net"
-                        );
-                    }
-                }
-                Some(Format::NpyDir) => {
-                    tracing::info!(path = %input, "detected format: NPY snapshot directory");
-                    let mut reader = NpyIrReader::open(input_path, chunk_size)?;
-                    convert_with_reader(
-                        &mut reader,
-                        output_path,
-                        out_dtype,
-                        &assay,
-                        &layer,
-                        &x_slot,
-                        &project,
-                        chunk_size,
-                        dgcmatrix,
-                        seuratdisk_compat,
-                        &input,
-                        source_url.as_deref(),
-                        source_sha256.clone(),
-                        compress,
-                    )
-                    .await?
-                }
-                Some(Format::BPCells) => {
-                    tracing::info!(path = %input, "detected format: BPCells directory");
-                    let mut reader = BpcellsDatasetReader::open(input_path, chunk_size)?;
-                    convert_with_reader(
-                        &mut reader,
-                        output_path,
-                        out_dtype,
-                        &assay,
-                        &layer,
-                        &x_slot,
-                        &project,
-                        chunk_size,
-                        dgcmatrix,
-                        seuratdisk_compat,
-                        &input,
-                        source_url.as_deref(),
-                        source_sha256.clone(),
-                        compress,
-                    )
-                    .await?
-                }
-                Some(Format::H5Seurat) => {
-                    tracing::info!(path = %input, "detected format: H5Seurat");
-                    let mut reader =
-                        open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    convert_with_reader(
-                        &mut *reader,
-                        output_path,
-                        out_dtype,
-                        &assay,
-                        &layer,
-                        &x_slot,
-                        &project,
-                        chunk_size,
-                        dgcmatrix,
-                        seuratdisk_compat,
-                        &input,
-                        source_url.as_deref(),
-                        source_sha256.clone(),
-                        compress,
-                    )
-                    .await?
-                }
-                Some(Format::H5Ad) => {
-                    tracing::info!(path = %input, "detected format: H5AD");
-                    let mut reader = H5AdReader::open(input_path, chunk_size)?;
-                    convert_with_reader(
-                        &mut reader,
-                        output_path,
-                        out_dtype,
-                        &assay,
-                        &layer,
-                        &x_slot,
-                        &project,
-                        chunk_size,
-                        dgcmatrix,
-                        seuratdisk_compat,
-                        &input,
-                        source_url.as_deref(),
-                        source_sha256.clone(),
-                        compress,
-                    )
-                    .await?
-                }
-                Some(Format::ScxH5) | None => {
-                    tracing::info!(path = %input, "detected format: SCX H5 (internal)");
-                    let mut reader = ScxH5Reader::open(input_path, chunk_size)?;
-                    convert_with_reader(
-                        &mut reader,
-                        output_path,
-                        out_dtype,
-                        &assay,
-                        &layer,
-                        &x_slot,
-                        &project,
-                        chunk_size,
-                        dgcmatrix,
-                        seuratdisk_compat,
-                        &input,
-                        source_url.as_deref(),
-                        source_sha256.clone(),
-                        compress,
-                    )
-                    .await?
-                }
+            // Detect the format (or route a URL to Parquet) and open the reader
+            // in one call. --assay/--layer apply to H5Seurat, --n-vars/--genes to
+            // Parquet; options irrelevant to the detected format are ignored.
+            let opts = scx_core::OpenOptions {
+                chunk_size,
+                assay: Some(assay.clone()),
+                layer: Some(layer.clone()),
+                metadata_only: false,
+                n_vars: n_vars_arg,
+                genes: genes_arg.clone(),
             };
+            let mut reader = scx_core::open(&input, &opts)
+                .await
+                .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+            let (n_obs, n_vars) = convert_with_reader(
+                &mut *reader,
+                output_path,
+                out_dtype,
+                &assay,
+                &layer,
+                &x_slot,
+                &project,
+                chunk_size,
+                dgcmatrix,
+                seuratdisk_compat,
+                &input,
+                source_url.as_deref(),
+                source_sha256.clone(),
+                compress,
+            )
+            .await?;
 
             let output_sha256 = provenance::sha256_file(output_path)
                 .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?;
