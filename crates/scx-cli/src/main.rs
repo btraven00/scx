@@ -341,53 +341,15 @@ async fn run() -> anyhow::Result<()> {
             let schema_parsed: ValidationSchema = serde_yaml::from_str(&schema_src)
                 .map_err(|e| anyhow::anyhow!("invalid schema '{schema}': {e}"))?;
 
-            let input_path = Path::new(&input);
-            let fmt = detect::sniff_dir(input_path)
-                .or_else(|| detect::sniff(input_path))
-                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
-                    Some("h5seurat") => Some(Format::H5Seurat),
-                    Some("h5ad") => Some(Format::H5Ad),
-                    _ => Some(Format::ScxH5),
-                });
-
-            let report = match fmt {
-                Some(Format::H5Ad) => {
-                    let mut r = H5AdReader::open(input_path, 1000)
-                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
-                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
-                }
-                Some(Format::BPCells) => {
-                    let mut r = BpcellsDatasetReader::open_metadata_only(input_path)
-                        .map_err(|e| anyhow::anyhow!("cannot open BPCells dir '{input}': {e}"))?;
-                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
-                }
-                Some(Format::H5Seurat) => {
-                    let mut r = open_h5seurat(input_path, 1000, None, None)
-                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
-                    run_validation(&mut *r, &schema_parsed, &input, &schema).await?
-                }
-                Some(Format::ScxH5) | None => {
-                    let mut r = ScxH5Reader::open(input_path, 1000)
-                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
-                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
-                }
-                Some(Format::NpyDir) => {
-                    let mut r = NpyIrReader::open(input_path, 1000)
-                        .map_err(|e| anyhow::anyhow!("cannot open NPY dir '{input}': {e}"))?;
-                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
-                }
-                Some(Format::TenxH5) => {
-                    let mut r = TenxH5Reader::open(input_path, 1000)
-                        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
-                    run_validation(&mut r, &schema_parsed, &input, &schema).await?
-                }
-                Some(Format::PlainH5) => {
-                    anyhow::bail!("'{}' is an unrecognized HDF5 file — use 'scx inspect' to explore its structure", input)
-                }
-                Some(Format::Parquet) => {
-                    anyhow::bail!("validating Parquet input is not supported yet — use 'scx convert'")
-                }
+            let opts = scx_core::OpenOptions {
+                metadata_only: true,
+                ..scx_core::OpenOptions::new(1000)
             };
+            let mut reader = scx_core::open(&input, &opts)
+                .await
+                .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+            let report =
+                run_validation(&mut *reader, &schema_parsed, &input, &schema).await?;
 
             if json {
                 print_report_json(&report);
@@ -565,7 +527,6 @@ async fn run() -> anyhow::Result<()> {
             assay,
             layer,
         } => {
-            let input_path = Path::new(&input);
             let output_path = Path::new(&output_dir);
 
             let filter = match (only.as_deref(), exclude.as_deref()) {
@@ -580,58 +541,16 @@ async fn run() -> anyhow::Result<()> {
                 "streaming IR snapshot"
             );
 
-            let fmt = detect::sniff_dir(input_path)
-                .or_else(|| detect::sniff(input_path))
-                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
-                    Some("h5seurat") => Some(Format::H5Seurat),
-                    Some("h5ad") => Some(Format::H5Ad),
-                    _ => Some(Format::ScxH5),
-                });
-
-            let (n_obs, n_vars) = match fmt {
-                Some(Format::PlainH5) => {
-                    anyhow::bail!("'{}' is an unrecognized HDF5 file — cannot snapshot; use 'scx inspect' to explore its structure", input)
-                }
-                Some(Format::Parquet) => {
-                    anyhow::bail!("snapshotting Parquet input is not supported yet — use 'scx convert'")
-                }
-                Some(Format::TenxH5) => {
-                    let mut r = TenxH5Reader::open(input_path, chunk_size)?;
-                    let shape = r.shape();
-                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
-                    shape
-                }
-                Some(Format::NpyDir) => {
-                    let mut r = NpyIrReader::open(input_path, chunk_size)?;
-                    let shape = r.shape();
-                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
-                    shape
-                }
-                Some(Format::BPCells) => {
-                    let mut r = BpcellsDatasetReader::open(input_path, chunk_size)?;
-                    let shape = r.shape();
-                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
-                    shape
-                }
-                Some(Format::H5Seurat) => {
-                    let mut r = open_h5seurat(input_path, chunk_size, Some(&assay), Some(&layer))?;
-                    let shape = r.shape();
-                    NpyIrWriter::stream(output_path, &mut *r, &filter, chunk_size).await?;
-                    shape
-                }
-                Some(Format::H5Ad) => {
-                    let mut r = H5AdReader::open(input_path, chunk_size)?;
-                    let shape = r.shape();
-                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
-                    shape
-                }
-                Some(Format::ScxH5) | None => {
-                    let mut r = ScxH5Reader::open(input_path, chunk_size)?;
-                    let shape = r.shape();
-                    NpyIrWriter::stream(output_path, &mut r, &filter, chunk_size).await?;
-                    shape
-                }
+            let opts = scx_core::OpenOptions {
+                assay: Some(assay.clone()),
+                layer: Some(layer.clone()),
+                ..scx_core::OpenOptions::new(chunk_size)
             };
+            let mut reader = scx_core::open(&input, &opts)
+                .await
+                .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+            let (n_obs, n_vars) = reader.shape();
+            NpyIrWriter::stream(output_path, &mut *reader, &filter, chunk_size).await?;
 
             tracing::info!(
                 output = %output_dir,

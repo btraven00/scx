@@ -2,9 +2,6 @@ use std::path::{Path, PathBuf};
 
 use polars::prelude::*;
 use scx_core::{
-    detect::{sniff, sniff_dir, Format},
-    h5ad::H5AdReader,
-    h5seurat::open_h5seurat,
     ir::{ColumnData, ObsTable, VarTable},
     stream::DatasetReader,
 };
@@ -23,20 +20,12 @@ pub struct ExportArgs {
 }
 
 pub async fn run_export(args: ExportArgs) -> anyhow::Result<()> {
-    let input_path = Path::new(&args.input);
-    let fmt = sniff_dir(input_path)
-        .or_else(|| sniff(input_path))
-        .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
-            Some("h5seurat") => Some(Format::H5Seurat),
-            _ => Some(Format::H5Ad),
-        });
-
-    let mut reader: Box<dyn DatasetReader + Send> = match fmt {
-        Some(Format::H5Seurat) => {
-            open_h5seurat(input_path, 1, Some(&args.assay), Some(&args.layer))?
-        }
-        _ => Box::new(H5AdReader::open(input_path, 1)?),
+    let opts = scx_core::OpenOptions {
+        assay: Some(args.assay.clone()),
+        layer: Some(args.layer.clone()),
+        ..scx_core::OpenOptions::new(1)
     };
+    let mut reader = scx_core::open(&args.input, &opts).await?;
 
     let mut df = build_dataframe(&mut *reader, &args.slot).await?;
 
