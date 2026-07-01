@@ -433,7 +433,12 @@ fn write_dataframe(
 ) -> Result<()> {
     let grp = file.create_group(group_name)?;
     write_encoding_on_group(&grp, "dataframe", "0.2.0")?;
-    write_str_attr_on_group(&grp, "_index", "index")?;
+    // anndata's canonical name for an unnamed index. scx has no named-index
+    // concept, so always emit "_index": anndata resolves the index via this
+    // attr (so it round-trips), and hdf5r/rhdf5-based R readers that hardcode
+    // the literal `obs/_index` / `var/_index` path (e.g. omnibenchmark modules)
+    // only find it under this name. Writing "index" satisfies only the former.
+    write_str_attr_on_group(&grp, "_index", "_index")?;
 
     // column-order: array of strings listing the non-index columns in order
     let col_names: Vec<VarLenUnicode> = columns
@@ -447,7 +452,7 @@ fn write_dataframe(
     attr.write(&Array1::from_vec(col_names))?;
 
     // index dataset
-    let idx_ds = write_vlen_str_dataset(&grp, "index", index)?;
+    let idx_ds = write_vlen_str_dataset(&grp, "_index", index)?;
     write_encoding_on_ds(&idx_ds, "string-array", "0.2.0")?;
 
     // columns
