@@ -221,7 +221,11 @@ fn per_cell_lists_chunk(
 /// Dense float columns → CSR. Each batch row is a cell; the gene columns are
 /// read in order, and nonzero entries become CSR cells. Values are emitted as
 /// f32 (f64 columns are cast — full f64 preservation is a follow-up).
-fn dense_chunk(batch: &RecordBatch, gene_cols: &[String], row_offset: usize) -> Result<MatrixChunk> {
+fn dense_chunk(
+    batch: &RecordBatch,
+    gene_cols: &[String],
+    row_offset: usize,
+) -> Result<MatrixChunk> {
     let n_vars = gene_cols.len();
     // Downcast each gene column once per batch (not per row).
     let cols: Vec<DenseCol> = gene_cols

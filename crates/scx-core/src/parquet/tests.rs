@@ -68,8 +68,9 @@ fn fixture_bytes() -> Vec<u8> {
     }
     let genes: ArrayRef = Arc::new(genes_b.finish());
     let exprs: ArrayRef = Arc::new(expr_b.finish());
-    let barcodes: ArrayRef =
-        Arc::new(StringArray::from(vec!["cell_0", "cell_1", "cell_2", "cell_3"]));
+    let barcodes: ArrayRef = Arc::new(StringArray::from(vec![
+        "cell_0", "cell_1", "cell_2", "cell_3",
+    ]));
     let drugs: ArrayRef = Arc::new(StringArray::from(vec![
         "DMSO_TF", "DMSO_TF", "drugA", "drugB",
     ]));
@@ -203,8 +204,7 @@ fn dense_fixture_bytes() -> Vec<u8> {
     let g2: ArrayRef = Arc::new(Float32Array::from(vec![0.0, 0.0, 5.0]));
     let g3: ArrayRef = Arc::new(Float32Array::from(vec![3.0, 0.0, 0.0]));
 
-    let batch =
-        RecordBatch::try_new(schema.clone(), vec![cell_id, g0, g1, g2, g3]).expect("batch");
+    let batch = RecordBatch::try_new(schema.clone(), vec![cell_id, g0, g1, g2, g3]).expect("batch");
     let mut buf = Vec::new();
     let mut writer = ArrowWriter::try_new(&mut buf, schema, None).expect("writer");
     writer.write(&batch).expect("write");
@@ -323,7 +323,8 @@ fn gene_dict_bytes() -> Vec<u8> {
     let token_id: ArrayRef = Arc::new(Int64Array::from(vec![3i64, 7, 9]));
     let ensembl: ArrayRef = Arc::new(StringArray::from(vec!["ENSG_A", "ENSG_B", "ENSG_C"]));
     let symbol: ArrayRef = Arc::new(StringArray::from(vec!["GENEA", "GENEB", "GENEC"]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![token_id, ensembl, symbol]).expect("batch");
+    let batch =
+        RecordBatch::try_new(schema.clone(), vec![token_id, ensembl, symbol]).expect("batch");
     let mut buf = Vec::new();
     let mut writer = ArrowWriter::try_new(&mut buf, schema, None).expect("writer");
     writer.write(&batch).expect("write");
@@ -340,7 +341,9 @@ async fn gene_dict_load_builds_dense_map_and_var() {
         .await
         .expect("put");
 
-    let dict = super::GeneDict::load(store, path, 1024).await.expect("load");
+    let dict = super::GeneDict::load(store, path, 1024)
+        .await
+        .expect("load");
 
     assert_eq!(dict.n_vars(), 3);
     assert_eq!(dict.var.index, vec!["ENSG_A", "ENSG_B", "ENSG_C"]);

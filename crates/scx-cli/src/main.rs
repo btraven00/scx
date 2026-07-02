@@ -348,8 +348,7 @@ async fn run() -> anyhow::Result<()> {
             let mut reader = scx_core::open(&input, &opts)
                 .await
                 .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
-            let report =
-                run_validation(&mut *reader, &schema_parsed, &input, &schema).await?;
+            let report = run_validation(&mut *reader, &schema_parsed, &input, &schema).await?;
 
             if json {
                 print_report_json(&report);
@@ -414,7 +413,9 @@ async fn run() -> anyhow::Result<()> {
                     inspect_plain_h5(&nodes, &input);
                 }
                 Some(Format::Parquet) => {
-                    anyhow::bail!("inspecting Parquet input is not supported yet — use 'scx convert'")
+                    anyhow::bail!(
+                        "inspecting Parquet input is not supported yet — use 'scx convert'"
+                    )
                 }
             }
         }

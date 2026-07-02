@@ -80,9 +80,7 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
             Box::new(BpcellsDatasetReader::open_metadata_only(path)?)
         }
         Format::BPCells => Box::new(BpcellsDatasetReader::open(path, cs)?),
-        Format::H5Seurat => {
-            open_h5seurat(path, cs, opts.assay.as_deref(), opts.layer.as_deref())?
-        }
+        Format::H5Seurat => open_h5seurat(path, cs, opts.assay.as_deref(), opts.layer.as_deref())?,
         Format::Parquet => {
             #[cfg(feature = "net")]
             {
