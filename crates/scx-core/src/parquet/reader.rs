@@ -93,7 +93,11 @@ impl ParquetReader {
 
         let (n_vars, token_map, var) = match &gene_dict {
             // Dictionary present: it owns the gene axis.
-            Some(dict) => (dict.n_vars(), Some(dict.token_to_col.clone()), dict.var.clone()),
+            Some(dict) => (
+                dict.n_vars(),
+                Some(dict.token_to_col.clone()),
+                dict.var.clone(),
+            ),
             None => {
                 let n_vars = match layout.intrinsic_n_vars() {
                     Some(derived) => {
@@ -344,7 +348,11 @@ impl ColumnAcc {
             ColumnData::Int(out) => {
                 if let Some(arr) = any.downcast_ref::<Int64Array>() {
                     for i in 0..arr.len() {
-                        out.push(if arr.is_null(i) { 0 } else { arr.value(i) as i32 });
+                        out.push(if arr.is_null(i) {
+                            0
+                        } else {
+                            arr.value(i) as i32
+                        });
                     }
                 } else if let Some(arr) = any.downcast_ref::<Int32Array>() {
                     for i in 0..arr.len() {

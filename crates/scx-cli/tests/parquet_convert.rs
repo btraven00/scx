@@ -13,9 +13,7 @@
 use std::process::Command;
 use std::sync::Arc;
 
-use arrow::array::{
-    ArrayRef, Float32Builder, Int64Array, Int64Builder, ListBuilder, StringArray,
-};
+use arrow::array::{ArrayRef, Float32Builder, Int64Array, Int64Builder, ListBuilder, StringArray};
 use arrow::datatypes::{DataType as ArrowType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -67,8 +65,9 @@ fn write_fixture(path: &std::path::Path) {
     }
     let genes: ArrayRef = Arc::new(genes_b.finish());
     let exprs: ArrayRef = Arc::new(expr_b.finish());
-    let barcodes: ArrayRef =
-        Arc::new(StringArray::from(vec!["cell_0", "cell_1", "cell_2", "cell_3"]));
+    let barcodes: ArrayRef = Arc::new(StringArray::from(vec![
+        "cell_0", "cell_1", "cell_2", "cell_3",
+    ]));
     let drugs: ArrayRef = Arc::new(StringArray::from(vec![
         "DMSO_TF", "DMSO_TF", "drugA", "drugB",
     ]));
@@ -227,10 +226,8 @@ fn convert_with_gene_remap() {
     let var = futures::executor::block_on(reader.var()).expect("var");
     assert_eq!(var.index, vec!["ENSG_A", "ENSG_B", "ENSG_C"]);
     // gene_symbol carried through as a var column.
-    assert!(var
-        .columns
-        .iter()
-        .any(|c| c.name == "gene_symbol" && matches!(&c.data, ColumnData::String(v) if v == &vec!["GENEA","GENEB","GENEC"])));
+    assert!(var.columns.iter().any(|c| c.name == "gene_symbol"
+        && matches!(&c.data, ColumnData::String(v) if v == &vec!["GENEA","GENEB","GENEC"])));
 
     // The matrix is correctly remapped (token→column) and the marker is gone.
     let expected = [[5.0f64, 0.0, 2.0], [0.0, 4.0, 0.0]];

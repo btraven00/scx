@@ -115,7 +115,11 @@ impl GeneDict {
     }
 }
 
-fn append_i64(batch: &arrow::record_batch::RecordBatch, name: &str, out: &mut Vec<i64>) -> Result<()> {
+fn append_i64(
+    batch: &arrow::record_batch::RecordBatch,
+    name: &str,
+    out: &mut Vec<i64>,
+) -> Result<()> {
     let col = batch
         .column_by_name(name)
         .ok_or_else(|| ScxError::MissingField(name.to_string()))?;

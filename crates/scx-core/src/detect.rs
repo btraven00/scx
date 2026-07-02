@@ -56,14 +56,14 @@ impl Format {
 /// used to inline; use it — or the higher-level [`crate::open`] factory — rather
 /// than re-deriving it.
 pub fn detect(path: &Path) -> Option<Format> {
-    sniff_dir(path)
-        .or_else(|| sniff(path))
-        .or_else(|| match path.extension().and_then(|e| e.to_str()) {
+    sniff_dir(path).or_else(|| sniff(path)).or_else(|| {
+        match path.extension().and_then(|e| e.to_str()) {
             Some("h5seurat") => Some(Format::H5Seurat),
             Some("h5ad") => Some(Format::H5Ad),
             Some("parquet") => Some(Format::Parquet),
             _ => Some(Format::ScxH5),
-        })
+        }
+    })
 }
 
 /// Sniff the format of a directory.
