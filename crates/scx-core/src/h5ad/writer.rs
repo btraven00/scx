@@ -440,6 +440,27 @@ fn write_dataframe(
     // only find it under this name. Writing "index" satisfies only the former.
     write_str_attr_on_group(&grp, "_index", "_index")?;
 
+    // A source column literally named "_index" collides with the reserved index
+    // dataset we just declared (anndata stores the frame index at
+    // `<obs|var>/_index`). Writing it as a column would create `_index` twice —
+    // HDF5 fails the second create with a cryptic "name already exists". It's
+    // invariably a stale round-trip artifact (an AnnData index that became a
+    // Seurat meta.data column), so drop it rather than emit an invalid file.
+    let columns: Vec<&Column> = columns
+        .iter()
+        .filter(|c| {
+            if c.name == "_index" {
+                tracing::warn!(
+                    group = group_name,
+                    "dropping column '_index': collides with the reserved frame index"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
     // column-order: array of strings listing the non-index columns in order
     let col_names: Vec<VarLenUnicode> = columns
         .iter()
