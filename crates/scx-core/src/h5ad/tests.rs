@@ -628,6 +628,72 @@ fn diag_csr(n_obs: usize, n_vars: usize) -> (Vec<u64>, Vec<u32>, Vec<f32>) {
     (indptr, indices, data)
 }
 
+/// Regression: a source obs/var column literally named "_index" collides with
+/// the reserved frame-index dataset (`<obs|var>/_index`). Before the fix the
+/// writer created `_index` twice and HDF5 aborted the second create with "name
+/// already exists" — surfaced by scx as the opaque "unknown library error".
+/// Repro in the wild: Azimuth `pbmc_multimodal.h5seurat`, whose `meta.data`
+/// carries an `_index` column left over from a prior AnnData round-trip.
+/// The writer must drop the colliding column and produce a valid file.
+#[tokio::test]
+async fn dataframe_column_named_index_is_dropped() {
+    let (n_obs, n_vars) = (4usize, 3usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let obs = ObsTable {
+        index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
+        columns: vec![
+            // Offending column: same name as the reserved frame index.
+            Column {
+                name: "_index".into(),
+                data: ColumnData::String((0..n_obs).map(|i| format!("cell{i}")).collect()),
+            },
+            Column {
+                name: "celltype".into(),
+                data: ColumnData::String((0..n_obs).map(|i| format!("t{}", i % 2)).collect()),
+            },
+        ],
+    };
+    let var = VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    };
+    let (indptr, indices, data) = diag_csr(n_obs, n_vars);
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
+    };
+
+    let mut w = H5AdWriter::create(&path, n_obs, n_vars, DataType::F32).unwrap();
+    // Previously errored here: HDF5 "name already exists" on the second `_index`.
+    w.write_obs(&obs).await.unwrap();
+    w.write_var(&var).await.unwrap();
+    w.write_x_chunk(&chunk).await.unwrap();
+    w.finalize().await.unwrap();
+    drop(w);
+
+    // The reserved-name column is dropped; the real index and siblings survive.
+    let mut rt = H5AdReader::open(&path, 500).unwrap();
+    let rt_obs = rt.obs().await.unwrap();
+    assert_eq!(rt_obs.index, obs.index, "frame index must be preserved");
+    let names: Vec<&str> = rt_obs.columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        !names.contains(&"_index"),
+        "reserved '_index' column must be dropped, got {names:?}"
+    );
+    assert!(
+        names.contains(&"celltype"),
+        "non-colliding columns must survive, got {names:?}"
+    );
+}
+
 /// Write → read every slot type with a synthetic dataset, asserting structure
 /// survives. Exercises the writer's dataframe/column/obsm/uns/layer paths and
 /// the matching reader helpers without depending on a golden fixture.
