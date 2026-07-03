@@ -45,6 +45,20 @@ Distribution and broader format support are the open strategic threads:
 3. **Format benchmarking** — characterize zero-copy vs decode trade-offs across
    access patterns and dataset scales; tooling (`open_stream`, `.scxd`) is ready.
 
+### Backlog — streaming completeness
+
+- **Stream `obsm` (embeddings) conversion.** `obsm` is the last slot the
+  converter materialises in full — `reader.obsm()` loads every reduction into
+  memory before writing, whereas `X`, `layers`, and `obsp` already stream in
+  `--chunk-size` batches. On the Azimuth pbmc reference the embeddings are the
+  ~250 MB peak-RAM floor that `--chunk-size` cannot cross (measured with denet:
+  407 MB at chunk 250 vs 630 MB at 5000 vs 3.0 GB at 50000); on a 10M-cell atlas
+  the embeddings alone are multi-GB, so this becomes fit-in-RAM-or-not. Add an
+  `obsm_stream` (dense 2-D, row-batched, transpose-aware for the h5seurat
+  `(k, n_obs)` layout) plus a resizable dense writer, mirroring the existing
+  `obsp_stream` path. Until then, `convert --exclude obsm` skips the read
+  entirely when the embeddings aren't needed (see the slot-filter feature).
+
 ## 0.0.1 (done)
 
 - `H5SeuratReader` — reads SeuratDisk `.h5seurat` files (Seurat v3/v4)

@@ -15,7 +15,7 @@ use scx_core::{
     h5ad::{H5AdReader, H5AdWriter},
     h5bpcells::BpcellsH5Writer,
     h5seurat::{open_h5seurat, H5SeuratWriter},
-    ir::ColumnData,
+    ir::{ColumnData, Embeddings, UnsTable, Varm},
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     provenance::{self, OutputInfo, ProvenanceRecord, SourceInfo},
     stream::{DatasetReader, DatasetWriter},
@@ -110,6 +110,20 @@ enum Cli {
         /// Ignored for `.h5seurat` output.
         #[arg(long, num_args = 0..=1, default_missing_value = "6")]
         compress: Option<u8>,
+
+        /// Write only these comma-separated auxiliary slots (e.g.
+        /// `--only obsp` or `--only obsm:X_pca,layers`). Applies to
+        /// obsm/varm/uns/layers/obsp; X/obs/var are always written.
+        /// Excluding obsm also skips reading it (lowers peak RAM).
+        /// Mutually exclusive with --exclude.
+        #[arg(long, conflicts_with = "exclude")]
+        only: Option<String>,
+
+        /// Drop these comma-separated auxiliary slots (e.g.
+        /// `--exclude obsp,obsm,uns`). Applies to obsm/varm/uns/layers/obsp;
+        /// X/obs/var are always written. Mutually exclusive with --only.
+        #[arg(long, conflicts_with = "only")]
+        exclude: Option<String>,
     },
 
     /// Inspect a single-cell file
@@ -436,7 +450,15 @@ async fn run() -> anyhow::Result<()> {
             source_url,
             source_sha256: source_sha256_arg,
             compress,
+            only,
+            exclude,
         } => {
+            let filter = match (only.as_deref(), exclude.as_deref()) {
+                (Some(o), _) => SlotFilter::from_only(o),
+                (_, Some(e)) => SlotFilter::from_exclude(e),
+                _ => SlotFilter::all(),
+            };
+
             let out_dtype = match dtype.as_str() {
                 "f32" => DataType::F32,
                 "f64" => DataType::F64,
@@ -494,6 +516,7 @@ async fn run() -> anyhow::Result<()> {
                 source_url.as_deref(),
                 source_sha256.clone(),
                 compress,
+                &filter,
             )
             .await?;
 
@@ -621,6 +644,7 @@ async fn convert_with_reader(
     source_url: Option<&str>,
     source_sha256: Option<String>,
     compress: Option<u8>,
+    filter: &SlotFilter,
 ) -> anyhow::Result<(usize, usize)> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
@@ -631,25 +655,48 @@ async fn convert_with_reader(
         tracing::warn!("--compress only applies to .h5ad output; ignored for .h5seurat");
     }
 
+    // X, obs and var are always written (the matrix plus the mandatory frame
+    // indices); the slot filter only governs the auxiliary slots. Excluding a
+    // whole slot skips its read too, so `--exclude obsm` avoids materialising
+    // the (potentially large) embeddings.
+    let write_uns = filter.includes("uns");
     let obs = reader.obs().await?;
     let var = reader.var().await?;
-    let obsm = reader.obsm().await?;
-    let mut uns = reader.uns().await?;
-    let varm = reader.varm().await?;
+    let mut obsm = if filter.includes("obsm") {
+        reader.obsm().await?
+    } else {
+        Embeddings::default()
+    };
+    obsm.map
+        .retain(|k, _| filter.includes(&format!("obsm:{k}")));
+    let mut varm = if filter.includes("varm") {
+        reader.varm().await?
+    } else {
+        Varm::default()
+    };
+    varm.map
+        .retain(|k, _| filter.includes(&format!("varm:{k}")));
+    let mut uns = if write_uns {
+        reader.uns().await?
+    } else {
+        UnsTable::default()
+    };
 
-    let prov = scx_core::provenance::det_record(
-        source_path,
-        source_url,
-        source_sha256.as_deref(),
-        n_obs,
-        n_vars,
-    );
-    match uns.raw.as_object_mut() {
-        Some(obj) => {
-            obj.insert("scx_provenance".to_string(), prov);
-        }
-        None => {
-            uns.raw = serde_json::json!({ "scx_provenance": prov });
+    if write_uns {
+        let prov = scx_core::provenance::det_record(
+            source_path,
+            source_url,
+            source_sha256.as_deref(),
+            n_obs,
+            n_vars,
+        );
+        match uns.raw.as_object_mut() {
+            Some(obj) => {
+                obj.insert("scx_provenance".to_string(), prov);
+            }
+            None => {
+                uns.raw = serde_json::json!({ "scx_provenance": prov });
+            }
         }
     }
 
@@ -731,12 +778,23 @@ async fn convert_with_reader(
 
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
-    writer.write_obsm(&obsm).await?;
-    writer.write_uns(&uns).await?;
-    writer.write_varm(&varm).await?;
+    if !obsm.map.is_empty() {
+        writer.write_obsm(&obsm).await?;
+    }
+    if write_uns {
+        writer.write_uns(&uns).await?;
+    }
+    if !varm.map.is_empty() {
+        writer.write_varm(&varm).await?;
+    }
 
-    // Stream each layer — skip any whose name would collide with the X slot.
+    // Stream each layer — skip any whose name would collide with the X slot,
+    // or that the slot filter drops.
     for meta in &layer_metas {
+        if !filter.includes(&format!("layers:{}", meta.name)) {
+            tracing::info!(name = %meta.name, "skipping layer (slot filter)");
+            continue;
+        }
         if is_h5seurat && meta.name == effective_x_slot {
             tracing::warn!(
                 name = %meta.name,
@@ -756,6 +814,10 @@ async fn convert_with_reader(
 
     // Stream each obsp matrix.
     for meta in &obsp_metas {
+        if !filter.includes(&format!("obsp:{}", meta.name)) {
+            tracing::info!(name = %meta.name, "skipping obsp (slot filter)");
+            continue;
+        }
         tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming obsp");
         writer.begin_sparse("obsp", &meta.name, meta).await?;
         let mut stream = reader.obsp_stream(meta, chunk_size);
