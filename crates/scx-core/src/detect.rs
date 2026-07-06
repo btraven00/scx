@@ -30,6 +30,8 @@ pub enum Format {
     TenxH5,
     /// Parquet (one cell per row, sparse list columns) — local or object-store.
     Parquet,
+    /// MatrixMarket sparse matrix: a `.mtx[.gz]` file or a 10x MEX directory.
+    Mtx,
     /// Valid HDF5 file with no recognized single-cell format fingerprint.
     PlainH5,
 }
@@ -44,6 +46,7 @@ impl Format {
             Format::BPCells => "BPCells",
             Format::TenxH5 => "10x HDF5",
             Format::Parquet => "Parquet",
+            Format::Mtx => "MatrixMarket",
             Format::PlainH5 => "HDF5 (unrecognized)",
         }
     }
@@ -56,14 +59,42 @@ impl Format {
 /// used to inline; use it — or the higher-level [`crate::open`] factory — rather
 /// than re-deriving it.
 pub fn detect(path: &Path) -> Option<Format> {
-    sniff_dir(path).or_else(|| sniff(path)).or_else(|| {
-        match path.extension().and_then(|e| e.to_str()) {
+    sniff_dir(path)
+        .or_else(|| sniff_mtx(path))
+        .or_else(|| sniff(path))
+        .or_else(|| match path.extension().and_then(|e| e.to_str()) {
             Some("h5seurat") => Some(Format::H5Seurat),
             Some("h5ad") => Some(Format::H5Ad),
             Some("parquet") => Some(Format::Parquet),
             _ => Some(Format::ScxH5),
-        }
-    })
+        })
+}
+
+/// Sniff a bare `.mtx[.gz]` file by its MatrixMarket banner. Directories are
+/// handled by [`sniff_dir`]; this covers a plain file path.
+pub fn sniff_mtx(path: &Path) -> Option<Format> {
+    use std::io::Read;
+
+    if !path.is_file() {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if !(name.ends_with(".mtx") || name.ends_with(".mtx.gz")) {
+        return None;
+    }
+    // Confirm the banner (cheap: first ~16 bytes, gz-transparent).
+    let file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 16];
+    let n = if name.ends_with(".gz") {
+        flate2::read::MultiGzDecoder::new(file)
+            .read(&mut head)
+            .ok()?
+    } else {
+        (&file).read(&mut head).ok()?
+    };
+    head[..n]
+        .starts_with(b"%%MatrixMarket")
+        .then_some(Format::Mtx)
 }
 
 /// Sniff the format of a directory.
@@ -79,6 +110,9 @@ pub fn sniff_dir(path: &Path) -> Option<Format> {
     }
     if path.join("version").exists() && path.join("storage_order").exists() {
         return Some(Format::BPCells);
+    }
+    if path.join("matrix.mtx").exists() || path.join("matrix.mtx.gz").exists() {
+        return Some(Format::Mtx);
     }
     None
 }
