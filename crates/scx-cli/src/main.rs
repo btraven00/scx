@@ -381,13 +381,7 @@ async fn run() -> anyhow::Result<()> {
             layer,
         } => {
             let input_path = Path::new(&input);
-            let fmt = detect::sniff_dir(input_path)
-                .or_else(|| detect::sniff(input_path))
-                .or_else(|| match input_path.extension().and_then(|e| e.to_str()) {
-                    Some("h5seurat") => Some(Format::H5Seurat),
-                    Some("h5ad") => Some(Format::H5Ad),
-                    _ => Some(Format::ScxH5),
-                });
+            let fmt = detect::detect(input_path);
 
             let chunk = 1000;
             match fmt {
@@ -421,6 +415,10 @@ async fn run() -> anyhow::Result<()> {
                     inspect(&mut r, &input, "10x HDF5").await?;
                     let summary = read_tenx_summary(input_path)?;
                     print_tenx_summary(&summary);
+                }
+                Some(Format::Mtx) => {
+                    let mut r = scx_core::mtx::MtxReader::open(input_path, chunk)?;
+                    inspect(&mut r, &input, "MatrixMarket").await?;
                 }
                 Some(Format::PlainH5) => {
                     let nodes = walk_h5(input_path, 2)?;
