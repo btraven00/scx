@@ -452,6 +452,87 @@ async fn test_dense_layer_stream_no_panic() {
     );
 }
 
+/// Write a CSR `layers/<name>` group (all-ones matrix, one nnz per cell) into
+/// an already-open file's `/layers` group.
+fn write_csr_layer(layers: &hdf5::Group, name: &str, n_obs: usize, n_vars: usize) {
+    let g = layers.create_group(name).unwrap();
+    g.new_attr::<VarLenUnicode>()
+        .create("encoding-type")
+        .unwrap()
+        .write_scalar(&VarLenUnicode::from_str("csr_matrix").unwrap())
+        .unwrap();
+    let shape = ndarray::array![n_obs as i64, n_vars as i64];
+    g.new_attr_builder()
+        .with_data(&shape)
+        .create("shape")
+        .unwrap();
+    // One entry per row at column 0.
+    let indptr: Array1<i32> = (0..=n_obs as i32).collect();
+    g.new_dataset_builder()
+        .with_data(&indptr)
+        .create("indptr")
+        .unwrap();
+    let indices: Array1<i32> = Array1::zeros(n_obs);
+    g.new_dataset_builder()
+        .with_data(&indices)
+        .create("indices")
+        .unwrap();
+    let data: Array1<f32> = Array1::from_elem(n_obs, 1.0);
+    g.new_dataset_builder()
+        .with_data(&data)
+        .create("data")
+        .unwrap();
+}
+
+/// A file with no `/X` (written as `adata.X = None`) but a `layers/counts`
+/// matrix must open by auto-falling-back to the sole layer.
+#[tokio::test]
+async fn missing_x_falls_back_to_sole_layer() {
+    let (n_obs, n_vars) = (5usize, 4usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let f = File::create(&path).unwrap();
+        let layers = f.create_group("layers").unwrap();
+        write_csr_layer(&layers, "counts", n_obs, n_vars);
+    }
+
+    let mut reader = H5AdReader::open(&path, 2).unwrap();
+    assert_eq!(reader.x_source(), "layers/counts");
+    assert_eq!(reader.shape(), (n_obs, n_vars));
+
+    let mut total_nnz = 0usize;
+    let mut stream = reader.x_stream();
+    while let Some(chunk) = stream.next().await {
+        total_nnz += chunk.unwrap().data.indptr.last().copied().unwrap_or(0) as usize;
+    }
+    assert_eq!(total_nnz, n_obs, "one nnz per row");
+}
+
+/// With no `/X` and several layers, auto-fallback errors unless one is named
+/// `counts`/`X`; an explicit `open_layer` always works.
+#[tokio::test]
+async fn missing_x_multiple_layers_needs_explicit_choice() {
+    let (n_obs, n_vars) = (3usize, 2usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let f = File::create(&path).unwrap();
+        let layers = f.create_group("layers").unwrap();
+        write_csr_layer(&layers, "spliced", n_obs, n_vars);
+        write_csr_layer(&layers, "unspliced", n_obs, n_vars);
+    }
+
+    // Ambiguous — no counts/X layer to prefer.
+    assert!(H5AdReader::open(&path, 2).is_err());
+    // Explicit choice resolves it.
+    let r = H5AdReader::open_layer(&path, 2, Some("spliced")).unwrap();
+    assert_eq!(r.x_source(), "layers/spliced");
+    assert_eq!(r.shape(), (n_obs, n_vars));
+    // Unknown layer is a clear error.
+    assert!(H5AdReader::open_layer(&path, 2, Some("nope")).is_err());
+}
+
 // --- Norman perturbation tests ---
 //
 // Run against the committed 500×200 subset by default.
