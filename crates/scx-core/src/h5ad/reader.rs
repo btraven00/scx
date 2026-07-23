@@ -34,10 +34,25 @@ pub struct H5AdReader {
     indptr: Option<Vec<u64>>,
     chunk_size: usize,
     dtype: DataType,
+    /// Base HDF5 path the matrix is read from: `"X"`, or `"layers/<name>"` when
+    /// X is absent (or a layer was requested explicitly).
+    x_path: String,
 }
 
 impl H5AdReader {
+    /// Open with the default matrix source: `/X`, falling back to a layer when
+    /// `/X` is absent (common for files written with `adata.X = None`).
     pub fn open<P: AsRef<Path>>(path: P, chunk_size: usize) -> Result<Self> {
+        Self::open_layer(path, chunk_size, None)
+    }
+
+    /// Open reading the matrix from `layers/<layer>` instead of `/X`. Passing
+    /// `None` uses `/X`, auto-falling-back to a layer when `/X` is missing.
+    pub fn open_layer<P: AsRef<Path>>(
+        path: P,
+        chunk_size: usize,
+        layer: Option<&str>,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
 
@@ -52,14 +67,16 @@ impl H5AdReader {
             }
         }
 
-        // X can be stored as a dense 2-D dataset or a sparse CSR group.
-        let x_is_dense = file.dataset("X").is_ok() && file.group("X").is_err();
+        let base = resolve_matrix_path(&file, layer)?;
 
-        let (n_obs, n_vars, indptr, dtype) = if x_is_dense {
-            let ds = file.dataset("X")?;
+        // The matrix can be stored as a dense 2-D dataset or a sparse CSR group.
+        let is_dense = file.dataset(&base).is_ok() && file.group(&base).is_err();
+
+        let (n_obs, n_vars, indptr, dtype) = if is_dense {
+            let ds = file.dataset(&base)?;
             let sh = ds.shape();
             if sh.len() != 2 {
-                return Err(ScxError::InvalidFormat("dense X must be 2-D".into()));
+                return Err(ScxError::InvalidFormat(format!("dense {base} must be 2-D")));
             }
             let dtype = match ds.dtype()?.to_descriptor()? {
                 TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
@@ -69,23 +86,20 @@ impl H5AdReader {
             };
             (sh[0], sh[1], None, dtype)
         } else {
-            let x_grp = file.group("X").map_err(|_| {
-                ScxError::InvalidFormat("missing /X — not a valid H5AD file".into())
-            })?;
+            let grp = file.group(&base)?;
 
-            if let Ok(enc) = read_str_attr_on_group(&x_grp, "encoding-type") {
+            if let Ok(enc) = read_str_attr_on_group(&grp, "encoding-type") {
                 if enc == "csc_matrix" {
-                    return Err(ScxError::InvalidFormat(
-                        "X is stored as CSC. Convert to CSR first: \
+                    return Err(ScxError::InvalidFormat(format!(
+                        "{base} is stored as CSC. Convert to CSR first: \
                          adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
-                            .into(),
-                    ));
+                    )));
                 }
             }
 
-            let shape_attr = x_grp
+            let shape_attr = grp
                 .attr("shape")
-                .map_err(|_| ScxError::InvalidFormat("missing X/shape attribute".into()))?;
+                .map_err(|_| ScxError::InvalidFormat(format!("missing {base}/shape attribute")))?;
             let (n_obs, n_vars) = match shape_attr.dtype()?.to_descriptor()? {
                 TypeDescriptor::Integer(IntSize::U8) => {
                     let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
@@ -97,15 +111,15 @@ impl H5AdReader {
                 }
             };
 
-            let indptr = ad_read_indptr(&file, "X/indptr")?;
+            let indptr = ad_read_indptr(&file, &format!("{base}/indptr"))?;
             if indptr.len() != n_obs + 1 {
                 return Err(ScxError::InvalidFormat(format!(
-                    "X/indptr length {} != n_obs+1 {}",
+                    "{base}/indptr length {} != n_obs+1 {}",
                     indptr.len(),
                     n_obs + 1
                 )));
             }
-            let dtype = ad_detect_dtype(&file, "X/data")?;
+            let dtype = ad_detect_dtype(&file, &format!("{base}/data"))?;
             (n_obs, n_vars, Some(indptr), dtype)
         };
 
@@ -116,7 +130,57 @@ impl H5AdReader {
             indptr,
             chunk_size,
             dtype,
+            x_path: base,
         })
+    }
+
+    /// The HDF5 path the matrix is read from — `"X"` or `"layers/<name>"`.
+    pub fn x_source(&self) -> &str {
+        &self.x_path
+    }
+}
+
+/// Decide which HDF5 path holds the count matrix.
+///
+/// - `Some(name)` → `layers/<name>` (errors if that layer is absent).
+/// - `None` with `/X` present → `"X"`.
+/// - `None` with `/X` absent → fall back to a layer: the sole layer if there's
+///   exactly one, else one named `counts`/`X`, else an error listing choices.
+fn resolve_matrix_path(file: &File, layer: Option<&str>) -> Result<String> {
+    if let Some(name) = layer {
+        let p = format!("layers/{name}");
+        if file.group(&p).is_err() && file.dataset(&p).is_err() {
+            return Err(ScxError::InvalidFormat(format!(
+                "layer '{name}' not found (no /layers/{name})"
+            )));
+        }
+        return Ok(p);
+    }
+
+    if file.dataset("X").is_ok() || file.group("X").is_ok() {
+        return Ok("X".to_string());
+    }
+
+    // X absent — try to promote a layer.
+    let layers = file
+        .group("layers")
+        .map_err(|_| ScxError::InvalidFormat("missing /X and no /layers to fall back to".into()))?;
+    let names = layers.member_names().unwrap_or_default();
+    match names.as_slice() {
+        [] => Err(ScxError::InvalidFormat(
+            "missing /X and /layers is empty".into(),
+        )),
+        [only] => Ok(format!("layers/{only}")),
+        many => {
+            let pick = many.iter().find(|n| *n == "counts" || *n == "X");
+            match pick {
+                Some(n) => Ok(format!("layers/{n}")),
+                None => Err(ScxError::InvalidFormat(format!(
+                    "missing /X; multiple layers present ({}). Pick one with --layer <name>",
+                    many.join(", ")
+                ))),
+            }
+        }
     }
 }
 
@@ -166,13 +230,14 @@ pub(super) fn ad_detect_dtype(file: &File, path: &str) -> Result<DataType> {
 /// Read a row slice of a dense 2-D dataset and convert to a sparse CSR chunk.
 fn ad_read_dense_chunk(
     path: &Path,
+    base: &str,
     row_start: usize,
     row_end: usize,
     n_vars: usize,
     dtype: DataType,
 ) -> Result<MatrixChunk> {
     let file = File::open(path)?;
-    ad_read_dense_chunk_with_dtype(&file, "X", row_start, row_end, n_vars, dtype)
+    ad_read_dense_chunk_with_dtype(&file, base, row_start, row_end, n_vars, dtype)
 }
 
 /// Read a row slice of an arbitrary dense 2-D dataset path and convert to a sparse CSR chunk.
@@ -266,14 +331,14 @@ fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
 /// 4-byte, deflate-only-chunked datasets (the common case); otherwise the
 /// normal HDF5 read. Column indices are non-negative, so a 4-byte little-endian
 /// reinterpret is correct whether stored signed or unsigned.
-fn read_x_indices(file: &File, a: usize, b: usize) -> Result<Vec<u32>> {
-    let ds = file.dataset("X/indices")?;
+fn read_x_indices(file: &File, base: &str, a: usize, b: usize) -> Result<Vec<u32>> {
+    let ds = file.dataset(&format!("{base}/indices"))?;
     let stored_bytes = ds.dtype()?.size();
     match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {}
         other => {
             return Err(ScxError::InvalidFormat(format!(
-                "unexpected X/indices dtype {:?}",
+                "unexpected {base}/indices dtype {:?}",
                 other
             )))
         }
@@ -298,8 +363,8 @@ fn read_x_indices(file: &File, a: usize, b: usize) -> Result<Vec<u32>> {
 /// path when the stored element layout matches the requested dtype and the
 /// dataset is deflate-only-chunked; otherwise the normal HDF5 read (which also
 /// handles any stored→requested type conversion).
-fn read_x_data(file: &File, a: usize, b: usize, dtype: DataType) -> Result<TypedVec> {
-    let ds = file.dataset("X/data")?;
+fn read_x_data(file: &File, base: &str, a: usize, b: usize, dtype: DataType) -> Result<TypedVec> {
+    let ds = file.dataset(&format!("{base}/data"))?;
     let (want_bytes, want_float) = match dtype {
         DataType::F32 => (4usize, true),
         DataType::F64 => (8, true),
@@ -349,6 +414,7 @@ fn bytes_to_typed(b: &[u8], dtype: DataType) -> TypedVec {
 
 fn ad_read_chunk(
     path: &Path,
+    base: &str,
     indptr: &[u64],
     row_start: usize,
     row_end: usize,
@@ -362,13 +428,13 @@ fn ad_read_chunk(
     let nnz = nnz_end - nnz_start;
 
     let indices: Vec<u32> = if nnz > 0 {
-        read_x_indices(&file, nnz_start, nnz_end)?
+        read_x_indices(&file, base, nnz_start, nnz_end)?
     } else {
         Vec::new()
     };
 
     let data: TypedVec = if nnz > 0 {
-        read_x_data(&file, nnz_start, nnz_end, dtype)?
+        read_x_data(&file, base, nnz_start, nnz_end, dtype)?
     } else {
         TypedVec::F32(Vec::new())
     };
@@ -1017,6 +1083,7 @@ impl DatasetReader for H5AdReader {
 
     fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
         let path = self.path.clone();
+        let base = self.x_path.clone();
         let n_obs = self.n_obs;
         let n_vars = self.n_vars;
         let chunk_size = self.chunk_size;
@@ -1027,6 +1094,7 @@ impl DatasetReader for H5AdReader {
                 let indptr = indptr.clone();
                 Box::pin(stream::unfold(0usize, move |row_start| {
                     let path = path.clone();
+                    let base = base.clone();
                     let indptr = indptr.clone();
                     async move {
                         if row_start >= n_obs {
@@ -1034,7 +1102,7 @@ impl DatasetReader for H5AdReader {
                         }
                         let row_end = (row_start + chunk_size).min(n_obs);
                         let chunk =
-                            ad_read_chunk(&path, &indptr, row_start, row_end, n_vars, dtype);
+                            ad_read_chunk(&path, &base, &indptr, row_start, row_end, n_vars, dtype);
                         Some((chunk, row_end))
                     }
                 }))
@@ -1043,12 +1111,14 @@ impl DatasetReader for H5AdReader {
                 // Dense X: read rows slice-by-slice and convert to sparse CSR
                 Box::pin(stream::unfold(0usize, move |row_start| {
                     let path = path.clone();
+                    let base = base.clone();
                     async move {
                         if row_start >= n_obs {
                             return None;
                         }
                         let row_end = (row_start + chunk_size).min(n_obs);
-                        let chunk = ad_read_dense_chunk(&path, row_start, row_end, n_vars, dtype);
+                        let chunk =
+                            ad_read_dense_chunk(&path, &base, row_start, row_end, n_vars, dtype);
                         Some((chunk, row_end))
                     }
                 }))

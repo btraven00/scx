@@ -145,9 +145,12 @@ enum Cli {
         #[arg(long, default_value = "RNA")]
         assay: String,
 
-        /// Seurat layer (H5Seurat only)
-        #[arg(long, default_value = "counts")]
-        layer: String,
+        /// Matrix layer to read: the Seurat layer (H5Seurat), or an H5AD
+        /// `/layers/<name>` used in place of `/X`. Defaults to `/X` for H5AD
+        /// (auto-falling-back to a sole layer when `/X` is absent) and to
+        /// `counts` for H5Seurat.
+        #[arg(long)]
+        layer: Option<String>,
     },
 
     /// Validate a single-cell file against a YAML schema
@@ -394,7 +397,8 @@ async fn run() -> anyhow::Result<()> {
                     inspect(&mut r, &input, "BPCells").await?;
                 }
                 Some(Format::H5Seurat) => {
-                    let mut r = open_h5seurat(input_path, chunk, Some(&assay), Some(&layer))?;
+                    let seurat_layer = layer.as_deref().unwrap_or("counts");
+                    let mut r = open_h5seurat(input_path, chunk, Some(&assay), Some(seurat_layer))?;
                     let fmt_name = if r.x_indptr().is_empty() {
                         "H5Seurat (BPCells)"
                     } else {
@@ -403,7 +407,10 @@ async fn run() -> anyhow::Result<()> {
                     inspect(&mut *r, &input, fmt_name).await?;
                 }
                 Some(Format::H5Ad) => {
-                    let mut r = H5AdReader::open(input_path, chunk)?;
+                    let mut r = H5AdReader::open_layer(input_path, chunk, layer.as_deref())?;
+                    if r.x_source() != "X" {
+                        println!("matrix source: /{} (no /X)", r.x_source());
+                    }
                     inspect(&mut r, &input, "H5AD").await?;
                 }
                 Some(Format::ScxH5) | None => {
