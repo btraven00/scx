@@ -64,6 +64,31 @@ fn read_str_dataset_raw(ds: &hdf5::Dataset) -> Result<Vec<String>> {
     crate::h5_str::read_str_1d(ds)
 }
 
+/// Datasets that can carry feature ids, most canonical first.
+///
+/// Cell Ranger v3+ writes a `/matrix/features` **group**; v2 wrote a flat
+/// `/matrix/genes` **dataset**. `features/name` is the middle entry because some
+/// downstream writers preserve only gene symbols.
+const FEATURE_ID_PATHS: [&str; 3] = [
+    "matrix/features/id",
+    "matrix/features/name",
+    "matrix/genes",
+];
+
+/// First feature-id dataset present in `file`, or `None` for a non-10x layout.
+fn feature_id_path(file: &File) -> Option<&'static str> {
+    FEATURE_ID_PATHS
+        .into_iter()
+        .find(|p| file.dataset(p).is_ok())
+}
+
+fn missing_features() -> ScxError {
+    ScxError::InvalidFormat(format!(
+        "missing feature ids — none of {}",
+        FEATURE_ID_PATHS.join(", ")
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Plain / unrecognized HDF5
 // ---------------------------------------------------------------------------
@@ -188,6 +213,10 @@ fn dtype_str(ds: &hdf5::Dataset) -> String {
 ///   /matrix/features/feature_type → var["feature_types"]
 ///   /matrix/features/genome   → var["genome"]
 ///   /matrix/{data,indices,indptr} → CSR X (cells × features)
+///
+/// Cell Ranger v2 predates the `features` group and stores `/matrix/genes` (ids)
+/// and `/matrix/gene_names` (symbols) as flat datasets; both are accepted, see
+/// [`FEATURE_ID_PATHS`].
 pub struct TenxH5Reader {
     path: PathBuf,
     n_obs: usize,
@@ -207,17 +236,7 @@ impl TenxH5Reader {
             .map_err(|_| ScxError::InvalidFormat("missing /matrix/barcodes".into()))?;
         let n_obs = barcodes_ds.shape().first().copied().unwrap_or(0);
 
-        // Prefer features/id (canonical Cell Ranger v3+); fall back to
-        // features/name for files written by downstream tooling that only
-        // preserved gene symbols.
-        let feat_id_ds = file
-            .dataset("matrix/features/id")
-            .or_else(|_| file.dataset("matrix/features/name"))
-            .map_err(|_| {
-                ScxError::InvalidFormat(
-                    "missing /matrix/features/id and /matrix/features/name".into(),
-                )
-            })?;
+        let feat_id_ds = file.dataset(feature_id_path(&file).ok_or_else(missing_features)?)?;
         let n_vars = feat_id_ds.shape().first().copied().unwrap_or(0);
 
         // /matrix/shape (optional sanity check) is [n_features, n_barcodes].
@@ -417,18 +436,21 @@ impl DatasetReader for TenxH5Reader {
 
     async fn var(&mut self) -> Result<VarTable> {
         let file = File::open(&self.path)?;
-        let index = if file.dataset("matrix/features/id").is_ok() {
-            read_str_dataset(&file, "matrix/features/id")?
-        } else {
-            read_str_dataset(&file, "matrix/features/name")?
-        };
+        let index = read_str_dataset(&file, feature_id_path(&file).ok_or_else(missing_features)?)?;
         let mut columns: Vec<Column> = Vec::new();
 
+        // `matrix/gene_names` is the v2 spelling of `features/name`; the two are
+        // mutually exclusive in practice, and the dedup below covers the case
+        // where a converter wrote both.
         for (h5_name, col_name) in &[
             ("matrix/features/name", "gene_symbols"),
+            ("matrix/gene_names", "gene_symbols"),
             ("matrix/features/feature_type", "feature_types"),
             ("matrix/features/genome", "genome"),
         ] {
+            if columns.iter().any(|c| c.name == *col_name) {
+                continue;
+            }
             if let Ok(ds) = file.dataset(h5_name) {
                 match read_str_dataset_raw(&ds) {
                     Ok(v) if !v.is_empty() => columns.push(Column {
@@ -710,6 +732,77 @@ mod tests {
         assert_eq!(
             str_col(&var, "gene_symbols").unwrap(),
             &["GeneA", "GeneB", "GeneC"]
+        );
+    }
+
+    /// Cell Ranger v2 layout: flat `/matrix/genes` + `/matrix/gene_names` instead
+    /// of a `/matrix/features` group. Previously `open()` bailed with "missing
+    /// /matrix/features/id and /matrix/features/name" and `detect()` never even
+    /// classified the file as 10x.
+    #[test]
+    fn cellranger_v2_genes_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("v2.h5");
+        {
+            let f = File::create(&p).unwrap();
+            let m = f.create_group("matrix").unwrap();
+            wstr(&m, "barcodes", &["AAA", "CCC", "GGG", "TTT"]);
+            wstr(&m, "genes", &["ENSG0", "ENSG1", "ENSG2"]);
+            wstr(&m, "gene_names", &["GeneA", "GeneB", "GeneC"]);
+            wi32(&m, "data", &[5, 7, 3, 1, 2, 4]);
+            wi32(&m, "indices", &[0, 2, 1, 0, 1, 2]);
+            wi32(&m, "indptr", &[0, 2, 3, 3, 6]);
+            wi32(&m, "shape", &[3, 4]);
+        }
+
+        assert_eq!(
+            crate::detect::detect(&p),
+            Some(crate::detect::Format::TenxH5),
+            "v2 files must be recognised as 10x, not fall through to PlainH5"
+        );
+
+        let mut r = TenxH5Reader::open(&p, 2).unwrap();
+        assert_eq!(r.n_vars, 3);
+        assert_eq!(r.n_obs, 4);
+
+        let var = block_on(r.var()).unwrap();
+        assert_eq!(var.index, ["ENSG0", "ENSG1", "ENSG2"]);
+        assert_eq!(
+            str_col(&var, "gene_symbols").unwrap(),
+            &["GeneA", "GeneB", "GeneC"],
+            "v2 gene_names maps onto the same gene_symbols column as v3 features/name"
+        );
+    }
+
+    /// The v2 spelling must not produce a duplicate column when a converter has
+    /// written both `features/name` and `gene_names`.
+    #[test]
+    fn v3_and_v2_symbol_datasets_do_not_duplicate_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("both.h5");
+        {
+            let f = File::create(&p).unwrap();
+            let m = f.create_group("matrix").unwrap();
+            wstr(&m, "barcodes", &["AAA", "CCC", "GGG", "TTT"]);
+            wstr(&m, "gene_names", &["OldA", "OldB", "OldC"]);
+            let feat = m.create_group("features").unwrap();
+            wstr(&feat, "id", &["ENSG0", "ENSG1", "ENSG2"]);
+            wstr(&feat, "name", &["GeneA", "GeneB", "GeneC"]);
+            wi32(&m, "data", &[5, 7, 3, 1, 2, 4]);
+            wi32(&m, "indices", &[0, 2, 1, 0, 1, 2]);
+            wi32(&m, "indptr", &[0, 2, 3, 3, 6]);
+            wi32(&m, "shape", &[3, 4]);
+        }
+        let mut r = TenxH5Reader::open(&p, 2).unwrap();
+        let var = block_on(r.var()).unwrap();
+        assert_eq!(
+            var.columns.iter().filter(|c| c.name == "gene_symbols").count(),
+            1
+        );
+        assert_eq!(
+            str_col(&var, "gene_symbols").unwrap(),
+            &["GeneA", "GeneB", "GeneC"],
+            "the v3 spelling wins when both are present"
         );
     }
 

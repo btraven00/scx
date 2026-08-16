@@ -182,10 +182,12 @@ pub fn sniff(path: &Path) -> Option<Format> {
     }
 
     // --- 10x Genomics HDF5 ---
-    // Cell Ranger writes a /matrix group containing /matrix/barcodes and
-    // /matrix/features (both present in v2+ multi-modal outputs).
+    // Cell Ranger writes a /matrix group containing /matrix/barcodes plus feature
+    // names. v3+ uses a /matrix/features *group*; v2 used a flat /matrix/genes
+    // *dataset*, so requiring the group alone rejected every v2 file as PlainH5.
     let has_barcodes = file.dataset("matrix/barcodes").is_ok();
-    let has_features = file.group("matrix/features").is_ok();
+    let has_features =
+        file.group("matrix/features").is_ok() || file.dataset("matrix/genes").is_ok();
     if has_barcodes && has_features {
         return Some(Format::TenxH5);
     }
