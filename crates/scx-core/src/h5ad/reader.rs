@@ -330,8 +330,8 @@ fn read_x_indices(file: &File, base: &str, a: usize, b: usize) -> Result<Vec<u32
         }
     }
     if stored_bytes == 4 {
-        if let Some(clen) = h5_chunk::deflate_chunk_len(&ds) {
-            let bytes = h5_chunk::read_range_parallel(&ds, a, b, 4, clen)?;
+        if let Some(plan) = h5_chunk::chunk_plan(&ds) {
+            let bytes = h5_chunk::read_range_parallel(&ds, a, b, 4, plan)?;
             return Ok(bytes
                 .chunks_exact(4)
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -359,8 +359,8 @@ fn read_x_data(file: &File, base: &str, a: usize, b: usize, dtype: DataType) -> 
     let stored_bytes = ds.dtype()?.size();
     let stored_float = matches!(ds.dtype()?.to_descriptor()?, TypeDescriptor::Float(_));
     if stored_bytes == want_bytes && stored_float == want_float {
-        if let Some(clen) = h5_chunk::deflate_chunk_len(&ds) {
-            let raw = h5_chunk::read_range_parallel(&ds, a, b, want_bytes, clen)?;
+        if let Some(plan) = h5_chunk::chunk_plan(&ds) {
+            let raw = h5_chunk::read_range_parallel(&ds, a, b, want_bytes, plan)?;
             return Ok(bytes_to_typed(&raw, dtype));
         }
     }
