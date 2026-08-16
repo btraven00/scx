@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
-use hdf5::types::{FloatSize, IntSize, TypeDescriptor, VarLenAscii, VarLenUnicode};
+use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
 use hdf5::File;
 use ndarray::s;
 
@@ -61,19 +61,7 @@ pub fn read_tenx_summary(path: &Path) -> Result<TenxSummary> {
 }
 
 fn read_str_dataset_raw(ds: &hdf5::Dataset) -> Result<Vec<String>> {
-    Ok(match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::VarLenUnicode => ds
-            .read_1d::<VarLenUnicode>()?
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
-        TypeDescriptor::VarLenAscii => ds
-            .read_1d::<VarLenAscii>()?
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
-        _ => Vec::new(),
-    })
+    crate::h5_str::read_str_1d(ds)
 }
 
 // ---------------------------------------------------------------------------
@@ -520,6 +508,7 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
     use futures::StreamExt;
+    use hdf5::types::{FixedAscii, VarLenUnicode};
     use hdf5::{File, Group};
     use ndarray::Array1;
     use std::str::FromStr;
@@ -532,6 +521,23 @@ mod tests {
             .map(|s| VarLenUnicode::from_str(s).unwrap())
             .collect();
         g.new_dataset::<VarLenUnicode>()
+            .shape(arr.len())
+            .create(name)
+            .unwrap()
+            .write(&Array1::from_vec(arr))
+            .unwrap();
+    }
+
+    /// Fixed-length ASCII, i.e. `|S{N}` — what `rhdf5` / `HDF5Array` write by
+    /// default, so what every R-produced 10x file contains.  The whole test corpus
+    /// used `wstr` (variable-length), which is why the reader returning empty
+    /// vectors for these went unnoticed.
+    fn wstr_fixed<const N: usize>(g: &Group, name: &str, vals: &[&str]) {
+        let arr: Vec<FixedAscii<N>> = vals
+            .iter()
+            .map(|s| FixedAscii::from_ascii(s).unwrap())
+            .collect();
+        g.new_dataset::<FixedAscii<N>>()
             .shape(arr.len())
             .create(name)
             .unwrap()
@@ -667,6 +673,44 @@ mod tests {
             &["Gene Expression", "Gene Expression", "Antibody Capture"]
         );
         assert_eq!(str_col(&var, "genome").unwrap(), &["GRCh38"; 3]);
+    }
+
+    /// Regression for the silent-empty bug: a 10x file whose barcodes and feature
+    /// ids are fixed-length ASCII used to yield `obs().index == []` with `Ok(())`,
+    /// so the caller only found out by panicking on an out-of-bounds index far
+    /// downstream.  Widths are off the ladder rungs on purpose — HDF5 widens.
+    #[test]
+    fn fixed_length_strings_are_not_silently_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("fixed.h5");
+        {
+            let f = File::create(&p).unwrap();
+            let m = f.create_group("matrix").unwrap();
+            wstr_fixed::<18>(&m, "barcodes", &["AAA", "CCC", "GGG", "TTT"]);
+            let feat = m.create_group("features").unwrap();
+            wstr_fixed::<13>(&feat, "id", &["ENSG0", "ENSG1", "ENSG2"]);
+            wstr_fixed::<13>(&feat, "name", &["GeneA", "GeneB", "GeneC"]);
+            wi32(&m, "data", &[5, 7, 3, 1, 2, 4]);
+            wi32(&m, "indices", &[0, 2, 1, 0, 1, 2]);
+            wi32(&m, "indptr", &[0, 2, 3, 3, 6]);
+            wi32(&m, "shape", &[3, 4]);
+        }
+        let mut r = TenxH5Reader::open(&p, 2).unwrap();
+
+        let obs = block_on(r.obs()).unwrap();
+        assert_eq!(
+            obs.index.len(),
+            4,
+            "fixed-length barcodes must read, not vanish"
+        );
+        assert_eq!(obs.index, ["AAA", "CCC", "GGG", "TTT"]);
+
+        let var = block_on(r.var()).unwrap();
+        assert_eq!(var.index, ["ENSG0", "ENSG1", "ENSG2"]);
+        assert_eq!(
+            str_col(&var, "gene_symbols").unwrap(),
+            &["GeneA", "GeneB", "GeneC"]
+        );
     }
 
     #[test]

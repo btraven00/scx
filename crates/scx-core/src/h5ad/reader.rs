@@ -308,21 +308,7 @@ fn dense_array2_to_csr(
 }
 
 fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
-    let ds = file.dataset(path)?;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::VarLenUnicode => {
-            let raw: Array1<VarLenUnicode> = ds.read_1d()?;
-            Ok(raw.into_iter().map(|s| s.to_string()).collect())
-        }
-        TypeDescriptor::VarLenAscii => {
-            let raw: Array1<hdf5::types::VarLenAscii> = ds.read_1d()?;
-            Ok(raw.into_iter().map(|s| s.to_string()).collect())
-        }
-        other => Err(ScxError::InvalidFormat(format!(
-            "expected string dataset at '{path}', got {:?}",
-            other
-        ))),
-    }
+    crate::h5_str::read_str_1d(&file.dataset(path)?)
 }
 
 /// Read a chunk [row_start, row_end) from a CSR matrix stored at /X/.

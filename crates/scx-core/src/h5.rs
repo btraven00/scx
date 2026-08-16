@@ -215,22 +215,7 @@ fn read_chunk_sync(
 }
 
 fn read_strings_sync(file: &File, path: &str) -> Result<Vec<String>> {
-    let ds = file.dataset(path)?;
-    // Dispatch on actual stored type to avoid HDF5 charset-conversion errors.
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::VarLenUnicode => {
-            let raw: ndarray::Array1<VarLenUnicode> = ds.read_1d()?;
-            Ok(raw.into_iter().map(|s| s.to_string()).collect())
-        }
-        TypeDescriptor::VarLenAscii => {
-            let raw: ndarray::Array1<hdf5::types::VarLenAscii> = ds.read_1d()?;
-            Ok(raw.into_iter().map(|s| s.to_string()).collect())
-        }
-        other => Err(ScxError::InvalidFormat(format!(
-            "unsupported string type {:?} at '{path}'",
-            other
-        ))),
-    }
+    crate::h5_str::read_str_1d(&file.dataset(path)?)
 }
 
 fn read_column_data_sync(file: &File, ds_path: &str) -> Result<ColumnData> {
@@ -242,7 +227,10 @@ fn read_column_data_sync(file: &File, ds_path: &str) -> Result<ColumnData> {
         }
         TypeDescriptor::Float(_) => Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec())),
         TypeDescriptor::Integer(_) => Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec())),
-        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
+        TypeDescriptor::VarLenUnicode
+        | TypeDescriptor::VarLenAscii
+        | TypeDescriptor::FixedAscii(_)
+        | TypeDescriptor::FixedUnicode(_) => {
             Ok(ColumnData::String(read_strings_sync(file, ds_path)?))
         }
         other => Err(ScxError::InvalidFormat(format!(

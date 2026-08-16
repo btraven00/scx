@@ -80,23 +80,8 @@ fn read_strings(grp: &Group, name: &str) -> Result<Vec<String>> {
     let ds = grp.dataset(name).map_err(|e| {
         ScxError::InvalidFormat(format!("BPCells HDF5: missing dataset '{name}': {e}"))
     })?;
-    if ds.size() == 0 {
-        return Ok(vec![]);
-    }
-    match ds.dtype().and_then(|t| t.to_descriptor()) {
-        Ok(hdf5::types::TypeDescriptor::VarLenAscii) => {
-            let arr: Array1<VarLenAscii> = ds
-                .read_1d()
-                .map_err(|e| ScxError::InvalidFormat(format!("reading '{name}': {e}")))?;
-            Ok(arr.into_iter().map(|s| s.to_string()).collect())
-        }
-        _ => {
-            let arr: Array1<VarLenUnicode> = ds
-                .read_1d()
-                .map_err(|e| ScxError::InvalidFormat(format!("reading '{name}': {e}")))?;
-            Ok(arr.into_iter().map(|s| s.to_string()).collect())
-        }
-    }
+    crate::h5_str::read_str_1d(&ds)
+        .map_err(|e| ScxError::InvalidFormat(format!("reading '{name}': {e}")))
 }
 
 /// Read the scalar `"version"` attribute from the group.
