@@ -1,5 +1,6 @@
 pub mod api;
 pub mod bpcells;
+pub mod concat;
 pub mod detect;
 pub mod dtype;
 pub mod error;

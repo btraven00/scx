@@ -260,6 +260,63 @@ enum Cli {
         layer: String,
     },
 
+    /// Concatenate datasets along the obs (cell) axis
+    ///
+    /// Follows `anndata.concat()` semantics: cells are stacked, genes are
+    /// aligned by name (inner join by default), and obs columns missing from an
+    /// input are NA-filled (float NaN, int 0, bool false, string "",
+    /// categorical "NA").  X and layers stream chunk-by-chunk; obs/var/obsm are
+    /// materialised.  Output is always .h5ad.
+    ///
+    /// Not carried over: obsp/varp (anndata's `pairwise`, off by default),
+    /// varm, and uns — the output's uns holds only the concat provenance record.
+    ///
+    /// Examples:
+    ///   scx concat a.h5ad b.h5ad -o all.h5ad --label sample
+    ///   scx concat s*.h5ad -o all.h5ad --join outer --index-unique -
+    Concat {
+        /// Input files (two or more)
+        #[arg(required = true, num_args = 1..)]
+        inputs: Vec<String>,
+
+        /// Output .h5ad path
+        #[arg(long, short = 'o')]
+        output: String,
+
+        /// Gene-axis join: inner (shared genes) or outer (union, zero-filled)
+        #[arg(long, default_value = "inner")]
+        join: String,
+
+        /// Add an obs column with this name recording each cell's source
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Comma-separated source names, one per input (default: file stems).
+        /// Used as --label values and as the --index-unique suffix.
+        #[arg(long)]
+        keys: Option<String>,
+
+        /// Separator appended to obs_names to keep them unique (e.g. `-`)
+        #[arg(long)]
+        index_unique: Option<String>,
+
+        /// How to carry var columns over [none, same, unique, first, only]
+        #[arg(long, default_value = "none")]
+        merge: String,
+
+        /// Cells per streaming chunk
+        #[arg(long, default_value = "5000")]
+        chunk_size: usize,
+
+        /// Output data type [f32, f64, i32, u32]
+        #[arg(long, default_value = "f32")]
+        dtype: String,
+
+        /// gzip-compress the output (`--compress` for level 6, `--compress N` for 0..=9)
+        #[arg(long, num_args = 0..=1, default_missing_value = "6")]
+        compress: Option<u8>,
+    },
+
     /// Assemble slots from multiple files onto a base h5ad (slot-patch merge)
     ///
     /// Two modes:
@@ -464,13 +521,7 @@ async fn run() -> anyhow::Result<()> {
                 _ => SlotFilter::all(),
             };
 
-            let out_dtype = match dtype.as_str() {
-                "f32" => DataType::F32,
-                "f64" => DataType::F64,
-                "i32" => DataType::I32,
-                "u32" => DataType::U32,
-                other => anyhow::bail!("unknown dtype '{other}': use f32, f64, i32, u32"),
-            };
+            let out_dtype = parse_dtype(&dtype)?;
 
             let input_path = Path::new(&input);
             let output_path = Path::new(&output);
@@ -606,6 +657,39 @@ async fn run() -> anyhow::Result<()> {
             .await?;
         }
 
+        Cli::Concat {
+            inputs,
+            output,
+            join,
+            label,
+            keys,
+            index_unique,
+            merge,
+            chunk_size,
+            dtype,
+            compress,
+        } => {
+            let opts = scx_core::concat::ConcatOptions {
+                join: join.parse()?,
+                label,
+                keys: keys
+                    .map(|k| k.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_default(),
+                index_unique,
+                merge: merge.parse()?,
+                chunk_size,
+                dtype: parse_dtype(&dtype)?,
+                compress,
+            };
+            let (n_obs, n_vars) =
+                scx_core::concat::concat(&inputs, Path::new(&output), &opts).await?;
+            println!(
+                "concat: {} files -> {} ({n_obs} x {n_vars})",
+                inputs.len(),
+                output
+            );
+        }
+
         Cli::Merge {
             base,
             output,
@@ -631,6 +715,16 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_dtype(s: &str) -> anyhow::Result<DataType> {
+    match s {
+        "f32" => Ok(DataType::F32),
+        "f64" => Ok(DataType::F64),
+        "i32" => Ok(DataType::I32),
+        "u32" => Ok(DataType::U32),
+        other => anyhow::bail!("unknown dtype '{other}': use f32, f64, i32, u32"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
