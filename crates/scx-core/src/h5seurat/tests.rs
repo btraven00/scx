@@ -3,6 +3,7 @@ use super::*;
 use futures::StreamExt;
 use hdf5::types::VarLenUnicode;
 use hdf5::File;
+use hdf5::Group;
 use ndarray::Array1;
 use std::str::FromStr;
 
@@ -616,4 +617,83 @@ async fn test_norman_obs_roundtrip() {
         "norman obs round-trip OK: {n_obs} cells, {} columns",
         rt_obs.columns.len()
     );
+}
+
+/// Regression: `--seuratdisk-compat` must produce a file `LoadH5Seurat` accepts.
+///
+/// It used to write the root attributes and scaffold groups but leave every
+/// reduction group bare, so validation failed with "Attribute does not exist"
+/// as soon as the source had embeddings — which almost every real dataset does.
+/// Asserted on the file rather than by calling into R so the check runs in CI
+/// without an R toolchain; `tests/r/` covers the actual load.
+#[tokio::test]
+async fn test_seuratdisk_compat_attributes_reductions() {
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let out = tmp.path().to_path_buf();
+
+    let mut obsm = Embeddings::default();
+    for (key, n_comps) in [("X_pca", 2usize), ("X_umap", 2), ("X_harmony", 2)] {
+        obsm.map.insert(
+            key.to_string(),
+            DenseMatrix {
+                shape: (2, n_comps),
+                data: vec![0.0; 2 * n_comps],
+            },
+        );
+    }
+
+    let mut writer =
+        H5SeuratWriter::create(&out, 2, 2, DataType::F32, None, None, None, true).unwrap();
+    writer.write_obsm(&obsm).await.unwrap();
+    writer.finalize().await.unwrap();
+    drop(writer);
+
+    let f = File::open(&out).unwrap();
+    let read_attr = |grp: &Group, name: &str| -> String {
+        grp.attr(name)
+            .unwrap_or_else(|_| panic!("missing attribute '{name}'"))
+            .read_scalar::<VarLenUnicode>()
+            .unwrap()
+            .to_string()
+    };
+
+    // Root attributes SeuratDisk validates before touching anything else.
+    let root = f.group("/").unwrap();
+    assert_eq!(read_attr(&root, "version"), "3.1.5.9900");
+    assert_eq!(read_attr(&root, "active.assay"), "RNA");
+
+    // Every reduction needs active.assay + key; the key follows Seurat's own
+    // naming, which special-cases pca rather than upper-casing the name.
+    for (red, want_key) in [("pca", "PC_"), ("umap", "UMAP_"), ("harmony", "HARMONY_")] {
+        let grp = f.group(&format!("reductions/{red}")).unwrap();
+        assert_eq!(read_attr(&grp, "active.assay"), "RNA", "reductions/{red}");
+        assert_eq!(read_attr(&grp, "key"), want_key, "reductions/{red}");
+    }
+}
+
+/// Without the flag scx writes its lean Seurat-v5/BPCells layout, which
+/// deliberately carries none of that scaffolding.
+#[tokio::test]
+async fn test_lean_output_has_no_seuratdisk_attributes() {
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let out = tmp.path().to_path_buf();
+
+    let mut obsm = Embeddings::default();
+    obsm.map.insert(
+        "X_pca".to_string(),
+        DenseMatrix {
+            shape: (2, 2),
+            data: vec![0.0; 4],
+        },
+    );
+
+    let mut writer =
+        H5SeuratWriter::create(&out, 2, 2, DataType::F32, None, None, None, false).unwrap();
+    writer.write_obsm(&obsm).await.unwrap();
+    writer.finalize().await.unwrap();
+    drop(writer);
+
+    let f = File::open(&out).unwrap();
+    assert!(f.group("/").unwrap().attr("version").is_err());
+    assert!(f.group("reductions/pca").unwrap().attr("key").is_err());
 }

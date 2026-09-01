@@ -68,6 +68,8 @@ pub struct H5SeuratWriter {
     x_indptr: Vec<u64>,
     /// State for the currently open streaming sparse matrix, if any.
     sparse_state: Option<SparseWriteState>,
+    /// Whether to emit the extra attributes `SeuratDisk::LoadH5Seurat` validates.
+    seuratdisk_compat: bool,
 }
 
 impl H5SeuratWriter {
@@ -147,7 +149,42 @@ impl H5SeuratWriter {
             dtype,
             x_indptr: vec![0u64],
             sparse_state: None,
+            seuratdisk_compat,
         })
+    }
+
+    /// Attach the attributes `SeuratDisk::LoadH5Seurat` reads off a reduction.
+    ///
+    /// Without them the load fails at validation ("Attribute does not exist"),
+    /// so a file written with `--seuratdisk-compat` was still unloadable as soon
+    /// as the source had any embeddings.
+    fn attr_reduction(&self, grp: &Group, red_name: &str) -> Result<()> {
+        if !self.seuratdisk_compat {
+            return Ok(());
+        }
+        for (name, value) in [
+            ("active.assay", self.assay.clone()),
+            ("key", seurat_reduction_key(red_name)),
+        ] {
+            let v = VarLenUnicode::from_str(&value).unwrap_or_default();
+            grp.new_attr::<VarLenUnicode>()
+                .create(name)?
+                .write_scalar(&v)?;
+        }
+        Ok(())
+    }
+}
+
+/// Seurat's column-name prefix for a reduction ("PC_1", "UMAP_2", ...).
+///
+/// Seurat special-cases the classic reductions rather than deriving the prefix
+/// from the name, so matching it means hardcoding the same handful.
+fn seurat_reduction_key(red_name: &str) -> String {
+    match red_name.to_lowercase().as_str() {
+        "pca" => "PC_".to_string(),
+        "ica" => "IC_".to_string(),
+        "tsne" => "tSNE_".to_string(),
+        other => format!("{}_", other.to_uppercase()),
     }
 }
 
@@ -275,6 +312,7 @@ impl DatasetWriter for H5SeuratWriter {
         for (key, mat) in &obsm.map {
             let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
             let red_grp = reds_grp.create_group(red_name)?;
+            self.attr_reduction(&red_grp, red_name)?;
 
             let (n_obs, n_comps) = mat.shape;
             // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs)
@@ -413,7 +451,11 @@ impl DatasetWriter for H5SeuratWriter {
             // reduction sub-group may already exist from write_obsm
             let red_grp = match reds_grp.group(red_name) {
                 Ok(g) => g,
-                Err(_) => reds_grp.create_group(red_name)?,
+                Err(_) => {
+                    let g = reds_grp.create_group(red_name)?;
+                    self.attr_reduction(&g, red_name)?;
+                    g
+                }
             };
             let (n_vars, k) = mat.shape;
             // IR: (n_vars, k) row-major → H5Seurat: (k, n_vars)
