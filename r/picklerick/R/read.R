@@ -16,6 +16,9 @@
 #'
 #' @param path       Path to the file.
 #' @param as         Target class: `"SingleCellExperiment"` (default),
+#'   `"AnnData"` for a light handle that defers building R objects until a
+#'   component is touched (see [AnnDataLight]; building a SingleCellExperiment
+#'   costs a constant ~3.3s of S4 warm-up whatever the dataset size),
 #'   `"Seurat"`, or `"list"`.
 #' @param chunk_size Cells per internal streaming chunk. Default `5000L`.
 #' @param lazy       When `TRUE`, leave the X matrix on disk and wrap it in a
@@ -41,7 +44,7 @@
 #' counts(sce)[1:10, ]    # only these rows hit disk
 #' }
 read_h5ad <- function(path,
-                      as         = c("SingleCellExperiment", "Seurat", "list"),
+                      as         = c("SingleCellExperiment", "Seurat", "AnnData", "list"),
                       chunk_size = 5000L,
                       lazy       = FALSE,
                       parse_uns  = FALSE) {
@@ -81,7 +84,8 @@ read_h5ad <- function(path,
   switch(as,
     list                 = raw,
     SingleCellExperiment = .as_sce(raw, path = path, parse_uns = parse_uns),
-    Seurat               = .as_seurat(raw, path = path, parse_uns = parse_uns)
+    Seurat               = .as_seurat(raw, path = path, parse_uns = parse_uns),
+    AnnData              = .new_anndata_light(raw, path = path)
   )
 }
 
@@ -157,9 +161,18 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 # (features as rows).
 # ---------------------------------------------------------------------------
 
+# Resolve the class from Matrix's namespace rather than by bare name.
+# `new("dgCMatrix", ...)` looks the class up in the *caller's* topenv, which
+# works from the SingleCellExperiment path (Bioconductor has pulled Matrix in by
+# then) but fails with "dgCMatrix is not a defined class" when the light AnnData
+# handle builds $X without anything having loaded Matrix.
+.dgc_class <- function() {
+  methods::getClassDef("dgCMatrix", package = "Matrix")
+}
+
 .build_dgc <- function(raw) {
   x <- if (is.integer(raw$x_data)) as.double(raw$x_data) else raw$x_data
-  methods::new("dgCMatrix",
+  methods::new(.dgc_class(),
     p        = raw$x_indptr,
     i        = raw$x_indices,
     x        = x,
@@ -175,7 +188,7 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 # (genes × cells), same trick as .build_dgc.
 .csr_to_dgc_T <- function(triplet, row_names = NULL, col_names = NULL) {
   x <- if (is.integer(triplet$data)) as.double(triplet$data) else triplet$data
-  methods::new("dgCMatrix",
+  methods::new(.dgc_class(),
     p        = triplet$indptr,
     i        = triplet$indices,
     x        = x,
