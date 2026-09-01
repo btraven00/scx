@@ -1154,3 +1154,118 @@ async fn compression_level_out_of_range_errors() {
     let r = H5AdWriter::create_compressed(tmp.path(), 2, 2, DataType::F32, Some(10));
     assert!(r.is_err(), "gzip level 10 must be rejected");
 }
+
+/// Build a minimal h5ad whose obs index and one obs column use anndata 0.13's
+/// `nullable-string-array` encoding: a *group* of `values` + `mask`, rather
+/// than a plain string dataset.
+fn write_nullable_string_h5ad(path: &std::path::Path) {
+    let f = File::create(path).unwrap();
+    let root = f.group("/").unwrap();
+    let enc = |o: &hdf5::Group, v: &str| {
+        let s = VarLenUnicode::from_str(v).unwrap();
+        o.new_attr::<VarLenUnicode>()
+            .create("encoding-type")
+            .unwrap()
+            .write_scalar(&s)
+            .unwrap();
+    };
+    enc(&root, "anndata");
+
+    // X: 2 cells x 2 genes, CSR, one entry per row.
+    let x = f.create_group("X").unwrap();
+    enc(&x, "csr_matrix");
+    let shape = x.new_attr::<i64>().shape(2).create("shape").unwrap();
+    shape.write(&Array1::from_vec(vec![2i64, 2])).unwrap();
+    for (name, vals) in [("indices", vec![0i32, 1]), ("indptr", vec![0i32, 1, 2])] {
+        let ds = x
+            .new_dataset::<i32>()
+            .shape(vals.len())
+            .create(name)
+            .unwrap();
+        ds.write(&Array1::from_vec(vals)).unwrap();
+    }
+    let d = x.new_dataset::<f32>().shape(2).create("data").unwrap();
+    d.write(&Array1::from_vec(vec![1.0f32, 2.0])).unwrap();
+
+    // A nullable-string-array group: values + mask, mask 1 = missing.
+    let nullable_str = |parent: &hdf5::Group, name: &str, vals: &[&str], mask: &[bool]| {
+        let g = parent.create_group(name).unwrap();
+        enc(&g, "nullable-string-array");
+        let owned: Vec<String> = vals.iter().map(|s| s.to_string()).collect();
+        write_vlen_str_dataset(&g, "values", &owned).unwrap();
+        let m = g
+            .new_dataset::<bool>()
+            .shape(mask.len())
+            .create("mask")
+            .unwrap();
+        m.write(&Array1::from_vec(mask.to_vec())).unwrap();
+    };
+
+    for (frame, labels) in [("obs", ["cell_a", "cell_b"]), ("var", ["gene_a", "gene_b"])] {
+        let g = f.create_group(frame).unwrap();
+        enc(&g, "dataframe");
+        let idx = VarLenUnicode::from_str("_index").unwrap();
+        g.new_attr::<VarLenUnicode>()
+            .create("_index")
+            .unwrap()
+            .write_scalar(&idx)
+            .unwrap();
+        let order = if frame == "obs" {
+            vec!["batch"]
+        } else {
+            vec![]
+        };
+        let names: Vec<VarLenUnicode> = order
+            .iter()
+            .map(|s| VarLenUnicode::from_str(s).unwrap())
+            .collect();
+        let attr = g
+            .new_attr::<VarLenUnicode>()
+            .shape(names.len())
+            .create("column-order")
+            .unwrap();
+        attr.write(&Array1::from_vec(names)).unwrap();
+        nullable_str(&g, "_index", &labels, &[false, false]);
+        if frame == "obs" {
+            // Second entry masked, to prove the mask is honoured.
+            nullable_str(&g, "batch", &["s1", "ignored"], &[false, true]);
+        }
+    }
+}
+
+/// Regression: anndata 0.13 writes string columns — the dataframe index
+/// included — as `nullable-string-array`, a group of `values` + `mask`. scx
+/// opened the index path directly as a dataset, so *every* file written by a
+/// current anndata failed with "H5Dopen2(): not a dataset", and nullable string
+/// columns were dropped with a warning because the reader had no string arm.
+#[tokio::test]
+async fn test_reads_anndata_013_nullable_string_index_and_column() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    write_nullable_string_h5ad(tmp.path());
+
+    let mut reader = H5AdReader::open(tmp.path(), 10).unwrap();
+    assert_eq!(reader.shape(), (2, 2));
+
+    let obs = reader.obs().await.unwrap();
+    assert_eq!(
+        obs.index,
+        vec!["cell_a", "cell_b"],
+        "index must be readable"
+    );
+
+    let var = reader.var().await.unwrap();
+    assert_eq!(var.index, vec!["gene_a", "gene_b"]);
+
+    let batch = obs
+        .columns
+        .iter()
+        .find(|c| c.name == "batch")
+        .expect("nullable string column must be read, not skipped");
+    match &batch.data {
+        ColumnData::String(v) => {
+            // Masked entries become "", the fill a missing string gets elsewhere.
+            assert_eq!(v, &vec!["s1".to_string(), String::new()]);
+        }
+        other => panic!("expected String column, got {other:?}"),
+    }
+}

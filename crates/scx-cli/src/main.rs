@@ -999,16 +999,35 @@ fn indptr_row_stats(indptr: &[u64], n_rows: usize, n_cols: usize) -> String {
 }
 
 fn numeric_stats(data: &ColumnData) -> String {
-    let mut vals: Vec<f64> = match data {
+    // NaN is dropped rather than sorted around. `partial_cmp().unwrap_or(Equal)`
+    // is not a total order once NaN is present — NaN compares Equal to
+    // everything, which breaks transitivity — and Rust's sort detects that and
+    // panics. Real files hit this: an obs column with missing values (anndata
+    // writes them as NaN) crashed `scx inspect` outright. Quartiles over NaN
+    // would be meaningless anyway, so the count of missing values is reported
+    // instead.
+    let raw: Vec<f64> = match data {
         ColumnData::Float(v) => v.clone(),
         ColumnData::Int(v) => v.iter().map(|&x| x as f64).collect(),
         _ => return String::new(),
     };
+    let total = raw.len();
+    let mut vals: Vec<f64> = raw.into_iter().filter(|x| x.is_finite()).collect();
+    let missing = total - vals.len();
     if vals.is_empty() {
-        return String::new();
+        return if total > 0 {
+            format!("all {total} values missing")
+        } else {
+            String::new()
+        };
     }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    vals.sort_by(f64::total_cmp);
     let n = vals.len();
+    let na_note = if missing > 0 {
+        format!("  ({missing} missing)")
+    } else {
+        String::new()
+    };
 
     // Binary {0, 1} column — show counts instead of quartiles
     if vals[0] >= 0.0 && vals[n - 1] <= 1.0 {
@@ -1016,23 +1035,25 @@ fn numeric_stats(data: &ColumnData) -> String {
         let zeros = n - ones;
         if ones + zeros == n {
             return format!(
-                "bool-like  0: {} ({:.1}%)  1: {} ({:.1}%)",
+                "bool-like  0: {} ({:.1}%)  1: {} ({:.1}%){}",
                 zeros,
                 100.0 * zeros as f64 / n as f64,
                 ones,
                 100.0 * ones as f64 / n as f64,
+                na_note,
             );
         }
     }
 
     let q = |p: f64| vals[(p * (n - 1) as f64).round() as usize];
     format!(
-        "min={}  Q1={}  med={}  Q3={}  max={}",
+        "min={}  Q1={}  med={}  Q3={}  max={}{}",
         fmt_stat(vals[0]),
         fmt_stat(q(0.25)),
         fmt_stat(q(0.5)),
         fmt_stat(q(0.75)),
-        fmt_stat(vals[n - 1])
+        fmt_stat(vals[n - 1]),
+        na_note,
     )
 }
 
@@ -1539,4 +1560,44 @@ fn print_report_json(report: &scx_core::validate::ValidationReport) {
     });
 
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::numeric_stats;
+    use scx_core::ir::ColumnData;
+
+    /// Regression: `scx inspect` panicked outright on any numeric obs column
+    /// holding a missing value. The quartile sort used
+    /// `partial_cmp().unwrap_or(Equal)`, which is not a total order once NaN is
+    /// present — NaN compares Equal to everything, breaking transitivity — and
+    /// Rust's sort detects that and aborts with "user-provided comparison
+    /// function does not correctly implement a total order". anndata writes
+    /// missing numbers as NaN, so real atlas files tripped it.
+    #[test]
+    fn numeric_stats_survives_nan() {
+        let with_nan = ColumnData::Float(vec![3.0, f64::NAN, 1.0, 2.0, f64::NAN]);
+        let out = numeric_stats(&with_nan);
+        assert!(
+            out.contains("min=1"),
+            "stats computed over the finite values: {out}"
+        );
+        assert!(out.contains("2 missing"), "missing count reported: {out}");
+
+        // Enough values to make a non-total order actually trip the sort.
+        let mut many: Vec<f64> = (0..64).map(|i| i as f64).collect();
+        for i in (0..64).step_by(3) {
+            many[i] = f64::NAN;
+        }
+        let out = numeric_stats(&ColumnData::Float(many));
+        assert!(out.contains("missing"), "{out}");
+
+        // All-missing is reported, not silently blank.
+        let all_nan = ColumnData::Float(vec![f64::NAN; 4]);
+        assert_eq!(numeric_stats(&all_nan), "all 4 values missing");
+
+        // No NaN: unchanged output, no note.
+        let clean = ColumnData::Float(vec![1.0, 2.0, 3.0, 40.0]);
+        assert!(!numeric_stats(&clean).contains("missing"));
+    }
 }

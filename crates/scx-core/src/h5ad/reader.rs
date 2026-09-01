@@ -460,7 +460,7 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
 
     // Index dataset name from _index attr; fall back to "index"
     let index_name = read_str_attr_on_group(&grp, "_index").unwrap_or_else(|_| "index".into());
-    let index = ad_read_strings(file, &format!("{group_path}/{index_name}"))?;
+    let index = ad_read_index(file, &format!("{group_path}/{index_name}"))?;
 
     // Column order from attribute
     let col_names: Vec<String> = match grp.attr("column-order") {
@@ -513,6 +513,28 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
     }
 
     Ok((index, columns))
+}
+
+/// Read a dataframe index.
+///
+/// Historically a plain `string-array` dataset. anndata 0.13 began writing
+/// string columns — the index included — as `nullable-string-array`, a *group*
+/// of `values` + `mask`, so opening the path as a dataset fails outright with
+/// "not a dataset" on any file a current anndata wrote.
+///
+/// The mask is deliberately ignored: an index has no meaningful missing value,
+/// and a masked entry is an empty label either way.
+fn ad_read_index(file: &File, path: &str) -> Result<Vec<String>> {
+    if file.dataset(path).is_ok() {
+        return ad_read_strings(file, path);
+    }
+    let values = format!("{path}/values");
+    if file.dataset(&values).is_ok() {
+        return ad_read_strings(file, &values);
+    }
+    Err(ScxError::InvalidFormat(format!(
+        "index at '{path}' is neither a string dataset nor a nullable-string-array group"
+    )))
 }
 
 /// Read a single array or string-array dataset as ColumnData.
@@ -653,6 +675,45 @@ fn ad_read_nullable(file: &File, grp_path: &str) -> Result<ColumnData> {
     } else {
         vec![false; ds.shape().first().copied().unwrap_or(0)]
     };
+
+    // Strings do not round-trip through the numeric arms below, and anndata
+    // 0.13 writes ordinary string columns this way. NA becomes "", matching the
+    // fill policy used everywhere else for a missing string.
+    if matches!(
+        ds.dtype()?.to_descriptor()?,
+        TypeDescriptor::VarLenUnicode
+            | TypeDescriptor::VarLenAscii
+            | TypeDescriptor::FixedUnicode(_)
+            | TypeDescriptor::FixedAscii(_)
+    ) {
+        let vals = crate::h5_str::read_str_1d(&ds)?;
+        return Ok(ColumnData::String(
+            vals.into_iter()
+                .zip(mask.iter().chain(std::iter::repeat(&false)))
+                .map(|(v, &na)| if na { String::new() } else { v })
+                .collect(),
+        ));
+    }
+
+    // Strings do not round-trip through the numeric arms below, and anndata
+    // 0.13 writes ordinary string columns as nullable-string-array. Without
+    // this the column is dropped with a warning rather than read. NA becomes
+    // "", the same fill a missing string gets everywhere else.
+    if matches!(
+        ds.dtype()?.to_descriptor()?,
+        TypeDescriptor::VarLenUnicode
+            | TypeDescriptor::VarLenAscii
+            | TypeDescriptor::FixedUnicode(_)
+            | TypeDescriptor::FixedAscii(_)
+    ) {
+        let vals = crate::h5_str::read_str_1d(&ds)?;
+        return Ok(ColumnData::String(
+            vals.into_iter()
+                .zip(mask.iter().copied().chain(std::iter::repeat(false)))
+                .map(|(v, na)| if na { String::new() } else { v })
+                .collect(),
+        ));
+    }
 
     match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Float(FloatSize::U4) => {
