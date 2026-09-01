@@ -69,11 +69,7 @@ fn read_str_dataset_raw(ds: &hdf5::Dataset) -> Result<Vec<String>> {
 /// Cell Ranger v3+ writes a `/matrix/features` **group**; v2 wrote a flat
 /// `/matrix/genes` **dataset**. `features/name` is the middle entry because some
 /// downstream writers preserve only gene symbols.
-const FEATURE_ID_PATHS: [&str; 3] = [
-    "matrix/features/id",
-    "matrix/features/name",
-    "matrix/genes",
-];
+const FEATURE_ID_PATHS: [&str; 3] = ["matrix/features/id", "matrix/features/name", "matrix/genes"];
 
 /// First feature-id dataset present in `file`, or `None` for a non-10x layout.
 fn feature_id_path(file: &File) -> Option<&'static str> {
@@ -796,7 +792,10 @@ mod tests {
         let mut r = TenxH5Reader::open(&p, 2).unwrap();
         let var = block_on(r.var()).unwrap();
         assert_eq!(
-            var.columns.iter().filter(|c| c.name == "gene_symbols").count(),
+            var.columns
+                .iter()
+                .filter(|c| c.name == "gene_symbols")
+                .count(),
             1
         );
         assert_eq!(

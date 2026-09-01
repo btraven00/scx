@@ -111,11 +111,17 @@ mod tests {
     #[test]
     fn reads_fixed_ascii() {
         let path = tmp("fixed_ascii");
-        let want = ["AAACCTGAGAAACCAT-1", "AAACCTGAGAAACCGC-1", "TTTGTCATCTTTAGTC-1"];
+        let want = [
+            "AAACCTGAGAAACCAT-1",
+            "AAACCTGAGAAACCGC-1",
+            "TTTGTCATCTTTAGTC-1",
+        ];
         {
             let f = File::create(&path).unwrap();
-            let vals: Vec<FixedAscii<32>> =
-                want.iter().map(|s| FixedAscii::from_ascii(s).unwrap()).collect();
+            let vals: Vec<FixedAscii<32>> = want
+                .iter()
+                .map(|s| FixedAscii::from_ascii(s).unwrap())
+                .collect();
             f.new_dataset::<FixedAscii<32>>()
                 .shape([vals.len()])
                 .create("barcodes")
@@ -137,8 +143,10 @@ mod tests {
         let want = ["ENSG00000243485", "ENSG00000237613"];
         {
             let f = File::create(&path).unwrap();
-            let vals: Vec<FixedAscii<15>> =
-                want.iter().map(|s| FixedAscii::from_ascii(s).unwrap()).collect();
+            let vals: Vec<FixedAscii<15>> = want
+                .iter()
+                .map(|s| FixedAscii::from_ascii(s).unwrap())
+                .collect();
             f.new_dataset::<FixedAscii<15>>()
                 .shape([vals.len()])
                 .create("genes")
