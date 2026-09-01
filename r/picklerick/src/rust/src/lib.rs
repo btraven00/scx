@@ -17,6 +17,7 @@ use scx_core::{
     h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5seurat::H5SeuratReader,
+    mtx::MtxReader,
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
         SparseMatrixCSR, UnsTable, VarTable, Varm,
@@ -194,6 +195,18 @@ fn scx_convert_inner(
             Some(Format::TenxH5) | Some(Format::PlainH5) => {
                 Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
             }
+            // scx-core gained MatrixMarket and Parquet readers; without arms for
+            // them these matches stop compiling against a current core, which is
+            // how the R bindings ended up pinned to an old scx-core rev.
+            Some(Format::Mtx) => {
+                let mut r = MtxReader::open(input_path, chunk)
+                    .map_err(anyhow::Error::from)?;
+                do_convert(&mut r, Path::new(output), dtype).await
+            }
+            Some(Format::Parquet) => Err(anyhow::anyhow!(
+                "Parquet input is not available through the R bindings: it needs the \
+                 gene-axis options (n_vars / genes) that only the scx CLI exposes"
+            )),
         }
     });
 
@@ -257,6 +270,18 @@ fn scx_inspect_inner(input: &str, chunk_size: i32) -> Result<Robj> {
             Some(Format::TenxH5) | Some(Format::PlainH5) => {
                 Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
             }
+            // scx-core gained MatrixMarket and Parquet readers; without arms for
+            // them these matches stop compiling against a current core, which is
+            // how the R bindings ended up pinned to an old scx-core rev.
+            Some(Format::Mtx) => {
+                let mut r = MtxReader::open(input_path, chunk)
+                    .map_err(anyhow::Error::from)?;
+                collect_info(&mut r, "MatrixMarket").await
+            }
+            Some(Format::Parquet) => Err(anyhow::anyhow!(
+                "Parquet input is not available through the R bindings: it needs the \
+                 gene-axis options (n_vars / genes) that only the scx CLI exposes"
+            )),
         }
     });
 
@@ -593,6 +618,8 @@ fn scx_read_inner(input: &str, chunk_size: i32, read_x: bool, read_uns: bool) ->
         Some(Format::NpyDir)  => "NpyDir",
         Some(Format::TenxH5)  => "TenxH5",
         Some(Format::PlainH5) => "PlainH5",
+        Some(Format::Mtx)     => "MatrixMarket",
+        Some(Format::Parquet) => "Parquet",
     };
 
     let result = block_on(async {
@@ -623,6 +650,18 @@ fn scx_read_inner(input: &str, chunk_size: i32, read_x: bool, read_uns: bool) ->
             Some(Format::TenxH5) | Some(Format::PlainH5) => {
                 Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
             }
+            // scx-core gained MatrixMarket and Parquet readers; without arms for
+            // them these matches stop compiling against a current core, which is
+            // how the R bindings ended up pinned to an old scx-core rev.
+            Some(Format::Mtx) => {
+                let mut r = MtxReader::open(input_path, chunk)
+                    .map_err(anyhow::Error::from)?;
+                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
+            }
+            Some(Format::Parquet) => Err(anyhow::anyhow!(
+                "Parquet input is not available through the R bindings: it needs the \
+                 gene-axis options (n_vars / genes) that only the scx CLI exposes"
+            )),
         }
     });
 
