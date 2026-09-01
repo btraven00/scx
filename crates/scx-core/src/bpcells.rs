@@ -313,8 +313,10 @@ fn read_u32s_file(path: &Path) -> std::io::Result<Vec<u32>> {
     let data = std::fs::read(path)?;
     assert!(data.len() >= 8 && (data.len() - 8) % 4 == 0, "{path:?}");
     Ok(data[8..]
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| u32::from_le_bytes(c))
         .collect())
 }
 
@@ -322,8 +324,10 @@ fn read_u64s_file(path: &Path) -> std::io::Result<Vec<u64>> {
     let data = std::fs::read(path)?;
     assert!(data.len() >= 8 && (data.len() - 8) % 8 == 0, "{path:?}");
     Ok(data[8..]
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&c| u64::from_le_bytes(c))
         .collect())
 }
 
@@ -331,8 +335,10 @@ fn read_f32s_file(path: &Path) -> std::io::Result<Vec<f32>> {
     let data = std::fs::read(path)?;
     assert!(data.len() >= 8 && (data.len() - 8) % 4 == 0, "{path:?}");
     Ok(data[8..]
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| f32::from_le_bytes(c))
         .collect())
 }
 
@@ -340,8 +346,10 @@ fn read_f64s_file(path: &Path) -> std::io::Result<Vec<f64>> {
     let data = std::fs::read(path)?;
     assert!(data.len() >= 8 && (data.len() - 8) % 8 == 0, "{path:?}");
     Ok(data[8..]
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&c| f64::from_le_bytes(c))
         .collect())
 }
 

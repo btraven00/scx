@@ -39,16 +39,20 @@ fn read_bp_body(path: &Path) -> Vec<u8> {
 fn read_u32s(path: &Path) -> Vec<u32> {
     let body = read_bp_body(path);
     assert_eq!(body.len() % 4, 0);
-    body.chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+    body.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| u32::from_le_bytes(c))
         .collect()
 }
 
 fn read_u64s(path: &Path) -> Vec<u64> {
     let body = read_bp_body(path);
     assert_eq!(body.len() % 8, 0);
-    body.chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+    body.as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&c| u64::from_le_bytes(c))
         .collect()
 }
 
