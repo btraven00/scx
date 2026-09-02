@@ -20,7 +20,7 @@ extendr-api = "0.7"
 # isolating picklerick's HDF5 from rhdf5 / hdf5r and avoiding ABI drift against
 # the system libhdf5 (e.g. H5Literate removed in 1.14+). Pinned to a rev for
 # reproducibility; bump on each release (a tag works too).
-scx-core    = { git = "https://github.com/btraven00/scx", rev = "3f4d45b31c987482e3884d416b0b34fec58e449d" }
+scx-core    = { git = "https://github.com/btraven00/scx", rev = "f45ddd11e8fce8611c34d16f7c04779ed54a0211" }
 ndarray     = "0.16"
 tokio       = { version = "1", features = ["rt"] }
 futures     = "0.3"
