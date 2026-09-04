@@ -1,4 +1,4 @@
-# NPY Exchange Format (0.0.7)
+# NPY Exchange Format (`scxd_version` 0.1)
 
 Internal raw-binary IR snapshots for benchmarking isolation, debugging, and
 experimental low-overhead reopen paths.
@@ -44,17 +44,22 @@ benchmark substrate**, not as a new public-facing storage standard.
 
 `spec.md` §15 sketched a `.scxd` format using a nested directory structure
 (`X/data.npy`, `obsp/connectivities/data.npy`) and named the artifact
-`.scxd`. The implementation uses a **flat layout** instead:
+`.scxd`. The implementation follows that structure: **one directory per
+slot**, with flat filenames inside each.
 
 | spec.md vision | implemented |
 |---|---|
-| `X/data.npy` | `X_data.npy` |
-| `obsp/connectivities/data.npy` | `obsp_connectivities_data.npy` |
-| `obsm/X_pca.npy` | `obsm_X_pca.npy` |
+| `X/data.npy` | `X/data.npy` |
+| `obsp/connectivities/data.npy` | `obsp/connectivities/data.npy` |
+| `obsm/X_pca.npy` | `obsm/X_pca.npy` |
 | `.scxd` extension required | any directory; `meta.json` presence is the signal |
 
-Rationale: the flat layout avoids creating one subdirectory per slot key, is
-simpler to iterate over, and keeps all files at one `readdir` depth.
+The nesting is one level deep for the per-column slots (`obs/`, `var/`,
+`obsm/`, `varm/`) — column and key names stay in the *filename*, not in a
+further subdirectory, so `obs/orig.ident_codes.npy` rather than
+`obs/orig.ident/codes.npy`.  The sparse slots that carry three arrays
+(`layers/`, `obsp/`, `varp/`) get one subdirectory per key, because
+`data`/`indices`/`indptr` are fixed names shared by every key.
 
 The `.scxd` convention can still be used as a naming recommendation for
 snapshot directories (e.g. `pbmc3k.scxd/`) but is not enforced.
@@ -68,41 +73,49 @@ format that SCX commits to promote as a primary user-facing interchange target.
 ## File layout
 
 ```
-ir_snapshot/                      ← any directory name; conventionally *.scxd
-  meta.json                        # manifest (see schema below)
+ir_snapshot/                       ← any directory name; conventionally *.scxd
+  meta.json                         # manifest (see schema below)
+  uns.json                          # serde_json dump of UnsTable.raw (omitted if empty)
 
-  X_data.npy                       # (nnz,)      f32|f64|i32|u32
-  X_indices.npy                    # (nnz,)      u32
-  X_indptr.npy                     # (n_obs+1,)  u64
+  obs_index.txt                     # n_obs lines, one barcode per line
+  var_index.txt                     # n_vars lines, one gene name per line
 
-  obs_index.txt                    # n_obs lines, one barcode per line
-  var_index.txt                    # n_vars lines, one gene name per line
+  X/
+    data.npy                        # (nnz,)      f32|f64|i32|u32
+    indices.npy                     # (nnz,)      u32
+    indptr.npy                      # (n_obs+1,)  u64
 
-  obs_{col}.npy                    # numeric obs column  (int → <i4, float → <f8)
-  obs_{col}.npy                    # bool obs column     (|b1)
-  obs_{col}_strings.txt            # string obs column, one value per line
-  obs_{col}_codes.npy              # categorical obs column: codes (u32, <u4)
-  obs_{col}_levels.txt             # categorical obs column: levels, one per line
+  obs/
+    {col}.npy                       # numeric obs column  (int → <i4, float → <f8)
+    {col}.npy                       # bool obs column     (|b1)
+    {col}_strings.txt               # string obs column, one value per line
+    {col}_codes.npy                 # categorical obs column: codes (u32, <u4)
+    {col}_levels.txt                # categorical obs column: levels, one per line
 
-  var_{col}.npy / _strings.txt / _codes.npy / _levels.txt   # same as obs_*
+  var/
+    {col}.npy / {col}_strings.txt / {col}_codes.npy / {col}_levels.txt
 
-  obsm_{key}.npy                   # (n_obs, k)   f64  dense, C-contiguous
-  varm_{key}.npy                   # (n_vars, k)  f64  dense, C-contiguous
+  obsm/
+    {key}.npy                       # (n_obs, k)   f64  dense, C-contiguous
 
-  layers_{name}_data.npy           # layer CSR — same dtype as X
-  layers_{name}_indices.npy        # (nnz,)  u32
-  layers_{name}_indptr.npy         # (n_obs+1,) u64
+  varm/
+    {key}.npy                       # (n_vars, k)  f64  dense, C-contiguous
 
-  obsp_{name}_data.npy             # pairwise obs CSR
-  obsp_{name}_indices.npy
-  obsp_{name}_indptr.npy
+  layers/{name}/
+    data.npy                        # layer CSR — same dtype as X
+    indices.npy                     # (nnz,)  u32
+    indptr.npy                      # (n_obs+1,) u64
 
-  varp_{name}_data.npy             # pairwise var CSR
-  varp_{name}_indices.npy
-  varp_{name}_indptr.npy
+  obsp/{name}/
+    data.npy indices.npy indptr.npy # pairwise obs CSR
 
-  uns.json                         # serde_json dump of UnsTable.raw (omitted if empty)
+  varp/{name}/
+    data.npy indices.npy indptr.npy # pairwise var CSR
 ```
+
+Slot directories are created lazily — a snapshot of a dataset with no layers
+has no `layers/` directory at all.  `meta.json`, `uns.json`, `obs_index.txt`
+and `var_index.txt` are the only files at the root.
 
 ### Naming rules
 
@@ -120,33 +133,44 @@ ir_snapshot/                      ← any directory name; conventionally *.scxd
 
 ```json
 {
+  "scxd_version": "0.1",
   "n_obs": 2638,
   "n_vars": 1838,
-  "x_dtype": "f32",
-  "x_present": true,
-  "obs_index_present": true,
-  "var_index_present": true,
-  "obs_columns": [
-    { "name": "nCount_RNA",    "kind": "float" },
-    { "name": "orig.ident",    "kind": "categorical" },
-    { "name": "active",        "kind": "bool" },
-    { "name": "notes",         "kind": "string" },
-    { "name": "n_genes",       "kind": "int" }
+  "X": { "shape": [2638, 1838], "nnz": 1088204, "dtype": "f32" },
+  "obs_index": { "n": 2638 },
+  "var_index": { "n": 1838 },
+  "obs": [
+    { "name": "nCount_RNA", "kind": "float",       "shape": [2638] },
+    { "name": "orig.ident", "kind": "categorical", "shape": [2638], "n_levels": 3 },
+    { "name": "active",     "kind": "bool",        "shape": [2638] },
+    { "name": "notes",      "kind": "string",      "shape": [2638] },
+    { "name": "n_genes",    "kind": "int",         "shape": [2638] }
   ],
-  "var_columns": [
-    { "name": "highly_variable", "kind": "bool" }
+  "var": [
+    { "name": "highly_variable", "kind": "bool", "shape": [1838] }
   ],
-  "obsm_keys":   ["X_pca", "X_umap"],
-  "varm_keys":   ["PCs"],
-  "layers_keys": ["spliced", "unspliced"],
-  "obsp_keys":   ["connectivities", "distances"],
-  "varp_keys":   [],
-  "uns_present": false
+  "obsm":   { "X_pca":  { "shape": [2638, 50], "dtype": "f64" } },
+  "varm":   { "PCs":    { "shape": [1838, 50], "dtype": "f64" } },
+  "layers": { "spliced": { "shape": [2638, 1838], "nnz": 1088204, "dtype": "f32" } },
+  "obsp":   { "connectivities": { "shape": [2638, 2638], "nnz": 39570, "dtype": "f64" } },
+  "varp":   {},
+  "uns": true
 }
 ```
 
-`x_dtype` is one of `"f32"`, `"f64"`, `"i32"`, `"u32"`.  Column `kind` is one
-of `"int"`, `"float"`, `"bool"`, `"string"`, `"categorical"`.
+`scxd_version` is the snapshot schema version (currently `"0.1"`), independent
+of the SCX release version.
+
+`dtype` is one of `"f32"`, `"f64"`, `"i32"`, `"u32"`.  Column `kind` is one of
+`"int"`, `"float"`, `"bool"`, `"string"`, `"categorical"`; `n_levels` is present
+only for `"categorical"`.
+
+`obs` and `var` are **arrays**, not maps — this preserves the IR column order.
+`obsm`, `varm`, `layers`, `obsp` and `varp` are maps keyed by slot name.
+
+Every field except `scxd_version`, `n_obs` and `n_vars` is omitted when the slot
+is absent or empty, so a minimal `--only X` snapshot writes just
+`scxd_version`, `n_obs`, `n_vars` and `X`.
 
 The reader uses `meta.json` as the sole source of truth for which files to
 expect.  Any `.npy` file not referenced in `meta.json` is ignored.
@@ -245,10 +269,15 @@ scx convert ir/ out.h5ad
 ### Rust API
 
 ```rust
-// Write
+// Write — materialised dataset already in memory
 NpyIrWriter::write(dir, &dataset, &SlotFilter::all())?;
 NpyIrWriter::write(dir, &dataset, &SlotFilter::from_only("X,obs_index"))?;
 NpyIrWriter::write(dir, &dataset, &SlotFilter::from_exclude("layers,obsp"))?;
+
+// Write — streaming from any DatasetReader, never holding X in memory.
+// This is what `scx snapshot` uses, so peak RSS stays at one chunk
+// regardless of nnz.
+NpyIrWriter::stream(dir, &mut *reader, &SlotFilter::all(), chunk_size).await?;
 
 // Read (one-shot)
 let reader = NpyIrReader::open(dir, chunk_size)?;
@@ -285,8 +314,8 @@ with `*const u8`).  This is sound for all types used (`f32`, `f64`, `i32`,
 
 ### Partial snapshots and the reader
 
-`NpyIrReader` degrades gracefully: if `x_present: false`, it returns an empty
-CSR (all-zero indptr, no data).  If `obs_index_present: false`, it synthesises
+`NpyIrReader` degrades gracefully: if `X` is absent from `meta.json`, it returns an empty
+CSR (all-zero indptr, no data).  If `obs_index` is absent, it synthesises
 integer indices (`"0"`, `"1"`, …).  This means a snapshot written with
 `--only X,obs_index` can still be fed into `scx convert` and produce a valid
 H5AD.
@@ -501,11 +530,11 @@ current implementation scope.
 
 ## Open questions
 
-**Flat vs nested layout.** The flat layout (`X_data.npy`) works well up to
-~100 keys per slot.  If a dataset has hundreds of layers or obsp keys, the
-directory gets unwieldy.  The nested layout from spec.md (`layers/spliced/data.npy`)
-would be cleaner but adds subdirectory creation.  Consider migrating in 0.1.x
-if the key count grows.
+**Key count per slot.** The nested layout keeps `data`/`indices`/`indptr`
+under one directory per key for `layers`/`obsp`/`varp`, but `obs`/`var`/`obsm`/
+`varm` still put every column at one `readdir` depth inside their slot
+directory.  That is fine up to a few thousand columns; a dataset with more
+would want a further split.  Not a concern for current datasets.
 
 **Column name sanitisation.** Column names are used verbatim as file stems.
 If a column name contains `/`, `\0`, or other filesystem-illegal characters,
@@ -513,7 +542,7 @@ the write fails.  A sanitisation pass (replacing illegal chars with `_`, storing
 the original name in `meta.json`) would be robust.  Not needed for current
 datasets.
 
-**indptr dtype.** `X_indptr.npy` uses `u64` (`<u8`) to support >4B non-zero
+**indptr dtype.** `X/indptr.npy` uses `u64` (`<u8`) to support >4B non-zero
 entries.  Most datasets have nnz < 2^32.  A `u32` indptr would halve the size
 and be directly usable as R integer.  Could add dtype field per-array in
 `meta.json` and write `u32` when nnz < 2^32.
