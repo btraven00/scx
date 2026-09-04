@@ -1,6 +1,6 @@
 [package]
 name = "scx-cli"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Swiss-army knife for single-cell data formats"
 authors = ["btraven <ben.uzh@pm.me>"]
@@ -19,7 +19,7 @@ vendored-hdf5 = ["scx-core/vendored-hdf5"]
 net = ["scx-core/net", "dep:tokio"]
 
 [dependencies]
-scx-core = { path = "../scx-core", version = "0.3.0", default-features = false }
+scx-core = { path = "../scx-core", version = "0.4.0", default-features = false }
 # Runtime constructed in main() only under the `net` feature.
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 anyhow = "1"
