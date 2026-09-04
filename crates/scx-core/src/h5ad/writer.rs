@@ -515,16 +515,22 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData, compression: Option<
             let attr = cat_grp.new_attr::<u8>().create("ordered")?;
             attr.write_scalar(&0u8)?;
 
-            // codes (i8 for ≤127 categories, i16 otherwise)
-            if levels.len() <= 127 {
+            // Codes are written as the narrowest signed integer that can hold
+            // every level index. Signed because AnnData reserves -1 for NA.
+            // The i32 arm matters: `as i16` silently wraps, so a column with
+            // more than 32767 levels (cell barcodes, cell names) used to be
+            // written as garbage codes that no reader could detect.
+            let ds = if levels.len() <= i8::MAX as usize {
                 let c: Vec<i8> = codes.iter().map(|&x| x as i8).collect();
-                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?;
-                write_encoding_on_ds(&ds, "array", "0.2.0")?;
-            } else {
+                write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?
+            } else if levels.len() <= i16::MAX as usize {
                 let c: Vec<i16> = codes.iter().map(|&x| x as i16).collect();
-                let ds = write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?;
-                write_encoding_on_ds(&ds, "array", "0.2.0")?;
-            }
+                write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?
+            } else {
+                let c: Vec<i32> = codes.iter().map(|&x| x as i32).collect();
+                write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?
+            };
+            write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
             let cat_ds = write_vlen_str_dataset(&cat_grp, "categories", levels)?;
             write_encoding_on_ds(&cat_ds, "string-array", "0.2.0")?;

@@ -1435,3 +1435,164 @@ async fn bool_columns_stay_enum_when_compressed() {
         other => panic!("expected Bool column, got {other:?}"),
     }
 }
+
+/// Regression: a categorical column with more than 32767 levels must not have
+/// its codes silently truncated.
+///
+/// The writer picked `i8` for ≤127 levels and `i16` for everything else. Rust's
+/// `as` cast wraps rather than saturating or panicking, so every code above
+/// 32767 was written as a wrong — often negative — index. Nothing detected it:
+/// scx's own reader widens whatever it finds back to `u32`, so a scx→scx
+/// round-trip looked clean. AnnData is where it surfaces, as
+/// `ValueError: codes need to be between -1 and len(categories)-1`.
+///
+/// Repro in the wild: a CELLxGENE h5ad whose `obs/original_barcodes` has
+/// 1,049,060 levels and `obs/cell_name` 1,234,206 — both were unreadable by
+/// `anndata.read_h5ad` after passing through `scx convert`.
+#[tokio::test]
+async fn categorical_codes_wider_than_i16_are_not_truncated() {
+    // One level per cell, comfortably past i16::MAX.
+    let n_obs = 40_000usize;
+    let n_vars = 2usize;
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let levels: Vec<String> = (0..n_obs).map(|i| format!("bc{i}")).collect();
+    let codes: Vec<u32> = (0..n_obs as u32).collect();
+
+    let obs = ObsTable {
+        index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
+        columns: vec![Column {
+            name: "original_barcodes".into(),
+            data: ColumnData::Categorical {
+                codes: codes.clone(),
+                levels: levels.clone(),
+            },
+        }],
+    };
+    let var = VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    };
+    let (indptr, indices, data) = diag_csr(n_obs, n_vars);
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
+    };
+
+    let mut w = H5AdWriter::create(&path, n_obs, n_vars, DataType::F32).unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_var(&var).await.unwrap();
+    w.write_x_chunk(&chunk).await.unwrap();
+    w.finalize().await.unwrap();
+    drop(w);
+
+    // Every code must survive, and none may go negative — that is exactly what
+    // AnnData rejects.
+    let mut rt = H5AdReader::open(&path, 5000).unwrap();
+    let rt_obs = rt.obs().await.unwrap();
+    let col = rt_obs
+        .columns
+        .iter()
+        .find(|c| c.name == "original_barcodes")
+        .expect("categorical column must survive");
+    match &col.data {
+        ColumnData::Categorical {
+            codes: rc,
+            levels: rl,
+        } => {
+            assert_eq!(rl.len(), levels.len(), "level count must round-trip");
+            assert_eq!(rc, &codes, "codes must round-trip exactly, not wrap");
+            let max = rc.iter().copied().max().unwrap() as usize;
+            assert!(
+                max < rl.len(),
+                "max code {max} must be < {} levels — AnnData rejects otherwise",
+                rl.len()
+            );
+        }
+        other => panic!("expected Categorical, got {other:?}"),
+    }
+
+    // On disk the codes must be i32: i16 cannot represent 40000 levels.
+    let f = File::open(&path).unwrap();
+    let descr = f
+        .dataset("obs/original_barcodes/codes")
+        .unwrap()
+        .dtype()
+        .unwrap()
+        .to_descriptor()
+        .unwrap();
+    assert_eq!(
+        descr,
+        hdf5::types::TypeDescriptor::Integer(hdf5::types::IntSize::U4),
+        "codes for >32767 levels must widen to i32, got {descr:?}"
+    );
+}
+
+/// The narrow arms must stay narrow — widening everything to i32 would bloat
+/// files whose categoricals are small, which is most of them.
+#[tokio::test]
+async fn categorical_codes_stay_narrow_for_small_level_counts() {
+    for (n_levels, want) in [
+        (100usize, hdf5::types::IntSize::U1),
+        (1000usize, hdf5::types::IntSize::U2),
+    ] {
+        let n_obs = n_levels;
+        let n_vars = 2usize;
+        let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let obs = ObsTable {
+            index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+            columns: vec![Column {
+                name: "grp".into(),
+                data: ColumnData::Categorical {
+                    codes: (0..n_obs as u32).collect(),
+                    levels: (0..n_levels).map(|i| format!("l{i}")).collect(),
+                },
+            }],
+        };
+        let var = VarTable {
+            index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+            columns: vec![],
+        };
+        let (indptr, indices, data) = diag_csr(n_obs, n_vars);
+        let chunk = MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr,
+                indices,
+                data: TypedVec::F32(data),
+            },
+        };
+
+        let mut w = H5AdWriter::create(&path, n_obs, n_vars, DataType::F32).unwrap();
+        w.write_obs(&obs).await.unwrap();
+        w.write_var(&var).await.unwrap();
+        w.write_x_chunk(&chunk).await.unwrap();
+        w.finalize().await.unwrap();
+        drop(w);
+
+        let f = File::open(&path).unwrap();
+        let descr = f
+            .dataset("obs/grp/codes")
+            .unwrap()
+            .dtype()
+            .unwrap()
+            .to_descriptor()
+            .unwrap();
+        assert_eq!(
+            descr,
+            hdf5::types::TypeDescriptor::Integer(want),
+            "{n_levels} levels should use {want:?}, got {descr:?}"
+        );
+    }
+}
