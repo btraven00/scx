@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0](https://github.com/btraven00/scx/compare/scx-cli-v0.3.0...scx-cli-v0.4.0) (2026-09-04)
+
+
+### Features
+
+* **concat:** obs-axis concatenation with anndata.concat() semantics ([913e908](https://github.com/btraven00/scx/commit/913e9086bfac86c862dd4ac97a51c3ea9af18f2b))
+* **convert:** --only/--exclude slot filter for h5ad output ([bd29ecc](https://github.com/btraven00/scx/commit/bd29eccd8fdb6889de3e4625419f04b924ca532e))
+
+
+### Bug Fixes
+
+* fallback for no-X in file ([7fe856e](https://github.com/btraven00/scx/commit/7fe856ee76a964be6e6295ef09b3974db979f36c))
+* **h5ad:** read anndata 0.13 nullable-string-array; survive NaN in inspect ([b55378c](https://github.com/btraven00/scx/commit/b55378c9b6f90400e57f78a43819bcc70c16813f))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.3.0 to 0.4.0
+
 ## [0.3.0](https://github.com/btraven00/scx/compare/scx-cli-v0.2.0...scx-cli-v0.3.0) (2026-07-02)
 
 

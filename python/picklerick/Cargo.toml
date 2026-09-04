@@ -1,6 +1,6 @@
 [package]
 name = "picklerick-py-native"
-version = "0.0.11"
+version = "0.0.12"
 edition = "2021"
 description = "Optional PyO3 native bindings for the picklerick Python package"
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0](https://github.com/btraven00/scx/compare/scx-core-v0.3.0...scx-core-v0.4.0) (2026-09-04)
+
+
+### Features
+
+* **concat:** obs-axis concatenation with anndata.concat() semantics ([913e908](https://github.com/btraven00/scx/commit/913e9086bfac86c862dd4ac97a51c3ea9af18f2b))
+
+
+### Bug Fixes
+
+* fallback for no-X in file ([7fe856e](https://github.com/btraven00/scx/commit/7fe856ee76a964be6e6295ef09b3974db979f36c))
+* **h5ad:** drop obs/var column named `_index` (collides with frame index) ([dc7e6d6](https://github.com/btraven00/scx/commit/dc7e6d63c8e4d9c2f4dd00705e6b08ddfa0f7a89))
+* **h5ad:** read anndata 0.13 nullable-string-array; survive NaN in inspect ([b55378c](https://github.com/btraven00/scx/commit/b55378c9b6f90400e57f78a43819bcc70c16813f))
+* **h5ad:** widen categorical codes to i32 past 32767 levels ([48a0cd0](https://github.com/btraven00/scx/commit/48a0cd0f6c4e9034e93893fceae55237b50d5388))
+* **h5ad:** write bool columns as H5T_ENUM, not a plain integer ([67f3241](https://github.com/btraven00/scx/commit/67f32410618d4b6b7ceecf4f5728cf3652291bdd))
+* **h5:** read fixed-length string datasets instead of silently returning empty ([c830e28](https://github.com/btraven00/scx/commit/c830e284182200a0701dfde7ba79e5a666323de7))
+* **h5seurat:** --seuratdisk-compat must attribute reduction groups ([6dc451c](https://github.com/btraven00/scx/commit/6dc451cb0a55bacf5641de47adec1bc4766f0871))
+* **tenx:** accept the Cell Ranger v2 /matrix/genes layout ([f21d6f4](https://github.com/btraven00/scx/commit/f21d6f49d6465191f33dd11a5f8faa4b5a100693))
+
 ## [0.3.0](https://github.com/btraven00/scx/compare/scx-core-v0.2.0...scx-core-v0.3.0) (2026-07-02)
 
 
