@@ -1269,3 +1269,169 @@ async fn test_reads_anndata_013_nullable_string_index_and_column() {
         other => panic!("expected String column, got {other:?}"),
     }
 }
+
+/// Regression: boolean obs/var columns must be written as the HDF5 enum
+/// `{FALSE=0, TRUE=1}` that h5py/AnnData use, not as a plain integer.
+///
+/// The writer used to cast `ColumnData::Bool` to `u8`, producing an
+/// `H5T_INTEGER` dataset. Readers that key off the HDF5 type rather than the
+/// `encoding-type` attribute then mis-typed the column: `rhdf5::h5read` hands
+/// back an R `raw` vector instead of `logical`, and passing that to duckdb's
+/// `rapi_register_df` aborts with a bare `std::exception`. Repro in the wild:
+/// a CELLxGENE h5ad (`obs/is_primary_data`, `var/feature_is_filtered`)
+/// round-tripped through scx and then ingested by the bixverse R package.
+///
+/// Asserting on the *dtype*, not just the round-tripped values, is the point —
+/// scx's own reader accepts both encodings, so a value-only test passes with
+/// the bug present.
+#[tokio::test]
+async fn bool_columns_are_written_as_h5_enum_not_integer() {
+    let (n_obs, n_vars) = (4usize, 3usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let flags: Vec<bool> = vec![true, false, true, true];
+    let gene_flags: Vec<bool> = vec![false, true, false];
+
+    let obs = ObsTable {
+        index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
+        columns: vec![Column {
+            name: "is_primary_data".into(),
+            data: ColumnData::Bool(flags.clone()),
+        }],
+    };
+    let var = VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![Column {
+            name: "feature_is_filtered".into(),
+            data: ColumnData::Bool(gene_flags.clone()),
+        }],
+    };
+    let (indptr, indices, data) = diag_csr(n_obs, n_vars);
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
+    };
+
+    let mut w = H5AdWriter::create(&path, n_obs, n_vars, DataType::F32).unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_var(&var).await.unwrap();
+    w.write_x_chunk(&chunk).await.unwrap();
+    w.finalize().await.unwrap();
+    drop(w);
+
+    // The actual regression: on-disk HDF5 type must be Boolean (an enum), and
+    // must NOT be Integer, for both frames.
+    let f = File::open(&path).unwrap();
+    for ds_path in ["obs/is_primary_data", "var/feature_is_filtered"] {
+        let ds = f.dataset(ds_path).unwrap();
+        let descr = ds.dtype().unwrap().to_descriptor().unwrap();
+        assert_eq!(
+            descr,
+            hdf5::types::TypeDescriptor::Boolean,
+            "{ds_path} must be an HDF5 enum bool, got {descr:?}"
+        );
+    }
+    drop(f);
+
+    // …and the values still survive the round-trip.
+    let mut rt = H5AdReader::open(&path, 500).unwrap();
+    let rt_obs = rt.obs().await.unwrap();
+    match &rt_obs
+        .columns
+        .iter()
+        .find(|c| c.name == "is_primary_data")
+        .unwrap()
+        .data
+    {
+        ColumnData::Bool(v) => assert_eq!(v, &flags, "obs bool values must round-trip"),
+        other => panic!("expected Bool column, got {other:?}"),
+    }
+    let rt_var = rt.var().await.unwrap();
+    match &rt_var
+        .columns
+        .iter()
+        .find(|c| c.name == "feature_is_filtered")
+        .unwrap()
+        .data
+    {
+        ColumnData::Bool(v) => assert_eq!(v, &gene_flags, "var bool values must round-trip"),
+        other => panic!("expected Bool column, got {other:?}"),
+    }
+}
+
+/// The enum encoding must survive the compressed path too: booleans are one
+/// byte, so they take the chunk+deflate branch of `write_1d`, and a filter
+/// pipeline is exactly the kind of thing that can silently change a dtype.
+#[tokio::test]
+async fn bool_columns_stay_enum_when_compressed() {
+    let (n_obs, n_vars) = (64usize, 2usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let flags: Vec<bool> = (0..n_obs).map(|i| i % 3 == 0).collect();
+    let obs = ObsTable {
+        index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+        columns: vec![Column {
+            name: "flag".into(),
+            data: ColumnData::Bool(flags.clone()),
+        }],
+    };
+    let var = VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    };
+    let (indptr, indices, data) = diag_csr(n_obs, n_vars);
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
+    };
+
+    let mut w =
+        H5AdWriter::create_compressed(&path, n_obs, n_vars, DataType::F32, Some(4)).unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_var(&var).await.unwrap();
+    w.write_x_chunk(&chunk).await.unwrap();
+    w.finalize().await.unwrap();
+    drop(w);
+
+    let f = File::open(&path).unwrap();
+    let descr = f
+        .dataset("obs/flag")
+        .unwrap()
+        .dtype()
+        .unwrap()
+        .to_descriptor()
+        .unwrap();
+    assert_eq!(
+        descr,
+        hdf5::types::TypeDescriptor::Boolean,
+        "compressed bool column must still be an enum, got {descr:?}"
+    );
+    drop(f);
+
+    let mut rt = H5AdReader::open(&path, 500).unwrap();
+    let rt_obs = rt.obs().await.unwrap();
+    match &rt_obs
+        .columns
+        .iter()
+        .find(|c| c.name == "flag")
+        .unwrap()
+        .data
+    {
+        ColumnData::Bool(v) => assert_eq!(v, &flags),
+        other => panic!("expected Bool column, got {other:?}"),
+    }
+}

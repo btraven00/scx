@@ -495,8 +495,12 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData, compression: Option<
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::Bool(v) => {
-            let vi: Vec<u8> = v.iter().map(|&b| b as u8).collect();
-            let ds = write_1d(grp, name, Array1::from_vec(vi), compression)?;
+            // Write as Rust `bool`, which hdf5 maps to the H5T_ENUM {FALSE=0,
+            // TRUE=1} that h5py/AnnData use for booleans. Writing a plain u8
+            // here instead produces an H5T_INTEGER that readers key off dtype
+            // — rhdf5 hands it back as `raw` rather than logical, which breaks
+            // consumers downstream of a round-trip.
+            let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
         ColumnData::String(v) => {
