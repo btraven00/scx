@@ -771,6 +771,11 @@ impl DatasetReader for ZarrAdReader {
         let mut metas = Vec::new();
         for name in children(&self.store, "layers") {
             let path = format!("layers/{name}");
+            // The layer already serving as X (no X, or open_layer) is not also a
+            // layer, or every consumer carries the matrix twice (h5ad: PR #34).
+            if path == self.x_path {
+                continue;
+            }
             match node(&self.store, &path) {
                 // Dense layer: shape only; indptr stays empty.
                 Some(Node::Array(arr)) if arr.shape().len() == 2 => metas.push(SparseMatrixMeta {

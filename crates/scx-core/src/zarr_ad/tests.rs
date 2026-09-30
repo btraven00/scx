@@ -138,3 +138,21 @@ async fn explicit_layer_is_read_like_h5ad() {
         assert!(ZarrAdReader::open_layer(fixture(name), CHUNK, Some("nope")).is_err());
     }
 }
+
+/// The layer serving as X is not listed again as a layer (as h5ad after #34):
+/// otherwise `scx convert` of a store written with `adata.X = None` writes the
+/// matrix twice.
+#[tokio::test]
+async fn layer_serving_as_x_is_not_also_a_layer() {
+    for name in ["small_v2.zarr", "small_v3.zarr"] {
+        let mut z = ZarrAdReader::open_layer(fixture(name), CHUNK, Some("counts")).unwrap();
+        let names: Vec<String> = z
+            .layer_metas()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert!(!names.contains(&"counts".to_string()), "{name}: {names:?}");
+    }
+}
