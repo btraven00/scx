@@ -435,10 +435,8 @@ fn write_version_attr(grp: &Group, version: &str) -> Result<()> {
 
 /// Write a packed BPCells matrix into an HDF5 group.
 ///
-/// BPCells groups columns into "runs" of 128. Each run's nonzeros are encoded
-/// independently so chunk boundaries always align with run boundaries.
-/// `index_idx_offsets[r]` and `val_idx_offsets[r]` mark where run r's slice
-/// begins within the concatenated `index_idx` / `val_idx` arrays.
+/// Indices and values are each one flat stream of 128-value BP-128 chunks.
+/// `*_idx_offsets` mark where `*_idx` crosses multiples of 2^32 words.
 ///
 /// `shape` is stored as `[nrow, ncol]` in BPCells convention.
 #[allow(clippy::too_many_arguments)]
@@ -471,68 +469,22 @@ pub fn write_bpcells_h5(
     write_strings(&grp, "row_names", row_names)?;
     write_strings(&grp, "col_names", col_names)?;
 
-    let n_runs = ncol.div_ceil(128);
-
-    // Encode indices and values per-run so chunk boundaries align with run
-    // boundaries. This is required by BPCells: runs must be independently
-    // decodable.
-    let mut all_index_data: Vec<u32> = Vec::new();
-    let mut all_index_idx: Vec<u32> = Vec::new();
-    let mut all_index_starts: Vec<u32> = Vec::new();
-    let mut index_idx_offsets: Vec<u64> = Vec::with_capacity(n_runs + 1);
-    index_idx_offsets.push(0);
-
-    // For Uint32 values only (floats have no compression index).
-    let mut all_val_data: Vec<u32> = Vec::new();
-    let mut all_val_idx: Vec<u32> = Vec::new();
-    let mut val_idx_offsets: Vec<u64> = Vec::with_capacity(n_runs + 1);
-    val_idx_offsets.push(0);
-
-    for r in 0..n_runs {
-        let col_start = r * 128;
-        let col_end = ((r + 1) * 128).min(ncol);
-        let nnz_start = idxptr[col_start] as usize;
-        let nnz_end = idxptr[col_end] as usize;
-
-        // Encode this run's row indices.
-        let (run_idx_data, mut run_idx_idx, run_idx_starts) =
-            encode_d1z(&index[nnz_start..nnz_end])?;
-
-        // Adjust run-local idx offsets to be global (offset by data written so far).
-        let idx_data_offset = all_index_data.len() as u32;
-        for v in &mut run_idx_idx {
-            *v += idx_data_offset;
-        }
-
-        all_index_data.extend_from_slice(&run_idx_data);
-        all_index_idx.extend_from_slice(&run_idx_idx); // includes per-run sentinel
-        all_index_starts.extend_from_slice(&run_idx_starts);
-        index_idx_offsets.push(all_index_idx.len() as u64);
-
-        // Encode this run's values (Uint32 only; floats written flat later).
-        if let ValStore::Uint32(v) = values {
-            let (run_val_data, mut run_val_idx) = encode_for(&v[nnz_start..nnz_end]);
-            let val_data_offset = all_val_data.len() as u32;
-            for vv in &mut run_val_idx {
-                *vv += val_data_offset;
-            }
-            all_val_data.extend_from_slice(&run_val_data);
-            all_val_idx.extend_from_slice(&run_val_idx);
-            val_idx_offsets.push(all_val_idx.len() as u64);
-        }
-    }
-
-    write_u32s(&grp, "index_data", &all_index_data)?;
-    write_u32s(&grp, "index_idx", &all_index_idx)?;
+    // One flat stream of 128-value chunks over all nonzeros (BPCells spec);
+    // chunks do not align with columns.
+    let (index_data, index_idx, index_starts) = encode_d1z(index)?;
+    let index_idx_offsets = idx_offsets(&index_idx);
+    write_u32s(&grp, "index_data", &index_data)?;
+    write_u32s(&grp, "index_idx", &wrap_idx(&index_idx))?;
     write_u64s(&grp, "index_idx_offsets", &index_idx_offsets)?;
-    write_u32s(&grp, "index_starts", &all_index_starts)?;
+    write_u32s(&grp, "index_starts", &index_starts)?;
 
     match values {
-        ValStore::Uint32(_) => {
+        ValStore::Uint32(v) => {
             write_version_attr(&grp, "packed-uint-matrix-v2")?;
-            write_u32s(&grp, "val_data", &all_val_data)?;
-            write_u32s(&grp, "val_idx", &all_val_idx)?;
-            write_u64s(&grp, "val_idx_offsets", &val_idx_offsets)?;
+            let (val_data, val_idx) = encode_for(v);
+            write_u32s(&grp, "val_data", &val_data)?;
+            write_u32s(&grp, "val_idx", &wrap_idx(&val_idx))?;
+            write_u64s(&grp, "val_idx_offsets", &idx_offsets(&val_idx))?;
         }
         ValStore::Float32(v) => {
             write_version_attr(&grp, "packed-float-matrix-v2")?;
@@ -551,6 +503,29 @@ pub fn write_bpcells_h5(
 
 /// Chunk size (elements) for the resizable encoded datasets.
 const BPCELLS_STREAM_CHUNK: usize = 1 << 16;
+
+/// A borrowed 1-D array of one of the BPCells element types.
+pub(crate) enum Arr<'a> {
+    U32(&'a [u32]),
+    U64(&'a [u64]),
+    F32(&'a [f32]),
+    F64(&'a [f64]),
+}
+
+/// Where [`BpcellsStreamEncoder`] puts its arrays: an HDF5 group or a
+/// BPCells directory (see `bpcells::DirSink`). Same names, same contents.
+pub(crate) trait BpSink {
+    /// Append to a streamed array, creating it on first call (an empty `data`
+    /// just creates it).
+    fn append(&mut self, name: &str, data: Arr) -> Result<()>;
+    /// Write a whole small array in one go.
+    fn put(&mut self, name: &str, data: Arr) -> Result<()>;
+    fn put_strings(&mut self, name: &str, values: &[String]) -> Result<()>;
+    fn put_version(&mut self, version: &str) -> Result<()>;
+    fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
 
 fn create_resizable<T: hdf5::H5Type>(grp: &Group, name: &str) -> Result<Dataset> {
     grp.new_dataset::<T>()
@@ -573,55 +548,13 @@ fn append_1d<T: hdf5::H5Type + Clone>(ds: &Dataset, data: &[T]) -> Result<()> {
     Ok(())
 }
 
-/// Streaming BPCells column encoder. Accepts cell-major CSR chunks **in obs
-/// order** and encodes complete 128-column (cell) runs into resizable HDF5
-/// datasets, holding only the trailing `<128`-cell partial run in memory. Peak
-/// RAM is O(n_obs idxptr + chunk), not O(nnz).
-///
-/// Output is byte-identical to the buffered [`write_bpcells_h5`] for
-/// sorted-within-cell CSR input (the standard CSR invariant): the per-run
-/// `encode_d1z`/`encode_for` calls operate on exactly the same slices.
-struct BpcellsStreamEncoder {
+pub(crate) struct H5Sink {
     grp: Group,
-    nrow: usize,
-    ncol: usize,
-    storage_order: StorageOrder,
-    val_kind: Option<DataType>,
-
-    index_data: Dataset,
-    index_idx: Dataset,
-    index_starts: Dataset,
-    val_data: Option<Dataset>,
-    val_idx: Option<Dataset>,
-    val_flat: Option<Dataset>,
-
-    // Carry buffer: CSR for cells accumulated but not yet encoded, rebased so
-    // buf_cellptr[0] == 0.
-    buf_indices: Vec<u32>,
-    buf_u32: Vec<u32>,
-    buf_f32: Vec<f32>,
-    buf_f64: Vec<f64>,
-    buf_cellptr: Vec<u64>,
-
-    // Metadata accumulated for the finalize write.
-    idxptr: Vec<u64>,
-    index_idx_offsets: Vec<u64>,
-    val_idx_offsets: Vec<u64>,
-    // Running lengths of the streamed datasets, for global offset bookkeeping.
-    index_data_words: u64,
-    val_data_words: u64,
-    index_idx_total: u64,
-    val_idx_total: u64,
+    streams: std::collections::HashMap<String, Dataset>,
 }
 
-impl BpcellsStreamEncoder {
-    fn new(
-        file: &File,
-        group_path: &str,
-        storage_order: StorageOrder,
-        nrow: usize,
-        ncol: usize,
-    ) -> Result<Self> {
+impl H5Sink {
+    fn new(file: &File, group_path: &str) -> Result<Self> {
         let grp = match file.group(group_path) {
             Ok(g) => g,
             Err(_) => file.create_group(group_path).map_err(|e| {
@@ -630,34 +563,183 @@ impl BpcellsStreamEncoder {
                 ))
             })?,
         };
-        let index_data = create_resizable::<u32>(&grp, "index_data")?;
-        let index_idx = create_resizable::<u32>(&grp, "index_idx")?;
-        let index_starts = create_resizable::<u32>(&grp, "index_starts")?;
         Ok(Self {
             grp,
+            streams: Default::default(),
+        })
+    }
+}
+
+impl BpSink for H5Sink {
+    fn append(&mut self, name: &str, data: Arr) -> Result<()> {
+        if !self.streams.contains_key(name) {
+            let ds = match data {
+                Arr::U32(_) => create_resizable::<u32>(&self.grp, name)?,
+                Arr::U64(_) => create_resizable::<u64>(&self.grp, name)?,
+                Arr::F32(_) => create_resizable::<f32>(&self.grp, name)?,
+                Arr::F64(_) => create_resizable::<f64>(&self.grp, name)?,
+            };
+            self.streams.insert(name.to_string(), ds);
+        }
+        let ds = &self.streams[name];
+        match data {
+            Arr::U32(v) => append_1d(ds, v),
+            Arr::U64(v) => append_1d(ds, v),
+            Arr::F32(v) => append_1d(ds, v),
+            Arr::F64(v) => append_1d(ds, v),
+        }
+    }
+
+    fn put(&mut self, name: &str, data: Arr) -> Result<()> {
+        match data {
+            Arr::U32(v) => write_u32s(&self.grp, name, v),
+            Arr::U64(v) => write_u64s(&self.grp, name, v),
+            Arr::F32(v) => write_f32s(&self.grp, name, v),
+            Arr::F64(v) => write_f64s(&self.grp, name, v),
+        }
+    }
+
+    fn put_strings(&mut self, name: &str, values: &[String]) -> Result<()> {
+        write_strings(&self.grp, name, values)
+    }
+
+    fn put_version(&mut self, version: &str) -> Result<()> {
+        write_version_attr(&self.grp, version)
+    }
+}
+
+/// `idx` values are stored mod 2^32 (BPCells `idx` is uint32).
+fn wrap_idx(idx: &[u64]) -> Vec<u32> {
+    idx.iter().map(|&w| w as u32).collect()
+}
+
+/// BPCells `idx_offsets`: entries `idx_offsets[i]..idx_offsets[i+1]` of `idx`
+/// get `i * 2^32` added back. Length = (number of 2^32 wraps) + 2.
+fn idx_offsets(idx: &[u64]) -> Vec<u64> {
+    let mut off = vec![0u64];
+    let top = idx.last().copied().unwrap_or(0) >> 32;
+    for wrap in 1..=top {
+        off.push(idx.partition_point(|&w| w < wrap << 32) as u64);
+    }
+    off.push(idx.len() as u64);
+    off
+}
+
+/// Running state of one BP-128 packed stream (index or values) being
+/// appended to in pieces. Pieces are whole 128-value chunks except the last.
+#[derive(Default)]
+struct PackedStream {
+    words: u64,
+    idx_len: u64,
+    offsets: Vec<u64>,
+}
+
+impl PackedStream {
+    /// Rebase a piece's local `idx` (leading 0, trailing total) to global
+    /// word positions, dropping the trailing total (the next piece's leading 0
+    /// or `finish` supplies it). Returns the u32 `idx` entries to append.
+    fn push_piece(&mut self, words: usize, local_idx: &[u64]) -> Vec<u32> {
+        let global: Vec<u64> = local_idx[..local_idx.len() - 1]
+            .iter()
+            .map(|&w| self.words + w)
+            .collect();
+        self.note_wraps(&global);
+        self.words += words as u64;
+        wrap_idx(&global)
+    }
+
+    /// The final `idx` sentinel (total word count) and the `idx_offsets` array.
+    fn finish(&mut self) -> (u32, Vec<u64>) {
+        let last = self.words;
+        self.note_wraps(&[last]);
+        let mut offsets = vec![0];
+        offsets.append(&mut self.offsets);
+        offsets.push(self.idx_len);
+        (last as u32, offsets)
+    }
+
+    fn note_wraps(&mut self, global: &[u64]) {
+        for &w in global {
+            while w >> 32 > self.offsets.len() as u64 {
+                self.offsets.push(self.idx_len);
+            }
+            self.idx_len += 1;
+        }
+    }
+}
+
+/// Streaming BPCells encoder. Accepts cell-major CSR chunks **in obs order**
+/// (cells become the outer dimension) and appends full 128-value BP-128 chunks
+/// of the flat nonzero stream to a [`BpSink`], holding back only the `<128`
+/// value tail. Peak RAM is O(n_obs idxptr + chunk), not O(nnz).
+///
+/// Output is identical to the buffered [`write_bpcells_h5`]: the packed
+/// streams are split only at 128-value boundaries, and BP-128 chunks are
+/// independent.
+pub(crate) struct BpcellsStreamEncoder<S: BpSink> {
+    sink: S,
+    nrow: usize,
+    ncol: usize,
+    storage_order: StorageOrder,
+    val_kind: Option<DataType>,
+
+    // Not-yet-encoded tail of the nonzero stream (< 128 after each push).
+    buf_indices: Vec<u32>,
+    buf_u32: Vec<u32>,
+
+    idxptr: Vec<u64>,
+    index: PackedStream,
+    val: PackedStream,
+}
+
+impl BpcellsStreamEncoder<H5Sink> {
+    fn new_h5(
+        file: &File,
+        group_path: &str,
+        storage_order: StorageOrder,
+        nrow: usize,
+        ncol: usize,
+    ) -> Result<Self> {
+        Self::new(H5Sink::new(file, group_path)?, storage_order, nrow, ncol)
+    }
+}
+
+impl<S: BpSink> BpcellsStreamEncoder<S> {
+    pub(crate) fn new(
+        mut sink: S,
+        storage_order: StorageOrder,
+        nrow: usize,
+        ncol: usize,
+    ) -> Result<Self> {
+        for name in ["index_data", "index_idx", "index_starts"] {
+            sink.append(name, Arr::U32(&[]))?;
+        }
+        Ok(Self {
+            sink,
             nrow,
             ncol,
             storage_order,
             val_kind: None,
-            index_data,
-            index_idx,
-            index_starts,
-            val_data: None,
-            val_idx: None,
-            val_flat: None,
             buf_indices: Vec::new(),
             buf_u32: Vec::new(),
-            buf_f32: Vec::new(),
-            buf_f64: Vec::new(),
-            buf_cellptr: vec![0],
             idxptr: vec![0],
-            index_idx_offsets: vec![0],
-            val_idx_offsets: vec![0],
-            index_data_words: 0,
-            val_data_words: 0,
-            index_idx_total: 0,
-            val_idx_total: 0,
+            index: PackedStream::default(),
+            val: PackedStream::default(),
         })
+    }
+
+    fn create_val_arrays(&mut self, kind: DataType) -> Result<()> {
+        match kind {
+            DataType::U32 => {
+                self.sink.append("val_data", Arr::U32(&[]))?;
+                self.sink.append("val_idx", Arr::U32(&[]))
+            }
+            DataType::F32 => self.sink.append("val", Arr::F32(&[])),
+            DataType::F64 => self.sink.append("val", Arr::F64(&[])),
+            DataType::I32 => Err(ScxError::InvalidFormat(
+                "BPCells writer does not support I32 matrices".into(),
+            )),
+        }
     }
 
     fn ensure_val_kind(&mut self, kind: DataType) -> Result<()> {
@@ -669,24 +751,12 @@ impl BpcellsStreamEncoder {
             }
             return Ok(());
         }
-        match kind {
-            DataType::U32 => {
-                self.val_data = Some(create_resizable::<u32>(&self.grp, "val_data")?);
-                self.val_idx = Some(create_resizable::<u32>(&self.grp, "val_idx")?);
-            }
-            DataType::F32 => self.val_flat = Some(create_resizable::<f32>(&self.grp, "val")?),
-            DataType::F64 => self.val_flat = Some(create_resizable::<f64>(&self.grp, "val")?),
-            DataType::I32 => {
-                return Err(ScxError::InvalidFormat(
-                    "BPCells writer does not support I32 matrices".into(),
-                ))
-            }
-        }
+        self.create_val_arrays(kind)?;
         self.val_kind = Some(kind);
         Ok(())
     }
 
-    fn push_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+    pub(crate) fn push_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
         let csr = &chunk.data;
         if csr.indices.len() != csr.data.len() {
             return Err(ScxError::InvalidFormat(
@@ -695,99 +765,52 @@ impl BpcellsStreamEncoder {
         }
         self.ensure_val_kind(csr.data.dtype())?;
 
-        for c in 0..chunk.nrows {
-            let lo = csr.indptr[c] as usize;
-            let hi = csr.indptr[c + 1] as usize;
-            self.buf_indices.extend_from_slice(&csr.indices[lo..hi]);
-            match &csr.data {
-                TypedVec::U32(v) => self.buf_u32.extend_from_slice(&v[lo..hi]),
-                TypedVec::F32(v) => self.buf_f32.extend_from_slice(&v[lo..hi]),
-                TypedVec::F64(v) => self.buf_f64.extend_from_slice(&v[lo..hi]),
-                TypedVec::I32(_) => {
-                    return Err(ScxError::InvalidFormat(
-                        "BPCells writer does not support I32 matrices".into(),
-                    ))
-                }
-            }
-            let prev = *self.buf_cellptr.last().unwrap();
-            self.buf_cellptr.push(prev + (hi - lo) as u64);
+        let lo = csr.indptr[0] as usize;
+        let hi = csr.indptr[chunk.nrows] as usize;
+        let base = *self.idxptr.last().unwrap() - lo as u64;
+        self.idxptr
+            .extend(csr.indptr[1..=chunk.nrows].iter().map(|&p| base + p));
+        self.buf_indices.extend_from_slice(&csr.indices[lo..hi]);
+        match &csr.data {
+            TypedVec::U32(v) => self.buf_u32.extend_from_slice(&v[lo..hi]),
+            // Float values are stored unpacked: stream them straight out.
+            TypedVec::F32(v) => self.sink.append("val", Arr::F32(&v[lo..hi]))?,
+            TypedVec::F64(v) => self.sink.append("val", Arr::F64(&v[lo..hi]))?,
+            TypedVec::I32(_) => unreachable!("I32 rejected by ensure_val_kind"),
         }
-
-        self.flush_runs(false)
+        self.flush(false)
     }
 
-    /// Encode complete 128-cell runs from the front of the buffer. With
-    /// `final_flush`, also encode the trailing partial run.
-    fn flush_runs(&mut self, final_flush: bool) -> Result<()> {
-        loop {
-            let buffered = self.buf_cellptr.len() - 1;
-            let run_cells = if buffered >= 128 {
-                128
-            } else if final_flush && buffered > 0 {
-                buffered
-            } else {
-                break;
-            };
-            let run_nnz = self.buf_cellptr[run_cells] as usize;
+    /// Encode the buffered nonzeros in whole 128-value chunks; with `last`,
+    /// also the final partial chunk.
+    fn flush(&mut self, last: bool) -> Result<()> {
+        let n = if last {
+            self.buf_indices.len()
+        } else {
+            self.buf_indices.len() / 128 * 128
+        };
+        if n == 0 {
+            return Ok(());
+        }
+        let (data, idx, starts) = encode_d1z(&self.buf_indices[..n])?;
+        let idx = self.index.push_piece(data.len(), &idx);
+        self.sink.append("index_data", Arr::U32(&data))?;
+        self.sink.append("index_idx", Arr::U32(&idx))?;
+        self.sink.append("index_starts", Arr::U32(&starts))?;
+        self.buf_indices.drain(..n);
 
-            // Row indices.
-            let (rd, mut ri, rs) = encode_d1z(&self.buf_indices[0..run_nnz])?;
-            for v in &mut ri {
-                *v += self.index_data_words as u32;
-            }
-            append_1d(&self.index_data, &rd)?;
-            append_1d(&self.index_idx, &ri)?;
-            append_1d(&self.index_starts, &rs)?;
-            self.index_data_words += rd.len() as u64;
-            self.index_idx_total += ri.len() as u64;
-            self.index_idx_offsets.push(self.index_idx_total);
-
-            // Values.
-            match self.val_kind {
-                Some(DataType::U32) => {
-                    let (vd, mut vi) = encode_for(&self.buf_u32[0..run_nnz]);
-                    for v in &mut vi {
-                        *v += self.val_data_words as u32;
-                    }
-                    append_1d(self.val_data.as_ref().unwrap(), &vd)?;
-                    append_1d(self.val_idx.as_ref().unwrap(), &vi)?;
-                    self.val_data_words += vd.len() as u64;
-                    self.val_idx_total += vi.len() as u64;
-                    self.val_idx_offsets.push(self.val_idx_total);
-                }
-                Some(DataType::F32) => {
-                    append_1d(self.val_flat.as_ref().unwrap(), &self.buf_f32[0..run_nnz])?
-                }
-                Some(DataType::F64) => {
-                    append_1d(self.val_flat.as_ref().unwrap(), &self.buf_f64[0..run_nnz])?
-                }
-                _ => {}
-            }
-
-            // Global idxptr for this run's cells.
-            let base = *self.idxptr.last().unwrap();
-            for c in 1..=run_cells {
-                self.idxptr.push(base + self.buf_cellptr[c]);
-            }
-
-            // Drop the encoded cells from the front of the buffer.
-            self.buf_indices.drain(0..run_nnz);
-            match self.val_kind {
-                Some(DataType::U32) => drop(self.buf_u32.drain(0..run_nnz)),
-                Some(DataType::F32) => drop(self.buf_f32.drain(0..run_nnz)),
-                Some(DataType::F64) => drop(self.buf_f64.drain(0..run_nnz)),
-                _ => {}
-            }
-            self.buf_cellptr.drain(0..run_cells);
-            for p in &mut self.buf_cellptr {
-                *p -= run_nnz as u64;
-            }
+        if self.val_kind == Some(DataType::U32) {
+            let (data, idx) = encode_for(&self.buf_u32[..n]);
+            let idx = self.val.push_piece(data.len(), &idx);
+            self.sink.append("val_data", Arr::U32(&data))?;
+            self.sink.append("val_idx", Arr::U32(&idx))?;
+            self.buf_u32.drain(..n);
         }
         Ok(())
     }
 
-    fn finalize(mut self, row_names: &[String], col_names: &[String]) -> Result<()> {
-        self.flush_runs(true)?;
+    pub(crate) fn finalize(mut self, row_names: &[String], col_names: &[String]) -> Result<()> {
+        self.flush(true)?;
 
         // Pad idxptr for trailing cells never streamed (e.g. an empty matrix).
         while self.idxptr.len() < self.ncol + 1 {
@@ -795,47 +818,41 @@ impl BpcellsStreamEncoder {
             self.idxptr.push(last);
         }
 
+        let kind = self.val_kind.unwrap_or(DataType::U32);
+        if self.val_kind.is_none() {
+            self.create_val_arrays(kind)?;
+        }
         let storage = match self.storage_order {
             StorageOrder::Col => "col",
             StorageOrder::Row => "row",
         };
-        write_strings(&self.grp, "storage_order", &[storage.to_string()])?;
-        write_u32s(&self.grp, "shape", &[self.nrow as u32, self.ncol as u32])?;
-        write_u64s(&self.grp, "idxptr", &self.idxptr)?;
-        write_strings(&self.grp, "row_names", row_names)?;
-        write_strings(&self.grp, "col_names", col_names)?;
-        write_u64s(&self.grp, "index_idx_offsets", &self.index_idx_offsets)?;
-
-        match self.val_kind.unwrap_or(DataType::U32) {
+        let (idx_last, idx_offsets) = self.index.finish();
+        let s = &mut self.sink;
+        s.append("index_idx", Arr::U32(&[idx_last]))?;
+        s.put_strings("storage_order", &[storage.to_string()])?;
+        s.put("shape", Arr::U32(&[self.nrow as u32, self.ncol as u32]))?;
+        s.put("idxptr", Arr::U64(&self.idxptr))?;
+        s.put_strings("row_names", row_names)?;
+        s.put_strings("col_names", col_names)?;
+        s.put("index_idx_offsets", Arr::U64(&idx_offsets))?;
+        match kind {
             DataType::U32 => {
-                write_version_attr(&self.grp, "packed-uint-matrix-v2")?;
-                if self.val_data.is_none() {
-                    create_resizable::<u32>(&self.grp, "val_data")?;
-                    create_resizable::<u32>(&self.grp, "val_idx")?;
-                }
-                write_u64s(&self.grp, "val_idx_offsets", &self.val_idx_offsets)?;
+                let (val_last, val_offsets) = self.val.finish();
+                s.append("val_idx", Arr::U32(&[val_last]))?;
+                s.put("val_idx_offsets", Arr::U64(&val_offsets))?;
+                s.put_version("packed-uint-matrix-v2")?;
             }
-            DataType::F32 => {
-                write_version_attr(&self.grp, "packed-float-matrix-v2")?;
-                if self.val_flat.is_none() {
-                    create_resizable::<f32>(&self.grp, "val")?;
-                }
-            }
-            DataType::F64 => {
-                write_version_attr(&self.grp, "packed-double-matrix-v2")?;
-                if self.val_flat.is_none() {
-                    create_resizable::<f64>(&self.grp, "val")?;
-                }
-            }
+            DataType::F32 => s.put_version("packed-float-matrix-v2")?,
+            DataType::F64 => s.put_version("packed-double-matrix-v2")?,
             DataType::I32 => unreachable!("I32 rejected at push"),
         }
-        Ok(())
+        s.finish()
     }
 }
 
 struct PendingSparseMatrix {
     group_prefix: String,
-    encoder: BpcellsStreamEncoder,
+    encoder: BpcellsStreamEncoder<H5Sink>,
 }
 
 pub struct BpcellsH5Writer {
@@ -849,7 +866,7 @@ pub struct BpcellsH5Writer {
     obsm: Option<Embeddings>,
     uns: Option<UnsTable>,
     varm: Option<Varm>,
-    x_encoder: Option<BpcellsStreamEncoder>,
+    x_encoder: Option<BpcellsStreamEncoder<H5Sink>>,
     sparse_state: Option<PendingSparseMatrix>,
 }
 
@@ -990,7 +1007,7 @@ impl DatasetWriter for BpcellsH5Writer {
             }
         };
         let encoder =
-            BpcellsStreamEncoder::new(&self.file, &group_path, StorageOrder::Col, nrow, ncol)?;
+            BpcellsStreamEncoder::new_h5(&self.file, &group_path, StorageOrder::Col, nrow, ncol)?;
         self.sparse_state = Some(PendingSparseMatrix {
             group_prefix: group_prefix.to_string(),
             encoder,
@@ -1033,7 +1050,7 @@ impl DatasetWriter for BpcellsH5Writer {
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
         if self.x_encoder.is_none() {
             let group_path = format!("assays/{}/{}", self.assay, self.layer);
-            self.x_encoder = Some(BpcellsStreamEncoder::new(
+            self.x_encoder = Some(BpcellsStreamEncoder::new_h5(
                 &self.file,
                 &group_path,
                 StorageOrder::Col,
@@ -1167,7 +1184,7 @@ impl DatasetWriter for BpcellsH5Writer {
         // X chunks arrived, create an empty matrix to match prior behaviour.
         match self.x_encoder.take() {
             Some(enc) => enc.finalize(&var.index, &obs.index)?,
-            None => BpcellsStreamEncoder::new(
+            None => BpcellsStreamEncoder::new_h5(
                 &self.file,
                 &group_path,
                 StorageOrder::Col,
@@ -1343,7 +1360,7 @@ mod tests {
         for len in [1usize, 127, 128, 129, 256, 10_000] {
             let values: Vec<u32> = (0..len).map(|i| ((i as u32) % 97) + 1).collect();
             let (data, idx) = encode_for(&values);
-            let decoded = decode_for(&data, &idx, values.len());
+            let decoded = decode_for(&data, &wrap_idx(&idx), values.len());
             assert_eq!(decoded, values, "failed FOR roundtrip for len={len}");
         }
     }
@@ -1359,7 +1376,7 @@ mod tests {
                 })
                 .collect();
             let (data, idx, starts) = encode_d1z(&values).unwrap();
-            let decoded = decode_d1z(&data, &idx, &starts, values.len());
+            let decoded = decode_d1z(&data, &wrap_idx(&idx), &starts, values.len());
             assert_eq!(decoded, values, "failed D1Z roundtrip for len={len}");
         }
     }
@@ -1443,7 +1460,8 @@ mod tests {
             let path_b = dir.path().join(format!("stream_{chunk_size}.h5"));
             let fb = File::create(&path_b).unwrap();
             let mut enc =
-                BpcellsStreamEncoder::new(&fb, "m", StorageOrder::Col, n_genes, n_cells).unwrap();
+                BpcellsStreamEncoder::new_h5(&fb, "m", StorageOrder::Col, n_genes, n_cells)
+                    .unwrap();
             let mut start = 0;
             while start < n_cells {
                 let end = (start + chunk_size).min(n_cells);
@@ -1540,7 +1558,8 @@ mod tests {
             let path_b = dir.path().join(format!("stream_{chunk_size}.h5"));
             let fb = File::create(&path_b).unwrap();
             let mut enc =
-                BpcellsStreamEncoder::new(&fb, "m", StorageOrder::Col, n_genes, n_cells).unwrap();
+                BpcellsStreamEncoder::new_h5(&fb, "m", StorageOrder::Col, n_genes, n_cells)
+                    .unwrap();
             let mut start = 0;
             while start < n_cells {
                 let end = (start + chunk_size).min(n_cells);
@@ -1857,6 +1876,89 @@ mod tests {
     ///   row 0: [1, 0, 2, 0]
     ///   row 1: [0, 3, 0, 0]
     ///   row 2: [4, 0, 0, 5]
+    /// Regression: the encoder used to restart BP-128 chunking every 128
+    /// cells, which BPCells (and our own reader) decode as garbage once a
+    /// matrix has >128 cells. 300 cells in uneven chunks spans several
+    /// 128-value chunks that straddle cell boundaries.
+    #[tokio::test]
+    async fn bpcells_writer_x_roundtrips_past_128_cells() {
+        use crate::dtype::TypedVec;
+        use crate::h5seurat::H5SeuratReader;
+        use crate::ir::{MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
+        use crate::stream::{DatasetReader, DatasetWriter};
+        use futures::StreamExt;
+
+        let (n_obs, n_vars) = (300usize, 9usize);
+        let val = |c: usize, g: usize| ((c * 13 + g * 5) % 4) as u32; // 25% zeros
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let mut w = BpcellsH5Writer::create(
+            tmp.path(),
+            n_obs,
+            n_vars,
+            DataType::U32,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        w.write_obs(&ObsTable {
+            index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        w.write_var(&VarTable {
+            index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        for (lo, hi) in [(0, 77), (77, 211), (211, n_obs)] {
+            let (mut indptr, mut idx, mut data) = (vec![0u64], vec![], vec![]);
+            for c in lo..hi {
+                for g in (0..n_vars).filter(|&g| val(c, g) != 0) {
+                    idx.push(g as u32);
+                    data.push(val(c, g));
+                }
+                indptr.push(idx.len() as u64);
+            }
+            w.write_x_chunk(&MatrixChunk {
+                row_offset: lo,
+                nrows: hi - lo,
+                data: SparseMatrixCSR {
+                    shape: (hi - lo, n_vars),
+                    indptr,
+                    indices: idx,
+                    data: TypedVec::U32(data),
+                },
+            })
+            .await
+            .unwrap();
+        }
+        w.finalize().await.unwrap();
+        drop(w);
+
+        let mut reader = H5SeuratReader::open(tmp.path(), 64, None, None).unwrap();
+        let mut stream = reader.x_stream();
+        while let Some(c) = stream.next().await {
+            let c = c.unwrap();
+            let TypedVec::U32(v) = &c.data.data else {
+                panic!("dtype")
+            };
+            for r in 0..c.nrows {
+                let cell = c.row_offset + r;
+                let (lo, hi) = (c.data.indptr[r] as usize, c.data.indptr[r + 1] as usize);
+                let got: Vec<(u32, u32)> = (lo..hi).map(|k| (c.data.indices[k], v[k])).collect();
+                let want: Vec<(u32, u32)> = (0..n_vars)
+                    .filter(|&g| val(cell, g) != 0)
+                    .map(|g| (g as u32, val(cell, g)))
+                    .collect();
+                assert_eq!(got, want, "cell {cell}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn bpcells_writer_x_stream_exact_values() {
         use crate::dtype::TypedVec;

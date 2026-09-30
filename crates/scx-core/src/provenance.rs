@@ -17,7 +17,9 @@ pub struct SourceInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OutputInfo {
     pub path: String,
-    pub sha256: String,
+    /// Absent for directory outputs (e.g. a BPCells matrix dir).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     pub n_obs: usize,
     pub n_vars: usize,
 }

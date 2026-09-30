@@ -798,3 +798,52 @@ fn inspect_bpcells_h5seurat() {
         println!("No BPCells groups detected in {H5_BPCELLS_FIXTURE}");
     }
 }
+
+// ─── 5. WRITER VS BPCELLS ───────────────────────────────────────────────────
+
+/// Re-encode each BPCells-written CSC fixture with our dir writer and require
+/// byte-identical array files. Pins our encoder to the reference
+/// implementation (chunking, `starts`, padding, `idx_offsets`, headers).
+#[tokio::test]
+async fn dir_writer_matches_bpcells_bytes() {
+    use scx_core::bpcells::BpcellsDirWriter;
+    use scx_core::stream::DatasetWriter;
+
+    if !fixtures_present() {
+        eprintln!("SKIP: fixtures not present");
+        return;
+    }
+    for name in [
+        "synth_packed_uint_csc",
+        "synth_packed_float_csc",
+        "synth_packed_double_csc",
+        "synth_128_boundary",
+        "synth_256_boundary",
+        "synth_large_vals",
+        "synth_one_col",
+        "synth_empty",
+    ] {
+        let src = fixture(name);
+        let mut r = BpcellsDatasetReader::open(&src, 3).unwrap();
+        let (n_obs, n_vars) = r.shape();
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join(name);
+        let mut w = BpcellsDirWriter::create(&out, n_obs, n_vars).unwrap();
+        w.write_obs(&r.obs().await.unwrap()).await.unwrap();
+        w.write_var(&r.var().await.unwrap()).await.unwrap();
+        {
+            let mut s = r.x_stream();
+            while let Some(c) = s.next().await {
+                w.write_x_chunk(&c.unwrap()).await.unwrap();
+            }
+        }
+        w.finalize().await.unwrap();
+
+        for f in std::fs::read_dir(&out).unwrap() {
+            let f = f.unwrap().file_name();
+            let want = std::fs::read(src.join(&f)).unwrap_or_default();
+            let got = std::fs::read(out.join(&f)).unwrap();
+            assert!(got == want, "{name}/{}: bytes differ", f.to_string_lossy());
+        }
+    }
+}
