@@ -533,6 +533,108 @@ async fn missing_x_multiple_layers_needs_explicit_choice() {
     assert!(H5AdReader::open_layer(&path, 2, Some("nope")).is_err());
 }
 
+/// Write a CSR group `<parent>/<name>` from explicit arrays.
+fn write_csr_group(
+    parent: &hdf5::Group,
+    name: &str,
+    shape: (usize, usize),
+    indptr: &[i32],
+    indices: &[i32],
+    data: &[f32],
+) {
+    let g = parent.create_group(name).unwrap();
+    g.new_attr::<VarLenUnicode>()
+        .create("encoding-type")
+        .unwrap()
+        .write_scalar(&VarLenUnicode::from_str("csr_matrix").unwrap())
+        .unwrap();
+    let shape = ndarray::array![shape.0 as i64, shape.1 as i64];
+    g.new_attr_builder()
+        .with_data(&shape)
+        .create("shape")
+        .unwrap();
+    g.new_dataset_builder()
+        .with_data(indptr)
+        .create("indptr")
+        .unwrap();
+    g.new_dataset_builder()
+        .with_data(indices)
+        .create("indices")
+        .unwrap();
+    g.new_dataset_builder()
+        .with_data(data)
+        .create("data")
+        .unwrap();
+}
+
+/// Regression: H5AD permits unsorted column indices within a row (scipy's
+/// `has_sorted_indices == False`; every row of the 10x 1.3M ladder files is
+/// like this). Both the X stream and the layer stream must hand out rows
+/// sorted, with each value still attached to its column — picklerick built an
+/// invalid dgCMatrix from them before. Chunk size 2 splits the rows across
+/// chunks so the per-chunk path is exercised, not just one whole-matrix chunk.
+#[tokio::test]
+async fn unsorted_csr_indices_are_sorted_on_read() {
+    // 4 x 5, value = 10 * row + col so a value that moved without its index
+    // is caught. Row 0 unsorted, row 1 empty, row 2 sorted, row 3 reversed.
+    let (n_obs, n_vars) = (4usize, 5usize);
+    let indptr = [0, 3, 3, 5, 8];
+    let indices = [4, 0, 2, 1, 3, 4, 2, 0];
+    let rows = [0, 0, 0, 2, 2, 3, 3, 3];
+    let data: Vec<f32> = rows
+        .iter()
+        .zip(indices.iter())
+        .map(|(&r, &c)| (10 * r + c) as f32)
+        .collect();
+
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let f = File::create(&path).unwrap();
+        write_csr_group(&f, "X", (n_obs, n_vars), &indptr, &indices, &data);
+        let layers = f.create_group("layers").unwrap();
+        write_csr_group(&layers, "counts", (n_obs, n_vars), &indptr, &indices, &data);
+    }
+
+    fn check(chunk: &MatrixChunk) {
+        let csr = &chunk.data;
+        let vals = csr.data.to_f64();
+        for r in 0..chunk.nrows {
+            let (a, b) = (csr.indptr[r] as usize, csr.indptr[r + 1] as usize);
+            let row = chunk.row_offset + r;
+            assert!(
+                csr.indices[a..b].windows(2).all(|p| p[0] < p[1]),
+                "row {row} not sorted: {:?}",
+                &csr.indices[a..b]
+            );
+            for (&c, &v) in csr.indices[a..b].iter().zip(&vals[a..b]) {
+                assert_eq!(
+                    v,
+                    (10 * row as u32 + c) as f64,
+                    "row {row}: value detached from its column"
+                );
+            }
+        }
+    }
+
+    let mut reader = H5AdReader::open(&path, 2).unwrap();
+    let mut nnz = 0usize;
+    let mut stream = reader.x_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        check(&chunk);
+        nnz += chunk.data.indices.len();
+    }
+    drop(stream);
+    assert_eq!(nnz, indices.len());
+
+    let metas = reader.layer_metas().await.unwrap();
+    let mut stream = reader.layer_stream(&metas[0], 2);
+    while let Some(chunk) = stream.next().await {
+        check(&chunk.unwrap());
+    }
+}
+
 // --- Norman perturbation tests ---
 //
 // Run against the committed 500×200 subset by default.
