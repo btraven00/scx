@@ -20,7 +20,8 @@ Suggests:
     HDF5Array,
     rhdf5,
     Seurat,
-    testthat (>= 3.0.0)
+    SeuratObject,
+    testthat (>= 3.1.7)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
