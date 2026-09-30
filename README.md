@@ -32,6 +32,7 @@ build can opt out with `--no-default-features` — see
 
 ```bash
 scx convert pbmc.h5seurat pbmc.h5ad
+scx convert pbmc.zarr pbmc.h5seurat     # AnnData Zarr store (v2 or v3), read-only
 scx convert pbmc.h5ad pbmc.h5seurat
 ```
 

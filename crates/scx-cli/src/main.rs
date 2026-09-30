@@ -32,6 +32,7 @@ enum Cli {
     ///   .h5seurat  — SeuratDisk H5Seurat (Seurat v3/v4)
     ///   .h5ad      — AnnData H5AD (CSR X only)
     ///   .h5        — SCX internal HDF5 schema, or 10x HDF5 (Cell Ranger output)
+    ///   .zarr      — AnnData Zarr store, v2 or v3 (directory)
     ///
     /// Output format selected by extension:
     ///   .h5ad      — AnnData H5AD  (default)
@@ -493,6 +494,22 @@ async fn run() -> anyhow::Result<()> {
                     anyhow::bail!(
                         "inspecting Parquet input is not supported yet — use 'scx convert'"
                     )
+                }
+                #[cfg(feature = "zarr")]
+                Some(Format::ZarrAd) => {
+                    let mut r = scx_core::zarr_ad::ZarrAdReader::open_layer(
+                        input_path,
+                        chunk,
+                        layer.as_deref(),
+                    )?;
+                    if r.x_source() != "X" {
+                        println!("matrix source: {} (no X)", r.x_source());
+                    }
+                    inspect(&mut r, &input, "Zarr (AnnData)").await?;
+                }
+                #[cfg(not(feature = "zarr"))]
+                Some(Format::ZarrAd) => {
+                    anyhow::bail!("Zarr input requires building scx with the `zarr` feature")
                 }
             }
         }

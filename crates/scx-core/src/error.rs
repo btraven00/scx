@@ -24,6 +24,11 @@ pub enum ScxError {
     /// stringified cause so the variant stays free of the `net`-only crate types.
     #[error("network reader error: {0}")]
     Net(String),
+
+    /// Zarr store failure. Stringified so the variant stays free of zarrs types
+    /// (the crate is behind the `zarr` feature).
+    #[error("zarr error: {0}")]
+    Zarr(String),
 }
 
 pub type Result<T> = std::result::Result<T, ScxError>;

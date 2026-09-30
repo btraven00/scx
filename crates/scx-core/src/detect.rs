@@ -8,6 +8,7 @@
 //! | H5Seurat | Root dataset `cell.names` + root attr `active.assay` |
 //! | ScxH5    | Root dataset `X/shape` (SCX internal golden fixture schema) |
 //! | TenxH5   | `/matrix` group with `/matrix/barcodes` + `/matrix/features` |
+//! | ZarrAd   | Directory with `.zgroup` (Zarr v2) or `zarr.json` (Zarr v3)      |
 //! | PlainH5  | Any valid HDF5 file not matching the above |
 
 use std::path::Path;
@@ -32,6 +33,8 @@ pub enum Format {
     Parquet,
     /// MatrixMarket sparse matrix: a `.mtx[.gz]` file or a 10x MEX directory.
     Mtx,
+    /// AnnData Zarr store (v2 or v3): a directory with `.zgroup` / `zarr.json`.
+    ZarrAd,
     /// Valid HDF5 file with no recognized single-cell format fingerprint.
     PlainH5,
 }
@@ -47,6 +50,7 @@ impl Format {
             Format::TenxH5 => "10x HDF5",
             Format::Parquet => "Parquet",
             Format::Mtx => "MatrixMarket",
+            Format::ZarrAd => "Zarr (AnnData)",
             Format::PlainH5 => "HDF5 (unrecognized)",
         }
     }
@@ -113,6 +117,9 @@ pub fn sniff_dir(path: &Path) -> Option<Format> {
     }
     if path.join("matrix.mtx").exists() || path.join("matrix.mtx.gz").exists() {
         return Some(Format::Mtx);
+    }
+    if path.join(".zgroup").exists() || path.join("zarr.json").exists() {
+        return Some(Format::ZarrAd);
     }
     None
 }
