@@ -1,0 +1,15 @@
+{
+  "column-order": [
+    "cluster",
+    "score",
+    "n_genes",
+    "is_doublet",
+    "donor",
+    "nullable_int",
+    "nullable_bool",
+    "nullable_str"
+  ],
+  "_index": "_index",
+  "encoding-type": "dataframe",
+  "encoding-version": "0.2.0"
+}

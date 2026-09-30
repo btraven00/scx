@@ -8,12 +8,16 @@ license = "GPL-3.0"
 repository = "https://github.com/btraven00/scx"
 
 [features]
-default = ["vendored-hdf5"]
+default = ["vendored-hdf5", "zarr"]
 # Build HDF5 from source and link it statically along with a vendored zlib.
 # Produces self-contained binaries/wheels with no system libhdf5 requirement.
 # Distro packagers (conda, debian) can opt out with --no-default-features to
 # link against the system HDF5 instead.
 vendored-hdf5 = ["hdf5/static", "hdf5/zlib"]
+# Local AnnData Zarr stores (v2 and v3) via zarrs. anndata >= 0.13 shards v3
+# arrays (sharding + crc32c index). Codecs: anndata's zarr v2
+# default is Blosc(lz4), its v3 default zstd; gzip/zlib for older writers.
+zarr = ["dep:zarrs"]
 # Network-backed readers (Zarr/Parquet over object_store, 0.4.0). Pulls in the
 # tokio runtime so the existing async trait surface gets a real reactor and can
 # pipeline cloud I/O (buffer_unordered / tokio::spawn). Off by default: local
@@ -38,6 +42,7 @@ net = [
 async-trait = "0.1"
 futures = "0.3"
 hdf5 = { package = "hdf5-metno", version = "0.12" }
+zarrs = { version = "0.23", optional = true, default-features = false, features = ["filesystem", "sharding", "crc32c", "blosc", "zstd", "gzip", "zlib"] }
 hdf5-sys = { package = "hdf5-metno-sys", version = "0.11" }
 # Parallel inflate of deflate-chunked HDF5 datasets: read raw chunks via
 # H5Dread_chunk (hdf5-sys) and inflate them across cores (rayon) outside

@@ -82,6 +82,14 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
         }
         Format::BPCells => Box::new(BpcellsDatasetReader::open(path, cs)?),
         Format::H5Seurat => open_h5seurat(path, cs, opts.assay.as_deref(), opts.layer.as_deref())?,
+        #[cfg(feature = "zarr")]
+        Format::ZarrAd => Box::new(crate::zarr_ad::ZarrAdReader::open(path, cs)?),
+        #[cfg(not(feature = "zarr"))]
+        Format::ZarrAd => {
+            return Err(ScxError::InvalidFormat(format!(
+                "'{input}' is a Zarr store, which requires building with the `zarr` feature"
+            )));
+        }
         Format::Parquet => {
             #[cfg(feature = "net")]
             {

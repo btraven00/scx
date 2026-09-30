@@ -12,8 +12,10 @@ name = "scx"
 path = "src/main.rs"
 
 [features]
-default = ["vendored-hdf5"]
+default = ["vendored-hdf5", "zarr"]
 vendored-hdf5 = ["scx-core/vendored-hdf5"]
+# AnnData Zarr stores (v2 and v3) as convert/inspect input.
+zarr = ["scx-core/zarr"]
 # Network-backed input (Parquet over object_store). Forwards to scx-core/net and
 # pulls a tokio runtime so cloud readers get a real reactor at the CLI entry point.
 net = ["scx-core/net", "dep:tokio"]
