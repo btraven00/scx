@@ -29,6 +29,20 @@
 #'   `as = "SingleCellExperiment"` (Seurat does not consume DelayedArray
 #'   natively). Requires the `HDF5Array` package (Bioconductor).
 #'
+#' @param constructor How to build the Seurat object when `as = "Seurat"`.
+#'   `"standard"` (default) calls `SeuratObject::CreateSeuratObject()`.
+#'   `"fast"` is an **unofficial, experimental** constructor: it assembles the
+#'   Seurat v5 `Assay5` directly from its slots, so the counts layer is the
+#'   matrix just read rather than the two subset copies `CreateSeuratObject()`
+#'   makes, and `nCount`/`nFeature` come from the sparse structure. On 10x
+#'   10k cells that is +0 MB instead of +535 MB over the matrix, and 0.14 s
+#'   instead of 1.0 s, for an object identical in every checked respect.
+#'   It relies on SeuratObject internals (the `Assay5` slot layout, `LogMap`,
+#'   the `Seurat.object.assay.calcn` option) and **may drift** with a
+#'   SeuratObject release. It is only used on SeuratObject 5.x and on input
+#'   that needs none of `CreateSeuratObject()`'s sanitising (no `_`, empty or
+#'   duplicate names; no `orig.ident`/`nCount_RNA`/`nFeature_RNA` columns in
+#'   `obs`); otherwise it falls back to `"standard"` with a message.
 #' @return A `SingleCellExperiment`, `Seurat`, or named list.
 #' @export
 #'
@@ -44,11 +58,13 @@
 #' counts(sce)[1:10, ]    # only these rows hit disk
 #' }
 read_h5ad <- function(path,
-                      as         = c("SingleCellExperiment", "Seurat", "AnnData", "list"),
-                      chunk_size = 5000L,
-                      lazy       = FALSE,
-                      parse_uns  = FALSE) {
+                      as          = c("SingleCellExperiment", "Seurat", "AnnData", "list"),
+                      chunk_size  = 5000L,
+                      lazy        = FALSE,
+                      parse_uns   = FALSE,
+                      constructor = c("standard", "fast")) {
   as <- match.arg(as)
+  constructor <- match.arg(constructor)
   path <- path.expand(path)
 
   if (lazy) {
@@ -84,7 +100,8 @@ read_h5ad <- function(path,
   switch(as,
     list                 = raw,
     SingleCellExperiment = .as_sce(raw, path = path, parse_uns = parse_uns),
-    Seurat               = .as_seurat(raw, path = path, parse_uns = parse_uns),
+    Seurat               = .as_seurat(raw, path = path, parse_uns = parse_uns,
+                                      constructor = constructor),
     AnnData              = .new_anndata_light(raw, path = path)
   )
 }
@@ -324,7 +341,8 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 # Seurat assembler
 # ---------------------------------------------------------------------------
 
-.as_seurat <- function(raw, path = NULL, parse_uns = FALSE) {
+.as_seurat <- function(raw, path = NULL, parse_uns = FALSE,
+                       constructor = "standard") {
   if (!requireNamespace("Seurat", quietly = TRUE)) {
     stop("read_h5ad(as = 'Seurat') requires the Seurat package ",
          "(in Suggests; install separately).", call. = FALSE)
@@ -332,7 +350,9 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 
   m <- .build_dgc(raw)
   meta <- .cols_to_df(raw$obs_cols, raw$obs_index)
-  obj <- Seurat::CreateSeuratObject(counts = m, meta.data = meta, assay = "RNA")
+  obj <- if (identical(constructor, "fast")) .seurat_fast(m, meta, assay = "RNA")
+  if (is.null(obj))
+    obj <- Seurat::CreateSeuratObject(counts = m, meta.data = meta, assay = "RNA")
 
   # rowData → feature metadata on the RNA assay. AddMetaData has methods for
   # both Assay (v3/v4) and Assay5 (v5), so it's the portable entry point.

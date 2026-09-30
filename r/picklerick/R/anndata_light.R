@@ -106,6 +106,8 @@ print.picklerick_anndata <- function(x, ...) {
 #'
 #' @param x An object from [read_h5ad()].
 #' @param parse_uns Parse `uns` into `metadata()` (see [read_h5ad()]).
+#' @param constructor Seurat constructor, `"standard"` or the unofficial
+#'   `"fast"` (see [read_h5ad()]). Ignored by `as_sce()`.
 #' @param ... Unused.
 #' @return A `SingleCellExperiment` or a `Seurat` object.
 #' @export
@@ -124,7 +126,8 @@ as_seurat <- function(x, ...) UseMethod("as_seurat")
 
 #' @rdname as_sce
 #' @export
-as_seurat.picklerick_anndata <- function(x, parse_uns = FALSE, ...) {
+as_seurat.picklerick_anndata <- function(x, parse_uns = FALSE,
+                                         constructor = c("standard", "fast"), ...) {
   .as_seurat(get(".raw", envir = x), path = get(".path", envir = x),
-             parse_uns = parse_uns)
+             parse_uns = parse_uns, constructor = match.arg(constructor))
 }
