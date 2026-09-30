@@ -635,6 +635,55 @@ async fn unsorted_csr_indices_are_sorted_on_read() {
     }
 }
 
+/// Regression: the layer serving as X must not be listed as a layer too.
+/// With no /X, `layers/counts` became X *and* stayed in `layer_metas()`, so
+/// `scx convert` wrote the matrix twice (28 MB -> 160 MB on the 10x 5k file)
+/// and picklerick built a second Seurat assay (3x the object size). A real /X
+/// leaves the layers alone.
+#[tokio::test]
+async fn layer_used_as_x_is_not_also_a_layer() {
+    let (n_obs, n_vars) = (3usize, 2usize);
+    let names = |metas: Vec<SparseMatrixMeta>| -> Vec<String> {
+        let mut v: Vec<String> = metas.into_iter().map(|m| m.name).collect();
+        v.sort();
+        v
+    };
+
+    // No /X: counts is the fallback X, so no layers remain.
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        let layers = f.create_group("layers").unwrap();
+        write_csr_layer(&layers, "counts", n_obs, n_vars);
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    assert_eq!(r.x_source(), "layers/counts");
+    assert!(names(r.layer_metas().await.unwrap()).is_empty());
+
+    // Explicit layer as X: only the other layer remains.
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        let layers = f.create_group("layers").unwrap();
+        write_csr_layer(&layers, "spliced", n_obs, n_vars);
+        write_csr_layer(&layers, "unspliced", n_obs, n_vars);
+    }
+    let mut r = H5AdReader::open_layer(tmp.path(), 2, Some("spliced")).unwrap();
+    assert_eq!(names(r.layer_metas().await.unwrap()), vec!["unspliced"]);
+
+    // Real /X: a layer called counts is a separate matrix and stays.
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        write_csr_layer(&f, "X", n_obs, n_vars);
+        let layers = f.create_group("layers").unwrap();
+        write_csr_layer(&layers, "counts", n_obs, n_vars);
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    assert_eq!(r.x_source(), "X");
+    assert_eq!(names(r.layer_metas().await.unwrap()), vec!["counts"]);
+}
+
 // --- Norman perturbation tests ---
 //
 // Run against the committed 500×200 subset by default.

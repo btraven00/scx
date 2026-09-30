@@ -1021,6 +1021,11 @@ impl DatasetReader for H5AdReader {
         let mut metas = Vec::new();
         for name in grp.member_names().unwrap_or_default() {
             let grp_path = format!("layers/{name}");
+            // The layer already serving as X (no /X, or open_layer) is not
+            // also a layer: every consumer would carry the matrix twice.
+            if grp_path == self.x_path {
+                continue;
+            }
             // Dense layer: read shape from dataset dimensions, indptr unused for inspect.
             if let Ok(ds) = file.dataset(&grp_path) {
                 if file.group(&grp_path).is_err() {
