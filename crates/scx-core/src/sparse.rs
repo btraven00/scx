@@ -83,6 +83,51 @@ pub fn csr_slice_rows(csr: &SparseMatrixCSR, row_start: usize, row_end: usize) -
     }
 }
 
+/// Sort each row's column indices ascending, carrying the values along.
+///
+/// H5AD allows unsorted indices within a row (scipy's `has_sorted_indices` is
+/// False after e.g. concatenation or slicing), but dgCMatrix, BPCells and any
+/// CSR -> CSC consumer require them sorted: picklerick handed such rows straight
+/// to `new("dgCMatrix")` and R rejected them ("'i' slot is not increasing
+/// within columns"). Rows already in order are left untouched, so sorted input
+/// pays one linear scan. Duplicate indices are kept, adjacent; summing them is
+/// a separate canonicalisation this does not do.
+pub fn sort_csr_indices(csr: &mut SparseMatrixCSR) {
+    fn sort_rows<T: Copy>(indptr: &[u64], indices: &mut [u32], data: &mut [T]) {
+        let mut row: Vec<(u32, T)> = Vec::new();
+        for w in indptr.windows(2) {
+            let (a, b) = (w[0] as usize, w[1] as usize);
+            if indices[a..b].windows(2).all(|p| p[0] < p[1]) {
+                continue;
+            }
+            row.clear();
+            row.extend(
+                indices[a..b]
+                    .iter()
+                    .copied()
+                    .zip(data[a..b].iter().copied()),
+            );
+            row.sort_by_key(|&(i, _)| i);
+            for (k, &(i, v)) in row.iter().enumerate() {
+                indices[a + k] = i;
+                data[a + k] = v;
+            }
+        }
+    }
+    let SparseMatrixCSR {
+        indptr,
+        indices,
+        data,
+        ..
+    } = csr;
+    match data {
+        TypedVec::F32(v) => sort_rows(indptr, indices, v),
+        TypedVec::F64(v) => sort_rows(indptr, indices, v),
+        TypedVec::I32(v) => sort_rows(indptr, indices, v),
+        TypedVec::U32(v) => sort_rows(indptr, indices, v),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +235,37 @@ mod tests {
             TypedVec::F32(v) => assert_eq!(v, &vec![3.0, 4.0, 5.0]),
             _ => panic!("expected F32"),
         }
+    }
+
+    #[test]
+    fn test_sort_csr_indices_sorts_rows_and_carries_values() {
+        // Row 0 unsorted, row 1 empty, row 2 already sorted, row 3 reversed.
+        let mut csr = SparseMatrixCSR {
+            shape: (4, 5),
+            indptr: vec![0, 3, 3, 5, 8],
+            indices: vec![4, 0, 2, 1, 3, 4, 2, 0],
+            data: TypedVec::F32(vec![40.0, 0.0, 20.0, 11.0, 13.0, 34.0, 32.0, 30.0]),
+        };
+        sort_csr_indices(&mut csr);
+        assert_eq!(csr.indptr, vec![0, 3, 3, 5, 8]);
+        assert_eq!(csr.indices, vec![0, 2, 4, 1, 3, 0, 2, 4]);
+        match csr.data {
+            TypedVec::F32(v) => assert_eq!(v, vec![0.0, 20.0, 40.0, 11.0, 13.0, 30.0, 32.0, 34.0]),
+            _ => panic!("dtype changed"),
+        }
+    }
+
+    #[test]
+    fn test_sort_csr_indices_sorted_input_unchanged() {
+        let orig = SparseMatrixCSR {
+            shape: (2, 3),
+            indptr: vec![0, 2, 3],
+            indices: vec![0, 2, 1],
+            data: TypedVec::I32(vec![1, 2, 3]),
+        };
+        let mut csr = orig.clone();
+        sort_csr_indices(&mut csr);
+        assert_eq!(csr.indices, orig.indices);
+        assert_eq!(csr.data.to_f64(), orig.data.to_f64());
     }
 }

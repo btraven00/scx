@@ -16,6 +16,7 @@ use crate::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
         SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
+    sparse::sort_csr_indices,
     stream::DatasetReader,
 };
 
@@ -441,15 +442,17 @@ fn ad_read_chunk(
         .map(|&p| p - indptr[row_start])
         .collect();
 
+    let mut csr = SparseMatrixCSR {
+        shape: (nrows, n_vars),
+        indptr: chunk_indptr,
+        indices,
+        data,
+    };
+    sort_csr_indices(&mut csr);
     Ok(MatrixChunk {
         row_offset: row_start,
         nrows,
-        data: SparseMatrixCSR {
-            shape: (nrows, n_vars),
-            indptr: chunk_indptr,
-            indices,
-            data,
-        },
+        data: csr,
     })
 }
 
@@ -940,15 +943,17 @@ fn ad_read_sparse_chunk(
         .map(|&p| p - meta.indptr[row_start])
         .collect();
 
+    let mut csr = SparseMatrixCSR {
+        shape: (chunk_rows, ncols),
+        indptr: csr_indptr,
+        indices,
+        data,
+    };
+    sort_csr_indices(&mut csr);
     Ok(MatrixChunk {
         row_offset: row_start,
         nrows: chunk_rows,
-        data: SparseMatrixCSR {
-            shape: (chunk_rows, ncols),
-            indptr: csr_indptr,
-            indices,
-            data,
-        },
+        data: csr,
     })
 }
 
