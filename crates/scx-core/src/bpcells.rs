@@ -117,14 +117,15 @@ pub fn bp128_unpack(b: u8, packed: &[u32]) -> [u32; 128] {
 /// - `val_data` is the concatenated packed words for all chunks
 /// - `val_idx[k]` is the starting word offset of chunk `k`
 /// - `val_idx.last()` is the total word count
-pub fn encode_for(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
+pub fn encode_for(values: &[u32]) -> (Vec<u32>, Vec<u64>) {
     let n_chunks = values.len().div_ceil(128);
     let mut data = Vec::new();
     let mut idx = Vec::with_capacity(n_chunks + 1);
     idx.push(0);
 
     for chunk in values.chunks(128) {
-        let mut buf = [0u32; 128];
+        // BPCells pads a partial chunk by repeating its last value.
+        let mut buf = [chunk[chunk.len() - 1].wrapping_sub(1); 128];
         for (i, &v) in chunk.iter().enumerate() {
             buf[i] = v.wrapping_sub(1);
         }
@@ -132,7 +133,7 @@ pub fn encode_for(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
         let b = bits_needed(max_val);
         let packed = bp128_pack(b, &buf);
         data.extend_from_slice(&packed);
-        idx.push(data.len() as u32);
+        idx.push(data.len() as u64);
     }
 
     (data, idx)
@@ -143,17 +144,17 @@ pub fn encode_for(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
 /// Returns `(index_data, index_idx, index_starts)`, where:
 /// - `index_data` is the concatenated packed words for all chunks
 /// - `index_idx[k]` is the starting word offset of chunk `k`
-/// - `index_starts[k]` is the prefix value before chunk `k`
-pub fn encode_d1z(values: &[u32]) -> crate::error::Result<(Vec<u32>, Vec<u32>, Vec<u32>)> {
+/// - `index_starts[k]` is the first value of chunk `k`
+pub fn encode_d1z(values: &[u32]) -> crate::error::Result<(Vec<u32>, Vec<u64>, Vec<u32>)> {
     let n_chunks = values.len().div_ceil(128);
     let mut data = Vec::new();
     let mut idx = Vec::with_capacity(n_chunks + 1);
     let mut starts = Vec::with_capacity(n_chunks);
     idx.push(0);
 
-    let mut prev = 0u32;
-
     for chunk in values.chunks(128) {
+        // BPCells: starts[k] is the value at index 128k, so the first delta is 0.
+        let mut prev = chunk[0];
         starts.push(prev);
 
         let mut buf = [0u32; 128];
@@ -173,7 +174,7 @@ pub fn encode_d1z(values: &[u32]) -> crate::error::Result<(Vec<u32>, Vec<u32>, V
         let b = bits_needed(max_val);
         let packed = bp128_pack(b, &buf);
         data.extend_from_slice(&packed);
-        idx.push(data.len() as u32);
+        idx.push(data.len() as u64);
     }
 
     Ok((data, idx, starts))
@@ -813,5 +814,238 @@ impl DatasetReader for BpcellsDatasetReader {
                 Some((chunk, obs_end))
             }
         }))
+    }
+}
+
+// ─── Directory-format writer ─────────────────────────────────────────────────
+
+use crate::error::ScxError;
+use crate::h5bpcells::{Arr, BpSink, BpcellsStreamEncoder};
+use crate::stream::DatasetWriter;
+use std::collections::HashMap;
+use std::io::{BufWriter, Write};
+
+/// BPCells directory: one file per array, each an 8-byte type magic followed
+/// by little-endian values; names/version/storage_order are plain text.
+pub(crate) struct DirSink {
+    dir: std::path::PathBuf,
+    streams: HashMap<String, BufWriter<std::fs::File>>,
+}
+
+fn arr_bytes(data: &Arr) -> (&'static [u8; 8], Vec<u8>) {
+    match data {
+        Arr::U32(v) => (
+            b"UINT32v1",
+            v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        ),
+        Arr::U64(v) => (
+            b"UINT64v1",
+            v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        ),
+        Arr::F32(v) => (
+            b"FLOATSv1",
+            v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        ),
+        Arr::F64(v) => (
+            b"DOUBLEv1",
+            v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        ),
+    }
+}
+
+impl BpSink for DirSink {
+    fn append(&mut self, name: &str, data: Arr) -> Result<()> {
+        let (magic, bytes) = arr_bytes(&data);
+        if !self.streams.contains_key(name) {
+            let mut f = BufWriter::new(std::fs::File::create(self.dir.join(name))?);
+            f.write_all(magic)?;
+            self.streams.insert(name.to_string(), f);
+        }
+        self.streams.get_mut(name).unwrap().write_all(&bytes)?;
+        Ok(())
+    }
+
+    fn put(&mut self, name: &str, data: Arr) -> Result<()> {
+        let (magic, bytes) = arr_bytes(&data);
+        std::fs::write(self.dir.join(name), [magic.as_slice(), &bytes].concat())?;
+        Ok(())
+    }
+
+    fn put_strings(&mut self, name: &str, values: &[String]) -> Result<()> {
+        let mut s = String::new();
+        for v in values {
+            s.push_str(v);
+            s.push('\n');
+        }
+        std::fs::write(self.dir.join(name), s)?;
+        Ok(())
+    }
+
+    fn put_version(&mut self, version: &str) -> Result<()> {
+        std::fs::write(self.dir.join("version"), format!("{version}\n"))?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        for f in self.streams.values_mut() {
+            f.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// Writes X as a BPCells matrix directory (genes × cells, col-major — what
+/// `BPCells::open_matrix_dir` + Seurat v5 expect). Bounded memory: X streams
+/// through the shared [`BpcellsStreamEncoder`].
+///
+/// A matrix dir holds one matrix plus dimnames, so obs/var columns, obsm,
+/// varm, uns, layers and obsp are dropped (layers/obsp with a warning).
+pub struct BpcellsDirWriter {
+    enc: Option<BpcellsStreamEncoder<DirSink>>,
+    obs_names: Vec<String>,
+    var_names: Vec<String>,
+    skipping_sparse: bool,
+}
+
+impl BpcellsDirWriter {
+    pub fn create(dir: &Path, n_obs: usize, n_vars: usize) -> Result<Self> {
+        if dir.exists() {
+            return Err(ScxError::InvalidFormat(format!(
+                "BPCells dir output {} already exists",
+                dir.display()
+            )));
+        }
+        std::fs::create_dir_all(dir)?;
+        let sink = DirSink {
+            dir: dir.to_path_buf(),
+            streams: HashMap::new(),
+        };
+        Ok(Self {
+            enc: Some(BpcellsStreamEncoder::new(
+                sink,
+                StorageOrder::Col,
+                n_vars,
+                n_obs,
+            )?),
+            obs_names: Vec::new(),
+            var_names: Vec::new(),
+            skipping_sparse: false,
+        })
+    }
+}
+
+#[async_trait]
+impl DatasetWriter for BpcellsDirWriter {
+    async fn write_obs(&mut self, obs: &ObsTable) -> Result<()> {
+        self.obs_names = obs.index.clone();
+        Ok(())
+    }
+    async fn write_var(&mut self, var: &VarTable) -> Result<()> {
+        self.var_names = var.index.clone();
+        Ok(())
+    }
+    async fn write_obsm(&mut self, _: &Embeddings) -> Result<()> {
+        Ok(())
+    }
+    async fn write_uns(&mut self, _: &UnsTable) -> Result<()> {
+        Ok(())
+    }
+    async fn write_varm(&mut self, _: &Varm) -> Result<()> {
+        Ok(())
+    }
+    async fn begin_sparse(&mut self, prefix: &str, name: &str, _: &SparseMatrixMeta) -> Result<()> {
+        tracing::warn!("BPCells dir holds X only; dropping {prefix}/{name}");
+        self.skipping_sparse = true;
+        Ok(())
+    }
+    async fn write_sparse_chunk(&mut self, _: &MatrixChunk) -> Result<()> {
+        Ok(())
+    }
+    async fn end_sparse(&mut self) -> Result<()> {
+        self.skipping_sparse = false;
+        Ok(())
+    }
+    async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
+        self.enc
+            .as_mut()
+            .expect("write after finalize")
+            .push_chunk(chunk)
+    }
+    async fn finalize(&mut self) -> Result<()> {
+        match self.enc.take() {
+            Some(enc) => enc.finalize(&self.var_names, &self.obs_names),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod dir_writer_tests {
+    use super::*;
+
+    /// Stream a small CSR matrix (in two chunks, crossing a 128-cell run
+    /// boundary) through the dir writer and decode it with the dir reader.
+    #[tokio::test]
+    async fn dir_writer_roundtrips_through_reader() {
+        let (n_obs, n_vars) = (200usize, 7usize);
+        let dense = |c: usize, g: usize| ((c * 31 + g * 7) % 5) as u32; // ~20% zeros
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("m");
+
+        let mut w = BpcellsDirWriter::create(&out, n_obs, n_vars).unwrap();
+        w.write_obs(&ObsTable {
+            index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        w.write_var(&VarTable {
+            index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        for (lo, hi) in [(0, 150), (150, n_obs)] {
+            let (mut indptr, mut idx, mut val) = (vec![0u64], vec![], vec![]);
+            for c in lo..hi {
+                for g in 0..n_vars {
+                    if dense(c, g) != 0 {
+                        idx.push(g as u32);
+                        val.push(dense(c, g));
+                    }
+                }
+                indptr.push(idx.len() as u64);
+            }
+            let chunk = MatrixChunk {
+                row_offset: lo,
+                nrows: hi - lo,
+                data: SparseMatrixCSR {
+                    shape: (hi - lo, n_vars),
+                    indptr,
+                    indices: idx,
+                    data: TypedVec::U32(val),
+                },
+            };
+            w.write_x_chunk(&chunk).await.unwrap();
+        }
+        w.finalize().await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(out.join("version")).unwrap(),
+            "packed-uint-matrix-v2\n"
+        );
+        let r = BpcellsDirReader::open(&out).unwrap();
+        assert_eq!(
+            (r.nrow, r.ncol, r.storage_order),
+            (n_vars, n_obs, StorageOrder::Col)
+        );
+        assert_eq!(r.col_names[199], "c199");
+        assert_eq!(r.row_names[6], "g6");
+        let got = r.to_dense_u32(); // row-major genes × cells
+        for c in 0..n_obs {
+            for g in 0..n_vars {
+                assert_eq!(got[g * n_obs + c], dense(c, g), "cell {c} gene {g}");
+            }
+        }
     }
 }

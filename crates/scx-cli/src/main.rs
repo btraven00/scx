@@ -7,7 +7,7 @@ use clap::Parser;
 use futures::StreamExt;
 use owo_colors::{OwoColorize, Stream::Stdout};
 use scx_core::{
-    bpcells::BpcellsDatasetReader,
+    bpcells::{BpcellsDatasetReader, BpcellsDirWriter},
     detect,
     detect::Format,
     dtype::DataType,
@@ -36,11 +36,12 @@ enum Cli {
     /// Output format selected by extension:
     ///   .h5ad      — AnnData H5AD  (default)
     ///   .h5seurat  — SeuratDisk H5Seurat
+    ///   .bpcells   — BPCells matrix directory (X + dimnames only)
     Convert {
         /// Input file
         input: String,
 
-        /// Output file (.h5ad or .h5seurat)
+        /// Output file (.h5ad or .h5seurat), or a `.bpcells` BPCells matrix dir (X only)
         output: String,
 
         /// Cells per streaming chunk
@@ -576,8 +577,14 @@ async fn run() -> anyhow::Result<()> {
             )
             .await?;
 
-            let output_sha256 = provenance::sha256_file(output_path)
-                .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?;
+            let output_sha256 = if output_path.is_file() {
+                Some(
+                    provenance::sha256_file(output_path)
+                        .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?,
+                )
+            } else {
+                None
+            };
 
             let record = ProvenanceRecord {
                 scx_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -845,35 +852,39 @@ async fn convert_with_reader(
         t0.elapsed()
     );
 
-    let mut writer: Box<dyn DatasetWriter> = if is_h5seurat {
-        if use_dgcmatrix {
-            Box::new(H5SeuratWriter::create(
-                output,
-                n_obs,
-                n_vars,
-                out_dtype,
-                Some(out_assay),
-                Some(effective_x_slot),
-                Some(project),
-                seuratdisk_compat,
-            )?)
+    let mut writer: Box<dyn DatasetWriter> =
+        if output.extension().and_then(|e| e.to_str()) == Some("bpcells") {
+            // BPCells matrix directory: X + dimnames only.
+            Box::new(BpcellsDirWriter::create(output, n_obs, n_vars)?)
+        } else if is_h5seurat {
+            if use_dgcmatrix {
+                Box::new(H5SeuratWriter::create(
+                    output,
+                    n_obs,
+                    n_vars,
+                    out_dtype,
+                    Some(out_assay),
+                    Some(effective_x_slot),
+                    Some(project),
+                    seuratdisk_compat,
+                )?)
+            } else {
+                Box::new(BpcellsH5Writer::create(
+                    output,
+                    n_obs,
+                    n_vars,
+                    out_dtype,
+                    Some(out_assay),
+                    Some(effective_x_slot),
+                    Some(project),
+                    seuratdisk_compat,
+                )?)
+            }
         } else {
-            Box::new(BpcellsH5Writer::create(
-                output,
-                n_obs,
-                n_vars,
-                out_dtype,
-                Some(out_assay),
-                Some(effective_x_slot),
-                Some(project),
-                seuratdisk_compat,
+            Box::new(H5AdWriter::create_compressed(
+                output, n_obs, n_vars, out_dtype, compress,
             )?)
-        }
-    } else {
-        Box::new(H5AdWriter::create_compressed(
-            output, n_obs, n_vars, out_dtype, compress,
-        )?)
-    };
+        };
 
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
