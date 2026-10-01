@@ -278,8 +278,10 @@ mod tests {
         for (a, b) in [(0, 5000), (0, 1), (1023, 1025), (500, 3700), (4096, 5000)] {
             let raw = read_range_parallel(&ds, a, b, 8, plan).unwrap();
             let got: Vec<f64> = raw
-                .chunks_exact(8)
-                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|&c| f64::from_le_bytes(c))
                 .collect();
             assert_eq!(got, &vals[a..b], "range {a}..{b} decoded wrong");
         }
@@ -299,8 +301,10 @@ mod tests {
         let plan = chunk_plan(&ds).unwrap();
         let raw = read_range_parallel(&ds, 100, 2900, 8, plan).unwrap();
         let got: Vec<f64> = raw
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&c| f64::from_le_bytes(c))
             .collect();
         assert_eq!(got, &vals[100..2900]);
         let _ = std::fs::remove_file(&path);

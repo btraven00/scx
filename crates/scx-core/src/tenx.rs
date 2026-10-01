@@ -330,8 +330,10 @@ fn read_indices(file: &File, a: usize, b: usize) -> Result<Vec<u32>> {
         if let Some(plan) = crate::h5_chunk::chunk_plan(&ds) {
             let bytes = crate::h5_chunk::read_range_parallel(&ds, a, b, 4, plan)?;
             return Ok(bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&c| u32::from_le_bytes(c))
                 .collect());
         }
     }
@@ -405,23 +407,31 @@ fn read_data(file: &File, dtype: DataType, a: usize, b: usize) -> Result<TypedVe
 fn bytes_to_typed(raw: &[u8], dtype: DataType) -> TypedVec {
     match dtype {
         DataType::F32 => TypedVec::F32(
-            raw.chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            raw.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&c| f32::from_le_bytes(c))
                 .collect(),
         ),
         DataType::F64 => TypedVec::F64(
-            raw.chunks_exact(8)
-                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            raw.as_chunks::<8>()
+                .0
+                .iter()
+                .map(|&c| f64::from_le_bytes(c))
                 .collect(),
         ),
         DataType::I32 => TypedVec::I32(
-            raw.chunks_exact(4)
-                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            raw.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&c| i32::from_le_bytes(c))
                 .collect(),
         ),
         DataType::U32 => TypedVec::U32(
-            raw.chunks_exact(4)
-                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            raw.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&c| u32::from_le_bytes(c))
                 .collect(),
         ),
     }
