@@ -11,6 +11,17 @@ EXPECTED_N_OBS  <- 2700L
 EXPECTED_N_VARS <- 13714L
 EXPECTED_NNZ    <- 2282976L
 
+# Path to a golden fixture, skipping the test when it is absent. Lives here,
+# not in a test file: helpers load before every test file, while a function
+# defined in test-read.R is not visible to test files that run before it
+# (test-anndata-light.R, alphabetically first, failed with "could not find
+# function golden").
+golden <- function(name) {
+  p <- file.path(GOLDEN, name)
+  if (!file.exists(p)) skip(paste("golden fixture not found:", name))
+  p
+}
+
 skip_if_no_fixture <- function(...) {
   paths <- c(...)
   for (p in paths) {

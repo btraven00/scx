@@ -1,12 +1,3 @@
-golden <- function(name) {
-  p <- file.path(
-    dirname(dirname(dirname(dirname(getwd())))),
-    "tests", "golden", name
-  )
-  if (!file.exists(p)) skip(paste("golden fixture not found:", name))
-  p
-}
-
 # ---------------------------------------------------------------------------
 # as = "list" — raw FFI payload
 # ---------------------------------------------------------------------------
