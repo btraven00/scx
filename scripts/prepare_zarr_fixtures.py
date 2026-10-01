@@ -4,6 +4,8 @@
     tests/fixtures/zarr/small.h5ad       the oracle (read by H5AdReader)
     tests/fixtures/zarr/small_v2.zarr    anndata's Zarr v2 layout (Blosc/lz4 default)
     tests/fixtures/zarr/small_v3.zarr    anndata's Zarr v3 layout (zstd default)
+    tests/fixtures/zarr/small_unsorted.h5ad / small_unsorted_v3.zarr
+                                         the same with unsorted CSR column indices
 
 The Zarr reader's tests assert it returns exactly what H5AdReader returns for
 the h5ad written from the same object, so the fixture exercises every
@@ -63,4 +65,25 @@ b.write_h5ad(out / "small.h5ad")
 for fmt in (2, 3):
     ad.settings.zarr_write_format = fmt
     b.write_zarr(out / f"small_v{fmt}.zarr")
+
+
+def unsorted(m):
+    """Same matrix, column indices reversed within each row (valid CSR,
+    has_sorted_indices False), as some writers leave them; the 10x ladder
+    files are like this."""
+    m = m.copy()
+    for r in range(m.shape[0]):
+        a, b_ = m.indptr[r], m.indptr[r + 1]
+        m.indices[a:b_] = m.indices[a:b_][::-1].copy()
+        m.data[a:b_] = m.data[a:b_][::-1].copy()
+    m.has_sorted_indices = False
+    return m
+
+
+u = b.copy()
+u.X = unsorted(b.X)
+u.layers["counts"] = unsorted(b.layers["counts"])
+u.write_h5ad(out / "small_unsorted.h5ad")
+ad.settings.zarr_write_format = 3
+u.write_zarr(out / "small_unsorted_v3.zarr")
 print(f"wrote {b.n_obs} x {b.n_vars} fixtures to {out} (anndata {ad.__version__})")
