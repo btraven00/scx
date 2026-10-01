@@ -303,8 +303,10 @@ async fn collect_info(
 
     let obs_cols:  Vec<String> = obs.columns.iter().map(|c| c.name.clone()).collect();
     let var_cols:  Vec<String> = var.columns.iter().map(|c| c.name.clone()).collect();
-    let obsm_keys: Vec<String> = obsm.map.keys().cloned().collect();
-    let varm_keys: Vec<String> = varm.map.keys().cloned().collect();
+    let mut obsm_keys: Vec<String> = obsm.map.keys().cloned().collect();
+    let mut varm_keys: Vec<String> = varm.map.keys().cloned().collect();
+    obsm_keys.sort();
+    varm_keys.sort();
     let uns_keys:  Vec<String> = uns.raw
         .as_object()
         .map(|obj| obj.keys().cloned().collect())
@@ -887,8 +889,14 @@ fn columns_to_robj(cols: Vec<Column>) -> Robj {
 /// Build a named R list of dense matrices (each rows × cols, row-major in IR
 /// — we transpose into R's column-major layout so callers get a real matrix).
 fn embeddings_to_robj_from_map(map: &std::collections::HashMap<String, DenseMatrix>) -> Robj {
+    // Sorted by name: a HashMap iterates in a random order per map, which made
+    // the order of reducedDims / Seurat reductions differ between two reads of
+    // the same file. Alphabetical matches how HDF5 lists the obsm group.
+    let mut names: Vec<&String> = map.keys().collect();
+    names.sort();
     let mut pairs: Vec<(String, Robj)> = Vec::with_capacity(map.len());
-    for (name, dm) in map {
+    for name in names {
+        let dm = &map[name];
         let (rows, cols) = dm.shape;
         // IR is row-major: data[r*cols + c]. R is column-major: out[c*rows + r].
         let mut out = vec![0f64; rows * cols];
