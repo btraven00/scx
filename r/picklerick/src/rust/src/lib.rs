@@ -10,14 +10,10 @@
 use extendr_api::prelude::*;
 use futures::StreamExt;
 use scx_core::{
-    bpcells::BpcellsDatasetReader,
     detect,
     detect::Format,
     dtype::{DataType, TypedVec},
-    h5::ScxH5Reader,
-    h5ad::{H5AdReader, H5AdWriter},
-    h5seurat::H5SeuratReader,
-    mtx::MtxReader,
+    h5ad::H5AdWriter,
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
         SparseMatrixCSR, UnsTable, VarTable, Varm,
@@ -159,55 +155,14 @@ fn scx_convert_inner(
     let chunk = chunk_size as usize;
     let input_path = Path::new(input);
 
-    let fmt = detect::sniff(input_path).or_else(|| {
-        match input_path.extension().and_then(|e| e.to_str()) {
-            Some("h5seurat") => Some(Format::H5Seurat),
-            Some("h5ad")     => Some(Format::H5Ad),
-            _                => Some(Format::ScxH5),
-        }
-    });
-
+    let opts = scx_core::OpenOptions {
+        assay: Some(assay.to_string()),
+        layer: Some(layer.to_string()),
+        ..scx_core::OpenOptions::new(chunk)
+    };
     let result = block_on(async {
-        match fmt {
-            Some(Format::H5Seurat) => {
-                let mut r = H5SeuratReader::open(input_path, chunk, Some(assay), Some(layer))
-                    .map_err(anyhow::Error::from)?;
-                do_convert(&mut r, Path::new(output), dtype).await
-            }
-            Some(Format::H5Ad) | None => {
-                let mut r = H5AdReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                do_convert(&mut r, Path::new(output), dtype).await
-            }
-            Some(Format::ScxH5) => {
-                let mut r = ScxH5Reader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                do_convert(&mut r, Path::new(output), dtype).await
-            }
-            Some(Format::BPCells) => {
-                let mut r = BpcellsDatasetReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                do_convert(&mut r, Path::new(output), dtype).await
-            }
-            Some(Format::NpyDir) => {
-                Err(anyhow::anyhow!("NpyDir format is not supported"))
-            }
-            Some(Format::TenxH5) | Some(Format::PlainH5) => {
-                Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
-            }
-            // scx-core gained MatrixMarket and Parquet readers; without arms for
-            // them these matches stop compiling against a current core, which is
-            // how the R bindings ended up pinned to an old scx-core rev.
-            Some(Format::Mtx) => {
-                let mut r = MtxReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                do_convert(&mut r, Path::new(output), dtype).await
-            }
-            Some(Format::Parquet) => Err(anyhow::anyhow!(
-                "Parquet input is not available through the R bindings: it needs the \
-                 gene-axis options (n_vars / genes) that only the scx CLI exposes"
-            )),
-        }
+        let (mut r, _) = open_reader(input_path, &opts).await?;
+        do_convert(&mut *r, Path::new(output), dtype).await
     });
 
     result.map_err(|e| Error::from(e.to_string()))
@@ -233,59 +188,48 @@ fn scx_inspect_inner(input: &str, chunk_size: i32) -> Result<Robj> {
     let chunk = chunk_size as usize;
     let input_path = Path::new(input);
 
-    let fmt = detect::sniff(input_path).or_else(|| {
-        match input_path.extension().and_then(|e| e.to_str()) {
-            Some("h5seurat") => Some(Format::H5Seurat),
-            Some("h5ad")     => Some(Format::H5Ad),
-            _                => Some(Format::ScxH5),
-        }
-    });
-
+    let opts = scx_core::OpenOptions {
+        metadata_only: true,
+        ..scx_core::OpenOptions::new(chunk)
+    };
     let result = block_on(async {
-        match fmt {
-            Some(Format::H5Seurat) => {
-                let mut r = H5SeuratReader::open(input_path, chunk, None, None)
-                    .map_err(anyhow::Error::from)?;
-                let fmt_name = if r.x_indptr().is_empty() { "H5Seurat (BPCells)" } else { "H5Seurat" };
-                collect_info(&mut r, fmt_name).await
-            }
-            Some(Format::H5Ad) | None => {
-                let mut r = H5AdReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                collect_info(&mut r, "H5AD").await
-            }
-            Some(Format::ScxH5) => {
-                let mut r = ScxH5Reader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                collect_info(&mut r, "ScxH5").await
-            }
-            Some(Format::BPCells) => {
-                let mut r = BpcellsDatasetReader::open_metadata_only(input_path)
-                    .map_err(anyhow::Error::from)?;
-                collect_info(&mut r, "BPCells").await
-            }
-            Some(Format::NpyDir) => {
-                Err(anyhow::anyhow!("NpyDir format is not supported"))
-            }
-            Some(Format::TenxH5) | Some(Format::PlainH5) => {
-                Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
-            }
-            // scx-core gained MatrixMarket and Parquet readers; without arms for
-            // them these matches stop compiling against a current core, which is
-            // how the R bindings ended up pinned to an old scx-core rev.
-            Some(Format::Mtx) => {
-                let mut r = MtxReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                collect_info(&mut r, "MatrixMarket").await
-            }
-            Some(Format::Parquet) => Err(anyhow::anyhow!(
-                "Parquet input is not available through the R bindings: it needs the \
-                 gene-axis options (n_vars / genes) that only the scx CLI exposes"
-            )),
-        }
+        let (mut r, fmt_name) = open_reader(input_path, &opts).await?;
+        let fmt_name = if fmt_name == "H5Seurat" && r.x_indptr().is_empty() {
+            "H5Seurat (BPCells)"
+        } else {
+            fmt_name
+        };
+        collect_info(&mut *r, fmt_name).await
     });
 
     result.map_err(|e| Error::from(e.to_string()))
+}
+
+/// Detect the input format and open its reader through scx-core's factory, so
+/// every format scx-core reads (h5ad, Zarr, H5Seurat, 10x HDF5, BPCells, ...)
+/// works here without a match arm per format. Per-format matches in these
+/// bindings stopped compiling whenever scx-core gained a format, which is how
+/// they ended up pinned to an old scx-core rev.
+///
+/// Returns the reader and the format's display name ("H5AD" for h5ad, which
+/// the R side checks for lazy mode).
+async fn open_reader(
+    input_path: &Path,
+    opts: &scx_core::OpenOptions,
+) -> anyhow::Result<(Box<dyn DatasetReader + Send>, &'static str)> {
+    let input = input_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("input path is not valid UTF-8"))?;
+    let fmt = detect::detect(input_path)
+        .ok_or_else(|| anyhow::anyhow!("could not detect format of '{input}'"))?;
+    if fmt == Format::Parquet {
+        anyhow::bail!(
+            "Parquet input is not available through the R bindings: it needs the \
+             gene-axis options (n_vars / genes) that only the scx CLI exposes"
+        );
+    }
+    let reader = scx_core::open(input, opts).await?;
+    Ok((reader, fmt.display_name()))
 }
 
 async fn collect_info(
@@ -303,8 +247,10 @@ async fn collect_info(
 
     let obs_cols:  Vec<String> = obs.columns.iter().map(|c| c.name.clone()).collect();
     let var_cols:  Vec<String> = var.columns.iter().map(|c| c.name.clone()).collect();
-    let obsm_keys: Vec<String> = obsm.map.keys().cloned().collect();
-    let varm_keys: Vec<String> = varm.map.keys().cloned().collect();
+    let mut obsm_keys: Vec<String> = obsm.map.keys().cloned().collect();
+    let mut varm_keys: Vec<String> = varm.map.keys().cloned().collect();
+    obsm_keys.sort();
+    varm_keys.sort();
     let uns_keys:  Vec<String> = uns.raw
         .as_object()
         .map(|obj| obj.keys().cloned().collect())
@@ -602,67 +548,10 @@ fn scx_read_inner(input: &str, chunk_size: i32, read_x: bool, read_uns: bool) ->
     let chunk = chunk_size as usize;
     let input_path = Path::new(input);
 
-    let fmt = detect::sniff(input_path).or_else(|| {
-        match input_path.extension().and_then(|e| e.to_str()) {
-            Some("h5seurat") => Some(Format::H5Seurat),
-            Some("h5ad")     => Some(Format::H5Ad),
-            _                => Some(Format::ScxH5),
-        }
-    });
-
-    let format_name = match fmt {
-        Some(Format::H5Seurat) => "H5Seurat",
-        Some(Format::H5Ad) | None => "H5AD",
-        Some(Format::ScxH5)   => "ScxH5",
-        Some(Format::BPCells) => "BPCells",
-        Some(Format::NpyDir)  => "NpyDir",
-        Some(Format::TenxH5)  => "TenxH5",
-        Some(Format::PlainH5) => "PlainH5",
-        Some(Format::Mtx)     => "MatrixMarket",
-        Some(Format::Parquet) => "Parquet",
-    };
-
+    let opts = scx_core::OpenOptions::new(chunk);
     let result = block_on(async {
-        match fmt {
-            Some(Format::H5Seurat) => {
-                let mut r = H5SeuratReader::open(input_path, chunk, None, None)
-                    .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
-            }
-            Some(Format::H5Ad) | None => {
-                let mut r = H5AdReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
-            }
-            Some(Format::ScxH5) => {
-                let mut r = ScxH5Reader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
-            }
-            Some(Format::BPCells) => {
-                let mut r = BpcellsDatasetReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
-            }
-            Some(Format::NpyDir) => {
-                Err(anyhow::anyhow!("NpyDir format is not supported"))
-            }
-            Some(Format::TenxH5) | Some(Format::PlainH5) => {
-                Err(anyhow::anyhow!("10x / plain H5 input is not supported by picklerick"))
-            }
-            // scx-core gained MatrixMarket and Parquet readers; without arms for
-            // them these matches stop compiling against a current core, which is
-            // how the R bindings ended up pinned to an old scx-core rev.
-            Some(Format::Mtx) => {
-                let mut r = MtxReader::open(input_path, chunk)
-                    .map_err(anyhow::Error::from)?;
-                collect_into_robj(&mut r, chunk, read_x, read_uns, format_name).await
-            }
-            Some(Format::Parquet) => Err(anyhow::anyhow!(
-                "Parquet input is not available through the R bindings: it needs the \
-                 gene-axis options (n_vars / genes) that only the scx CLI exposes"
-            )),
-        }
+        let (mut r, format_name) = open_reader(input_path, &opts).await?;
+        collect_into_robj(&mut *r, chunk, read_x, read_uns, format_name).await
     });
 
     result.map_err(|e| Error::from(e.to_string()))
@@ -887,8 +776,14 @@ fn columns_to_robj(cols: Vec<Column>) -> Robj {
 /// Build a named R list of dense matrices (each rows × cols, row-major in IR
 /// — we transpose into R's column-major layout so callers get a real matrix).
 fn embeddings_to_robj_from_map(map: &std::collections::HashMap<String, DenseMatrix>) -> Robj {
+    // Sorted by name: a HashMap iterates in a random order per map, which made
+    // the order of reducedDims / Seurat reductions differ between two reads of
+    // the same file. Alphabetical matches how HDF5 lists the obsm group.
+    let mut names: Vec<&String> = map.keys().collect();
+    names.sort();
     let mut pairs: Vec<(String, Robj)> = Vec::with_capacity(map.len());
-    for (name, dm) in map {
+    for name in names {
+        let dm = &map[name];
         let (rows, cols) = dm.shape;
         // IR is row-major: data[r*cols + c]. R is column-major: out[c*rows + r].
         let mut out = vec![0f64; rows * cols];

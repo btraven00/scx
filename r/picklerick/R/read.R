@@ -91,12 +91,11 @@ read_h5ad <- function(path,
     return(.as_sce_lazy(raw, path, parse_uns = parse_uns))
   }
 
-  # For non-H5AD inputs the on-demand rhdf5 path won't apply (it's H5AD-
-  # only); fall back to JSON serialisation when the caller explicitly opts
-  # into eager uns parsing AND the source isn't an H5AD file we can stream.
-  # We always pass read_uns = FALSE here and let .materialise_uns decide
-  # whether to use rhdf5 (preferred) or fall back to JSON.
-  raw <- scx_read(path, as.integer(chunk_size), read_x = TRUE, read_uns = FALSE)
+  # uns: an HDF5 file is read on demand with rhdf5 (uns() / parse_uns). A
+  # directory store (AnnData Zarr) is not HDF5, so when the caller asks for
+  # parse_uns = TRUE the Rust side serialises uns to JSON instead.
+  raw <- scx_read(path, as.integer(chunk_size), read_x = TRUE,
+                  read_uns = isTRUE(parse_uns) && dir.exists(path))
   switch(as,
     list                 = raw,
     SingleCellExperiment = .as_sce(raw, path = path, parse_uns = parse_uns),
@@ -104,6 +103,18 @@ read_h5ad <- function(path,
                                       constructor = constructor),
     AnnData              = .new_anndata_light(raw, path = path)
   )
+}
+
+#' @rdname read_h5ad
+#' @description `read_zarr()` reads an AnnData Zarr store (a `.zarr` directory,
+#'   Zarr v2 or v3, including the sharded v3 arrays anndata >= 0.13 writes by
+#'   default). It is `read_h5ad()` under another name: the format is detected
+#'   from the content, so `read_h5ad()` reads Zarr stores too. `lazy = TRUE`
+#'   is H5AD-only, and for Zarr stores `uns` is only available through
+#'   `parse_uns = TRUE` (the on-demand `uns()` accessor reads HDF5).
+#' @export
+read_zarr <- function(path, ...) {
+  read_h5ad(path, ...)
 }
 
 #' Access uns metadata from a read_h5ad() result on demand
@@ -265,7 +276,7 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 # source to stream from (e.g. non-H5AD reader); fall back to JSON.
 .materialise_uns <- function(parse_uns, path, uns_json) {
   if (!isTRUE(parse_uns)) return(list())
-  if (!is.null(path) && file.exists(path)) return(.uns_from_h5(path))
+  if (!is.null(path) && file.exists(path) && !dir.exists(path)) return(.uns_from_h5(path))
   .parse_uns(uns_json)
 }
 
@@ -304,7 +315,7 @@ uns <- function(x, key = NULL, sub_key = NULL) {
   names(reduced) <- names(raw$obsm)
 
   meta_list <- .materialise_uns(parse_uns, path, raw$uns_json)
-  if (!is.null(path)) meta_list$.uns_path <- path
+  if (!is.null(path) && !dir.exists(path)) meta_list$.uns_path <- path
 
   sce <- SingleCellExperiment::SingleCellExperiment(
     assays      = c(list(counts = m), layer_assays),
@@ -398,7 +409,7 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 
   # uns → @misc. Skip JSON unless caller asked for an eager parse.
   uns_list <- .materialise_uns(parse_uns, path, raw$uns_json)
-  if (!is.null(path)) uns_list$.uns_path <- path
+  if (!is.null(path) && !dir.exists(path)) uns_list$.uns_path <- path
   if (length(uns_list)) obj@misc <- uns_list
 
   obj
@@ -435,7 +446,7 @@ uns <- function(x, key = NULL, sub_key = NULL) {
   names(reduced) <- names(raw$obsm)
 
   meta_list <- .materialise_uns(parse_uns, path, raw$uns_json)
-  if (!is.null(path)) meta_list$.uns_path <- path
+  if (!is.null(path) && !dir.exists(path)) meta_list$.uns_path <- path
 
   sce <- SingleCellExperiment::SingleCellExperiment(
     assays      = list(counts = x_lazy),
