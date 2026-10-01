@@ -26,6 +26,22 @@ Packagers who prefer to link the system `libhdf5` instead of the vendored
 build can opt out with `--no-default-features` — see
 [`docs/packaging.md`](docs/packaging.md).
 
+## Formats
+
+| Format | Read | Write |
+|---|:-:|:-:|
+| AnnData `.h5ad` | ✓ | ✓ |
+| AnnData Zarr (v2, v3; directory) | ✓ | |
+| Seurat `.h5seurat` (dgCMatrix or BPCells-backed) | ✓ | ✓ |
+| BPCells matrix directory | ✓ | ✓ X only |
+| 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
+| MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
+| Parquet, local or S3/GCS/HTTP (build with `--features net`) | ✓ | |
+
+Any readable format converts to any writable one: everything goes through a
+single internal representation. Input is detected by content; output by
+extension (`.h5ad`, `.h5seurat`, `.bpcells`).
+
 ## Usage
 
 ### Convert

@@ -31,11 +31,9 @@ SCX is an interop library, not a full analysis framework.
 
 ## Formats
 
-| Format | Read | Write |
-|--------|------|-------|
-| H5Seurat (SeuratDisk) | yes | yes |
-| H5AD (AnnData ≥ 0.8) | yes | yes |
-| SCX internal `.h5` | yes | — |
+The supported formats and directions are listed in the
+[README](../README.md#formats). The SCX internal `.h5` schema (golden test
+fixtures) is read-only.
 
 Dense X/layers and nullable obs columns (`IntNA`/`FloatNA`/`BoolNA`) are supported.
 
