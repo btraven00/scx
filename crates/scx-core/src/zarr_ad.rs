@@ -34,6 +34,7 @@ use crate::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
         SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
+    sparse::sort_csr_indices,
     stream::DatasetReader,
 };
 
@@ -387,15 +388,19 @@ fn read_csr_chunk(
         .map(|&p| p - indptr[rows.start])
         .collect();
     let nrows = rows.end - rows.start;
+    // Unsorted column indices within a row are valid CSR; consumers
+    // (dgCMatrix, CSC writers) need them sorted, as from H5AdReader.
+    let mut csr = SparseMatrixCSR {
+        shape: (nrows, n_cols),
+        indptr: chunk_indptr,
+        indices,
+        data,
+    };
+    sort_csr_indices(&mut csr);
     Ok(MatrixChunk {
         row_offset: rows.start,
         nrows,
-        data: SparseMatrixCSR {
-            shape: (nrows, n_cols),
-            indptr: chunk_indptr,
-            indices,
-            data,
-        },
+        data: csr,
     })
 }
 

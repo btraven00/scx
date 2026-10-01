@@ -33,9 +33,9 @@ fn sorted_debug<V: std::fmt::Debug>(m: &std::collections::HashMap<String, V>) ->
     v
 }
 
-async fn assert_same_as_h5ad(zarr: &str) {
+async fn assert_same_as_h5ad(zarr: &str, h5ad: &str) {
     let mut z = ZarrAdReader::open(fixture(zarr), CHUNK).unwrap();
-    let mut h = H5AdReader::open(fixture("small.h5ad"), CHUNK).unwrap();
+    let mut h = H5AdReader::open(fixture(h5ad), CHUNK).unwrap();
 
     assert_eq!(z.shape(), h.shape(), "{zarr}: shape");
     assert_eq!(z.dtype(), h.dtype(), "{zarr}: dtype");
@@ -99,12 +99,12 @@ async fn assert_same_as_h5ad(zarr: &str) {
 
 #[tokio::test]
 async fn zarr_v2_reads_exactly_what_h5ad_reads() {
-    assert_same_as_h5ad("small_v2.zarr").await;
+    assert_same_as_h5ad("small_v2.zarr", "small.h5ad").await;
 }
 
 #[tokio::test]
 async fn zarr_v3_sharded_reads_exactly_what_h5ad_reads() {
-    assert_same_as_h5ad("small_v3.zarr").await;
+    assert_same_as_h5ad("small_v3.zarr", "small.h5ad").await;
 }
 
 #[test]
@@ -154,5 +154,27 @@ async fn layer_serving_as_x_is_not_also_a_layer() {
             .map(|m| m.name)
             .collect();
         assert!(!names.contains(&"counts".to_string()), "{name}: {names:?}");
+    }
+}
+
+/// Unsorted column indices within a row (valid CSR; every row of the 10x
+/// ladder files is like this) must come out sorted, as H5AdReader does since
+/// the sort fix: otherwise picklerick builds an invalid dgCMatrix. The oracle
+/// comparison covers values; this also checks the order directly.
+#[tokio::test]
+async fn unsorted_indices_are_sorted_like_h5ad() {
+    assert_same_as_h5ad("small_unsorted_v3.zarr", "small_unsorted.h5ad").await;
+
+    let mut z = ZarrAdReader::open(fixture("small_unsorted_v3.zarr"), CHUNK).unwrap();
+    let chunks: Vec<MatrixChunk> = z.x_stream().map(|c| c.unwrap()).collect().await;
+    for c in &chunks {
+        for r in 0..c.nrows {
+            let (a, b) = (c.data.indptr[r] as usize, c.data.indptr[r + 1] as usize);
+            assert!(
+                c.data.indices[a..b].windows(2).all(|p| p[0] < p[1]),
+                "row {} not sorted",
+                c.row_offset + r
+            );
+        }
     }
 }
