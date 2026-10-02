@@ -11,15 +11,15 @@ changes the hash.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 import picklerick as pk
 
+from conftest import golden
 from golden_props import digest_matrix, matrix_from_stream_chunks
-
-pytestmark = pytest.mark.requires_fixtures
 
 PROP_DIR = Path(__file__).resolve().parents[3] / "tests" / "golden" / "properties"
 
@@ -37,13 +37,14 @@ def _load_props(stem: str) -> dict | None:
 
 
 @pytest.mark.parametrize("stem,rel", list(H5AD_CASES.items()))
-def test_open_stream_matches_oracle_x_digest(golden_root: Path, stem: str, rel: str) -> None:
+def test_open_stream_matches_oracle_x_digest(stem: str, rel: str) -> None:
+    # The digest materialises the whole matrix (~40 GB RSS for HLCA).
+    if stem == "hlca_core" and not os.getenv("SCX_TEST_LARGE"):
+        pytest.skip("HLCA needs ~40 GB RAM; set SCX_TEST_LARGE=1")
     props = _load_props(stem)
     if props is None:
         pytest.skip(f"no golden properties for {stem} (run extract_golden_properties.py)")
-    path = golden_root / rel
-    if not path.exists():
-        pytest.skip(f"fixture not found: {path}")
+    path = golden(rel)
 
     chunks = list(pk.open_stream(path, chunk_size=5000))
     n_vars = props["n_vars"]
