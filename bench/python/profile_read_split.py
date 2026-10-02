@@ -4,7 +4,7 @@ Goal: localise where open_stream spends time vs anndata backed on h5ad — is th
 gap (a) the read/decode path or (b) the Python reduction? Process a fixed number
 of chunks per variant so throughput is comparable.
 
-  pixi run -e py313 python bench/python/profile_read_split.py <h5ad> --chunk-size 50000 --n-chunks 6
+  pixi run -e py python bench/python/profile_read_split.py <h5ad> --chunk-size 50000 --n-chunks 6
 
 This is how the "debug build is ~3x slower" finding was made: in a debug
 `maturin develop` build the open_stream read path runs ~3x slower than anndata;

@@ -10,7 +10,7 @@ a speed number until the bit-exact correctness suite is green (see step 0).
   Python benchmark:
 
   ```sh
-  pixi run -e py313 install-picklerick-py-native-release
+  pixi run -e py install-picklerick-release
   ```
 
 - **Correctness gate.** Before benchmarking a change to the read/decode path,
@@ -18,8 +18,8 @@ a speed number until the bit-exact correctness suite is green (see step 0).
   the speed number is meaningless:
 
   ```sh
-  pixi run -e py313 python -m pytest python/picklerick/tests/test_golden_properties.py \
-                                      python/picklerick/tests/test_native.py -q
+  pixi run -e py python -m pytest python/picklerick/tests/test_golden_properties.py \
+                                      python/picklerick/tests/test_stream_inspect.py -q
   ```
 
   The golden digests live in `tests/golden/properties/*.json`; regenerate them
@@ -46,11 +46,11 @@ prints the delta. Benches `SKIP` cleanly when their golden fixture is absent.
 
 ```sh
 # full matrix → bench/results/<label>.json (subprocess-isolated peak RSS)
-pixi run -e py313 python bench/python/driver.py --label my-change --chunk-sizes 5000
-pixi run -e py313 python bench/python/driver.py --label my-change --include-large   # + hlca 5.7 GB
+pixi run -e py python bench/python/driver.py --label my-change --chunk-sizes 5000
+pixi run -e py python bench/python/driver.py --label my-change --include-large   # + hlca 5.7 GB
 
 # localise a regression: read vs reduce split (open_stream / anndata backed / h5py-raw)
-pixi run -e py313 python bench/python/profile_read_split.py tests/golden/hlca_core.h5ad
+pixi run -e py python bench/python/profile_read_split.py tests/golden/hlca_core.h5ad
 ```
 
 - `runner.py` runs ONE scenario per subprocess so VmHWM peak RSS is isolated per
