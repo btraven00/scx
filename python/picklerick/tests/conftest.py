@@ -1,111 +1,49 @@
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
+import anndata as ad
+import numpy as np
 import pytest
 
-EXPECTED_N_OBS = 2700
-EXPECTED_N_VARS = 13714
-EXPECTED_NNZ = 2282976
+REPO = Path(__file__).resolve().parents[3]
+
+# Tracked in git: these tests always run.
+NORMAN = REPO / "tests" / "fixtures" / "norman_subset.h5ad"
+BPCELLS_CSR = REPO / "tests" / "golden" / "bpcells" / "synth_packed_uint_csr"
+ZARR = REPO / "tests" / "fixtures" / "zarr" / "small_v2.zarr"
+
+# Generated locally (`pixi run -e test fixtures`); tests using them skip without.
+GOLDEN = Path(os.getenv("SCX_GOLDEN", REPO / "tests" / "golden"))
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+def dense(m) -> np.ndarray:
+    return m.toarray() if hasattr(m, "toarray") else np.asarray(m)
 
 
-def _golden_root() -> Path:
-    env = os.getenv("SCX_GOLDEN")
-    if env:
-        return Path(env).expanduser().resolve()
-    return _repo_root() / "tests" / "golden"
-
-
-def _scx_bin() -> str | None:
-    env = os.getenv("SCX_BIN")
-    if env:
-        p = Path(env).expanduser().resolve()
-        if p.exists():
-            return str(p)
-
-    found = shutil.which("scx")
-    if found:
-        return found
-
-    candidate = _repo_root() / "target" / "release" / "scx"
-    if candidate.exists():
-        return str(candidate)
-
-    return None
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers",
-        "requires_scx: mark test as requiring the scx CLI binary",
-    )
-    config.addinivalue_line(
-        "markers",
-        "requires_fixtures: mark test as requiring golden input fixtures",
-    )
+def golden(name: str) -> Path:
+    path = GOLDEN / name
+    if not path.exists():
+        pytest.skip(f"golden fixture missing: {path} (run `pixi run -e test fixtures`)")
+    return path
 
 
 @pytest.fixture(scope="session")
-def repo_root() -> Path:
-    return _repo_root()
+def norman_path() -> Path:
+    return NORMAN
 
 
 @pytest.fixture(scope="session")
-def golden_root() -> Path:
-    return _golden_root()
+def norman() -> ad.AnnData:
+    return ad.read_h5ad(NORMAN)
 
 
 @pytest.fixture(scope="session")
-def h5seurat_path(golden_root: Path) -> Path:
-    return golden_root / "pbmc3k.h5seurat"
+def bpcells_csr_path() -> Path:
+    return BPCELLS_CSR
 
 
 @pytest.fixture(scope="session")
-def h5ad_ref_path(golden_root: Path) -> Path:
-    return golden_root / "pbmc3k_reference.h5ad"
-
-
-@pytest.fixture(scope="session")
-def bpcells_csr_path(golden_root: Path) -> Path:
-    return golden_root / "bpcells" / "synth_packed_uint_csr"
-
-
-@pytest.fixture(scope="session")
-def expected_n_obs() -> int:
-    return EXPECTED_N_OBS
-
-
-@pytest.fixture(scope="session")
-def expected_n_vars() -> int:
-    return EXPECTED_N_VARS
-
-
-@pytest.fixture(scope="session")
-def expected_nnz() -> int:
-    return EXPECTED_NNZ
-
-
-@pytest.fixture(scope="session")
-def scx_bin() -> str | None:
-    return _scx_bin()
-
-
-@pytest.fixture
-def require_fixtures(h5seurat_path: Path, h5ad_ref_path: Path) -> None:
-    missing = [str(p) for p in (h5seurat_path, h5ad_ref_path) if not p.exists()]
-    if missing:
-        joined = ", ".join(missing)
-        pytest.skip(f"golden fixture not found: {joined} — run `pixi run -e test fixtures`")
-
-
-@pytest.fixture
-def require_native() -> None:
-    from picklerick._native import native_available
-    if not native_available():
-        pytest.skip("native backend not available — build with maturin develop")
+def zarr_path() -> Path:
+    return ZARR
