@@ -72,8 +72,6 @@ extract-golden-properties = { cmd = "python scripts/extract_golden_properties.py
 # --- picklerick Python package ---
 prepare-norman-subset  = { cmd = "python scripts/prepare_norman_subset.py --input $NORMAN_H5AD --output tests/fixtures/norman_subset.h5ad", description = "Subsample full Norman H5AD → committed test fixture (requires NORMAN_H5AD env var)" }
 
-install-picklerick-py = { cmd = "python -m ensurepip && python -m pip install -e python/picklerick", description = "Install the picklerick Python package in editable mode" }
-verify-picklerick-py  = { cmd = "python -m pytest python/picklerick/tests -q", description = "Run picklerick Python package tests" }
 
 # --- full round-trip gate ---
 roundtrip = { description = "Full round-trip: fixtures → convert → verify (Python + R oracles)", depends-on = ["fixtures", "convert-h5seurat-to-h5ad", "verify-python", "verify-r"] }
@@ -85,27 +83,26 @@ roundtrip = { description = "Full round-trip: fixtures → convert → verify (P
 [environments]
 default    = { features = [] }
 test       = { features = ["test"] }
-py313      = { features = ["py313"] }
+py         = { features = ["py"] }
 bpcells    = { features = ["bpcells"] }
 
 # ---------------------------------------------------------------------------
-# py313 feature — dedicated Python 3.13 env for PyO3 / maturin validation
-# Kept separate because the general test environment currently uses Python 3.14,
-# while the pinned PyO3 stack used by picklerick native bindings is validated
-# against Python 3.13.
+# py feature — lightweight env for building and testing the picklerick
+# Python package (no R stack). The package supports Python >= 3.14.
 # ---------------------------------------------------------------------------
-[feature.py313.dependencies]
-python   = ">=3.13,<3.14"
-anndata  = ">=0.12.10,<0.13"
+[feature.py.dependencies]
+python   = ">=3.14,<3.16"
+anndata  = ">=0.12.10"
 h5py     = "*"
 numpy    = "*"
 scipy    = "*"
 pytest   = "*"
+maturin  = ">=1.9,<2"
 
-[feature.py313.tasks]
-install-picklerick-py-native = { cmd = "python -m ensurepip && python -m pip install maturin && cd python/picklerick && python -m maturin develop", description = "Build and install the picklerick native PyO3 extension into the Python 3.13 env (debug — fast iteration)" }
-install-picklerick-py-native-release = { cmd = "python -m ensurepip && python -m pip install maturin && cd python/picklerick && python -m maturin develop --release", description = "Build the native extension optimized. REQUIRED before benchmarking — a debug build is ~3x slower on the HDF5 decode path." }
-verify-picklerick-py-native  = { cmd = "python -m pytest python/picklerick/tests/test_native.py -q", description = "Run native-backend smoke tests for the picklerick Python package" }
+[feature.py.tasks]
+install-picklerick         = { cmd = "maturin develop --manifest-path python/picklerick/Cargo.toml", description = "Build the picklerick extension (debug) into the py env" }
+install-picklerick-release = { cmd = "maturin develop --release --manifest-path python/picklerick/Cargo.toml", description = "Optimized build. REQUIRED before benchmarking: debug is ~3x slower on HDF5 decode." }
+test-picklerick            = { cmd = "pytest python/picklerick/tests -q", description = "Run the picklerick Python tests", depends-on = ["install-picklerick"] }
 
 # ---------------------------------------------------------------------------
 # bpcells feature — r-base 4.4 environment for BPCells fixture generation

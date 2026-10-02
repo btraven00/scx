@@ -14,8 +14,8 @@ Results are written to bench/results/<label>.json in the same envelope as the R
 harness (label / git_sha / branch / timestamp / versions / results{}).
 
 Run:
-    pixi run -e py313 python bench/python/driver.py --label py-stream-v1
-    pixi run -e py313 python bench/python/driver.py --include-large   # + hlca 5.7G
+    pixi run -e py python bench/python/driver.py --label py-stream-v1
+    pixi run -e py python bench/python/driver.py --include-large   # + hlca 5.7G
 """
 
 from __future__ import annotations
