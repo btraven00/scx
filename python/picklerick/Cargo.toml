@@ -1,8 +1,9 @@
 [package]
 name = "picklerick-py-native"
-version = "0.0.11"
+version = "0.1.0-alpha.1"
 edition = "2021"
-description = "Optional PyO3 native bindings for the picklerick Python package"
+description = "PyO3 bindings behind the scx-picklerick Python package"
+publish = false
 
 [lib]
 name = "picklerick_py_native"
@@ -16,10 +17,9 @@ vendored-hdf5 = ["scx-core/vendored-hdf5"]
 [dependencies]
 anyhow = "1"
 futures = "0.3"
-# TODO: bump to pyo3 0.24+ for Python 3.14 support; recipe pins python <3.14 as a workaround.
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 # Zero-copy handoff of stream chunks: move Rust Vecs into numpy arrays via
 # IntoPyArray (numpy takes ownership of the allocation), avoiding the per-chunk
-# PyBytes memcpy that bottlenecked open_stream (~355 MB/s). Tracks pyo3 0.22.
-numpy = "0.22"
-scx-core = { path = "../../crates/scx-core", default-features = false }
+# PyBytes memcpy that bottlenecked open_stream (~355 MB/s). Tracks the pyo3 minor.
+numpy = "0.29"
+scx-core = { path = "../../crates/scx-core", default-features = false, features = ["zarr"] }

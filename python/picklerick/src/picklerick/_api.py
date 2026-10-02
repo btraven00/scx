@@ -1,340 +1,141 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Generator
 
-import numpy as np
+import anndata as ad
 
-from ._io import read_h5ad_file, write_h5ad_file
-from ._native import (
-    convert_via_native,
-    inspect_via_native,
-    native_available,
-    open_stream_via_native,
-    write_h5seurat_via_native,
-)
-from ._util import ensure_parent_directory, is_h5ad_path, normalize_path
-
-if TYPE_CHECKING:
-    import anndata as ad
-
+from . import picklerick_py_native as _native
+from .picklerick_py_native import MatrixChunk
 
 Pathish = str | os.PathLike[str]
 
-
-def read_h5ad(path: Pathish) -> "ad.AnnData":
-    """
-    Read an H5AD file into an AnnData object.
-    """
-    return read_h5ad_file(normalize_path(path))
+_DTYPES = ("f32", "f64", "i32", "u32")
 
 
-def read_h5seurat(
-    path: Pathish,
-    assay: str = "RNA",
-    layer: str = "counts",
-    chunk_size: int = 5000,
-    dtype: str = "f32",
-) -> "ad.AnnData":
-    """
-    Read an H5Seurat file into an AnnData object.
-
-    The input is converted to a temporary H5AD through the optional native
-    backend when available, otherwise through the SCX CLI, and then loaded
-    with :mod:`anndata`.
-    """
-    input_path = normalize_path(path)
-
-    with TemporaryDirectory(prefix="picklerick-") as tmpdir:
-        tmp_h5ad = Path(tmpdir) / "read_h5seurat_tmp.h5ad"
-        convert(
-            input=input_path,
-            output=tmp_h5ad,
-            chunk_size=chunk_size,
-            dtype=dtype,
-            assay=assay,
-            layer=layer,
-        )
-        return read_h5ad_file(tmp_h5ad)
-
-
-def read_dataset(
-    path: Pathish,
-    assay: str = "RNA",
-    layer: str = "counts",
-    chunk_size: int = 5000,
-    dtype: str = "f32",
-) -> "ad.AnnData":
-    """
-    Read a supported dataset into an AnnData object.
-
-    H5AD inputs are read directly. Other inputs are routed through the
-    H5Seurat conversion path.
-    """
-    input_path = normalize_path(path)
-    if is_h5ad_path(input_path):
-        return read_h5ad(input_path)
-
-    return read_h5seurat(
-        input_path,
-        assay=assay,
-        layer=layer,
-        chunk_size=chunk_size,
-        dtype=dtype,
-    )
-
-
-def read(
-    path: Pathish,
-    assay: str = "RNA",
-    layer: str = "counts",
-    chunk_size: int = 5000,
-    dtype: str = "f32",
-) -> "ad.AnnData":
-    """
-    Alias for :func:`read_dataset`.
-    """
-    return read_dataset(
-        path,
-        assay=assay,
-        layer=layer,
-        chunk_size=chunk_size,
-        dtype=dtype,
-    )
-
-
-def write_h5ad(
-    adata: "ad.AnnData",
-    path: Pathish,
-    compression: str = "gzip",
-):
-    """
-    Write an AnnData object to H5AD.
-    """
-    output_path = ensure_parent_directory(path)
-    write_h5ad_file(adata, output_path, compression=compression)
-    return output_path
-
-
-def write_h5seurat(
-    adata: "ad.AnnData",
-    path: Pathish,
-    assay: str = "RNA",
-    chunk_size: int = 5000,
-):
-    """
-    Write an AnnData object to H5Seurat.
-    """
-    if not native_available():
-        raise RuntimeError(
-            "write_h5seurat() requires the native backend. "
-            "Install with: pip install picklerick[native]"
-        )
-
-    output_path = ensure_parent_directory(path)
-
-    with TemporaryDirectory(prefix="picklerick-") as tmpdir:
-        tmp_h5ad = Path(tmpdir) / "write_h5seurat_tmp.h5ad"
-        write_h5ad_file(adata, tmp_h5ad, compression="gzip")
-        write_h5seurat_via_native(
-            input_h5ad=tmp_h5ad,
-            output_h5seurat=output_path,
-            chunk_size=chunk_size,
-            assay=assay,
-        )
-
-    return output_path
-
-
-_VALID_DTYPES = {"f32", "f64", "i32", "u32"}
+def _path(p: Pathish) -> str:
+    return str(Path(p).expanduser())
 
 
 def convert(
     input: Pathish,
     output: Pathish,
-    chunk_size: int = 5000,
+    *,
     dtype: str = "f32",
     assay: str = "RNA",
     layer: str = "counts",
-):
-    """
-    Convert a supported single-cell dataset to another format.
-    """
-    if dtype not in _VALID_DTYPES:
-        from ._exceptions import ScxCommandError
-
-        raise ScxCommandError(
-            f"unknown dtype '{dtype}': use one of {sorted(_VALID_DTYPES)}"
-        )
-
-    input_path = normalize_path(input)
-    output_path = ensure_parent_directory(output)
-
-    used_native = convert_via_native(
-        input_path=input_path,
-        output_path=output_path,
-        chunk_size=chunk_size,
-        dtype=dtype,
-        assay=assay,
-        layer=layer,
-    )
-    if not used_native:
-        raise RuntimeError(
-            "convert() requires the native backend. "
-            "Install with: pip install picklerick[native]"
-        )
-
-    return output_path
-
-
-def inspect(
-    path: Pathish,
     chunk_size: int = 5000,
-) -> dict:
-    """
-    Inspect a single-cell file and return metadata without loading any data.
+) -> Path:
+    """Convert a single-cell dataset to ``.h5ad`` or ``.h5seurat``.
 
-    Reads only shape, column names, embedding keys, and layer names. The count
-    matrix is never loaded. Memory usage is minimal regardless of dataset size.
+    The input format is detected from the file (H5AD, H5Seurat, BPCells,
+    10x HDF5, MatrixMarket, AnnData Zarr). The output format is chosen by
+    the extension of ``output``. The matrix is streamed in chunks of
+    ``chunk_size`` cells, so peak memory does not grow with the cell count.
 
     Parameters
     ----------
-    path:
-        Path to the file (``.h5seurat``, ``.h5ad``, BPCells directory, or ``.h5``).
-    chunk_size:
-        Internal chunk size used for metadata reads. Default ``5000``.
+    input, output
+        Source and destination paths.
+    dtype
+        Value type of the written matrix: ``"f32"``, ``"f64"``, ``"i32"``
+        or ``"u32"``.
+    assay, layer
+        Seurat assay and layer to read from H5Seurat input; ``assay`` is
+        also the assay name written to H5Seurat output.
+    chunk_size
+        Cells per streamed chunk.
 
     Returns
     -------
-    dict
-        Keys: ``format``, ``n_obs``, ``n_vars``, ``obs_cols``, ``obs_dtypes``,
-        ``var_cols``, ``var_dtypes``, ``obsm_keys``, ``layers``, ``uns_keys``,
-        ``obsp_keys``, ``varm_keys``.
-
-    Raises
-    ------
-    RuntimeError
-        If the native backend is not installed. Install ``picklerick`` with
-        the native extras: ``pip install picklerick[native]``.
+    Path
+        ``output``.
     """
-    result = inspect_via_native(normalize_path(path), chunk_size=chunk_size)
-    if result is None:
-        raise RuntimeError(
-            "inspect() requires the native backend. "
-            "Install with: pip install picklerick[native]"
+    if dtype not in _DTYPES:
+        raise ValueError(f"unknown dtype {dtype!r}: use one of {_DTYPES}")
+    out = Path(output).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _native.scx_convert(_path(input), str(out), chunk_size, dtype, assay, layer)
+    return out
+
+
+def read(
+    path: Pathish,
+    *,
+    assay: str = "RNA",
+    layer: str = "counts",
+    dtype: str = "f32",
+    chunk_size: int = 5000,
+) -> ad.AnnData:
+    """Read any supported dataset into memory as an AnnData object.
+
+    H5AD files are read with :func:`anndata.read_h5ad` directly and the
+    other arguments are ignored. Other formats are first converted to a
+    temporary H5AD (see :func:`convert`).
+    """
+    if Path(path).suffix.lower() == ".h5ad":
+        return ad.read_h5ad(_path(path))
+    with TemporaryDirectory(prefix="picklerick-") as tmp:
+        h5ad = convert(
+            path,
+            Path(tmp) / "read.h5ad",
+            dtype=dtype,
+            assay=assay,
+            layer=layer,
+            chunk_size=chunk_size,
         )
-    return result
+        return ad.read_h5ad(h5ad)
 
 
-class MatrixChunk:
+def write_h5seurat(
+    adata: ad.AnnData,
+    path: Pathish,
+    *,
+    assay: str = "RNA",
+    chunk_size: int = 5000,
+) -> Path:
+    """Write an AnnData object to H5Seurat (SeuratDisk layout).
+
+    The object is written to a temporary H5AD first and then converted.
     """
-    A single chunk of rows from a streaming matrix read.
+    with TemporaryDirectory(prefix="picklerick-") as tmp:
+        h5ad = Path(tmp) / "write.h5ad"
+        adata.write_h5ad(h5ad)
+        return convert(h5ad, path, assay=assay, chunk_size=chunk_size)
 
-    Attributes
-    ----------
-    row_offset : int
-        Index of the first row in this chunk within the full matrix.
-    nrows : int
-        Number of rows in this chunk.
-    n_vars : int
-        Total number of features (columns) in the matrix.
-    dtype : str
-        NumPy dtype string for the ``data`` array (e.g. ``"float32"``).
-    indptr : numpy.ndarray
-        Shape ``(nrows+1,)``, dtype ``uint64``. CSR row-pointer array.
-    indices : numpy.ndarray
-        Shape ``(nnz,)``, dtype ``uint32``. Column indices.
-    data : numpy.ndarray
-        Shape ``(nnz,)``, dtype matches ``self.dtype``. Non-zero values.
 
-    Notes
-    -----
-    The arrays are zero-copy: each owns the Rust allocation the reader thread
-    decoded into (moved into numpy via ``IntoPyArray``, freed by numpy). There
-    is no per-chunk copy. The arrays are writable and remain valid after the
-    chunk is dropped — numpy owns the allocation — so you may keep or mutate
-    them without copying.
+def inspect(path: Pathish) -> dict:
+    """Describe a dataset without reading its matrix.
+
+    Returns a dict with ``format``, ``n_obs``, ``n_vars``, ``obs_cols``,
+    ``obs_dtypes``, ``var_cols``, ``var_dtypes``, ``obsm_keys``,
+    ``varm_keys``, ``uns_keys``, ``layers`` and ``obsp`` (lists of dicts
+    with name, shape and per-row nnz quartiles), and ``x_stats`` when X is
+    stored as CSR.
     """
-
-    def __init__(self, native: object) -> None:
-        self._native = native
-        self.row_offset: int = native.row_offset
-        self.nrows: int = native.nrows
-        self.n_vars: int = native.n_vars
-        self.dtype: str = native.dtype
-        self.indptr: np.ndarray = native.indptr
-        self.indices: np.ndarray = native.indices
-        self.data: np.ndarray = native.data
+    return _native.scx_inspect(_path(path))
 
 
 def open_stream(
     path: Pathish,
+    *,
     chunk_size: int = 5000,
     assay: str = "RNA",
     layer: str = "counts",
-) -> Generator[MatrixChunk, None, None]:
-    """
-    Stream the count matrix of a single-cell file as row-chunks.
+) -> Iterator[MatrixChunk]:
+    """Iterate over the matrix X in chunks of ``chunk_size`` rows.
 
-    Yields :class:`MatrixChunk` objects in row order. The matrix is never
-    fully materialised — peak RSS stays at ``O(chunk_size * n_vars)``.
-
-    Parameters
-    ----------
-    path:
-        Path to the file (``.h5seurat``, ``.h5ad``, BPCells directory, or ``.h5``).
-    chunk_size:
-        Number of cells per chunk. Default ``5000``.
-    assay:
-        Seurat assay name (ignored for H5AD inputs). Default ``"RNA"``.
-    layer:
-        Seurat layer to read (ignored for H5AD inputs). Default ``"counts"``.
-
-    Yields
-    ------
-    MatrixChunk
-        Each chunk exposes ``row_offset``, ``nrows``, ``n_vars``, ``dtype``,
-        and read-only numpy arrays ``indptr``, ``indices``, ``data``.
-
-    Raises
-    ------
-    RuntimeError
-        If the native backend is not installed.
+    Decoding runs on a background thread a few chunks ahead of the
+    consumer, so peak memory is bounded by the chunk size, not the file.
 
     Examples
     --------
-    >>> for chunk in pk.open_stream("atlas.h5seurat", chunk_size=5000):
+    >>> for chunk in pk.open_stream("atlas.h5ad", chunk_size=5000):
     ...     X = scipy.sparse.csr_matrix(
     ...         (chunk.data, chunk.indices, chunk.indptr),
     ...         shape=(chunk.nrows, chunk.n_vars),
     ...     )
     """
-    native_stream = open_stream_via_native(
-        normalize_path(path),
-        chunk_size=chunk_size,
-        assay=assay,
-        layer=layer,
-    )
-    if native_stream is None:
-        raise RuntimeError(
-            "open_stream() requires the native backend. "
-            "Install with: pip install picklerick[native]"
-        )
-    for native_chunk in native_stream:
-        yield MatrixChunk(native_chunk)
-
-
-__all__ = [
-    "MatrixChunk",
-    "convert",
-    "inspect",
-    "open_stream",
-    "read",
-    "read_dataset",
-    "read_h5ad",
-    "read_h5seurat",
-    "write_h5ad",
-    "write_h5seurat",
-]
+    return _native.scx_open_stream(_path(path), chunk_size, assay, layer)
