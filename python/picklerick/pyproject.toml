@@ -3,32 +3,42 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "picklerick"
-version = "0.1.0"
-description = "Thin Python wrapper over the SCX single-cell interoperability engine"
+name = "scx-picklerick"
+dynamic = ["version"]
+description = "Streaming conversion between single-cell formats (H5AD, H5Seurat, BPCells, 10x, MTX, Zarr), powered by the SCX Rust engine"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 license = { text = "GPL-3.0-only" }
-authors = [
-  { name = "SCX Authors", email = "placeholder@example.com" }
+authors = [{ name = "ben", email = "ben.uzh@proton.me" }]
+keywords = ["single-cell", "anndata", "seurat", "h5ad", "bpcells", "bioinformatics"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
   "anndata>=0.10",
+  "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
-dev = [
-  "pytest>=8",
-]
+test = ["pytest>=8"]
 
 [project.urls]
 Homepage = "https://github.com/btraven00/scx"
 Repository = "https://github.com/btraven00/scx"
+Issues = "https://github.com/btraven00/scx/issues"
 
 [tool.maturin]
 python-source = "src"
 module-name = "picklerick.picklerick_py_native"
+# One stable-ABI wheel per platform covers 3.14 and every later CPython.
+features = ["pyo3/abi3-py314"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]

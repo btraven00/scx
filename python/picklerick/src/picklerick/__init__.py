@@ -1,32 +1,19 @@
-"""Thin Python bindings for the SCX interoperability engine."""
+"""Python bindings for the SCX single-cell format conversion engine."""
 
-from ._api import (
-    MatrixChunk,
-    convert,
-    inspect,
-    open_stream,
-    read,
-    read_dataset,
-    read_h5ad,
-    read_h5seurat,
-    write_h5ad,
-    write_h5seurat,
-)
-from ._exceptions import PickleRickError, ScxCommandError
-from ._native import native_available
+from importlib.metadata import version
+
+from ._api import MatrixChunk, convert, inspect, open_stream, read, write_h5seurat
+from .picklerick_py_native import PickleRickError
+
+__version__ = version("scx-picklerick")
 
 __all__ = [
     "MatrixChunk",
     "PickleRickError",
-    "ScxCommandError",
+    "__version__",
     "convert",
     "inspect",
-    "native_available",
     "open_stream",
     "read",
-    "read_dataset",
-    "read_h5ad",
-    "read_h5seurat",
-    "write_h5ad",
     "write_h5seurat",
 ]
