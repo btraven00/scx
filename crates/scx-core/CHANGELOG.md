@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.4.0](https://github.com/btraven00/scx/compare/scx-core-v0.3.0...scx-core-v0.4.0) (2026-10-03)
+
+
+### Features
+
+* **concat:** obs-axis concatenation with anndata.concat() semantics ([913e908](https://github.com/btraven00/scx/commit/913e9086bfac86c862dd4ac97a51c3ea9af18f2b))
+* **zarr:** read AnnData Zarr stores (v2 and v3) ([34c986f](https://github.com/btraven00/scx/commit/34c986f80c41600421b7134ab449d851975a0f64))
+
+
+### Bug Fixes
+
+* **core:** carry missing values through readers, writers, concat, merge and export ([33d096b](https://github.com/btraven00/scx/commit/33d096b2162b66b376f30bbac95fac86266ce657))
+* **core:** keep uns arrays and bools; write uns to H5Seurat misc ([4d8e552](https://github.com/btraven00/scx/commit/4d8e552830d4b8eb4d0358af6f9e2d8beefb69a9))
+* **core:** open merge patch sources through the reader factory ([2c5aa03](https://github.com/btraven00/scx/commit/2c5aa030763b08a01233fc5b0fa1d2459f052aa7))
+* **core:** open Seurat v5 H5Seurat files (assays/&lt;assay&gt;/layers/&lt;layer&gt;) ([ff7d91a](https://github.com/btraven00/scx/commit/ff7d91aececfb5b337fc3861aebf39ea5df4d021))
+* **core:** read and write H5Seurat dgCMatrix layer dims as [genes, cells] ([4f6444e](https://github.com/btraven00/scx/commit/4f6444ef7ce53d80995c293d9f6817aad7160680))
+* **core:** read index and value datasets the same way in every HDF5 reader ([c79ec67](https://github.com/btraven00/scx/commit/c79ec67a8bdaeace6a7780815ccf20d39bdb3e0b))
+* **core:** remove undefined behaviour in the parallel BPCells decoders ([91433b2](https://github.com/btraven00/scx/commit/91433b27dd5f52154f9853969947531dfa1ba0cf))
+* **core:** store integer matrices as packed uint32 in the BPCells writers ([ba2a9e4](https://github.com/btraven00/scx/commit/ba2a9e4bcc4355d25ec2496c1dacceffdea00582))
+* fallback for no-X in file ([7fe856e](https://github.com/btraven00/scx/commit/7fe856ee76a964be6e6295ef09b3974db979f36c))
+* **h5ad:** don't list the layer serving as X as a layer too ([7d4b00c](https://github.com/btraven00/scx/commit/7d4b00cabb4522cb8fc809431b3e838135658505))
+* **h5ad:** drop obs/var column named `_index` (collides with frame index) ([dc7e6d6](https://github.com/btraven00/scx/commit/dc7e6d63c8e4d9c2f4dd00705e6b08ddfa0f7a89))
+* **h5ad:** read anndata 0.13 nullable-string-array; survive NaN in inspect ([b55378c](https://github.com/btraven00/scx/commit/b55378c9b6f90400e57f78a43819bcc70c16813f))
+* **h5ad:** sort unsorted CSR column indices on read ([2ad49d1](https://github.com/btraven00/scx/commit/2ad49d1c121ca4a34019c604f75732bd79be9914))
+* **h5ad:** widen categorical codes to i32 past 32767 levels ([48a0cd0](https://github.com/btraven00/scx/commit/48a0cd0f6c4e9034e93893fceae55237b50d5388))
+* **h5ad:** write bool columns as H5T_ENUM, not a plain integer ([67f3241](https://github.com/btraven00/scx/commit/67f32410618d4b6b7ceecf4f5728cf3652291bdd))
+* **h5:** read fixed-length string datasets instead of silently returning empty ([c830e28](https://github.com/btraven00/scx/commit/c830e284182200a0701dfde7ba79e5a666323de7))
+* **h5seurat:** --seuratdisk-compat must attribute reduction groups ([6dc451c](https://github.com/btraven00/scx/commit/6dc451cb0a55bacf5641de47adec1bc4766f0871))
+* **tenx:** accept the Cell Ranger v2 /matrix/genes layout ([f21d6f4](https://github.com/btraven00/scx/commit/f21d6f49d6465191f33dd11a5f8faa4b5a100693))
+* **zarr:** don't list the layer serving as X as a layer too ([8c19ec1](https://github.com/btraven00/scx/commit/8c19ec1533139c650ec6c3b01a965671caa61d48))
+* **zarr:** sort unsorted CSR column indices on read ([f389e7b](https://github.com/btraven00/scx/commit/f389e7baa144d47c5ecab5aa8c8df081a42b1391))
+
+
+### Performance Improvements
+
+* **core:** move chunk vectors into the streaming builders ([2b02032](https://github.com/btraven00/scx/commit/2b020320fe63320c77c149b9886108553730d762))
+* **h5:** parallel-inflate shuffle+deflate, and use it from the 10x reader ([1d3fe94](https://github.com/btraven00/scx/commit/1d3fe94c7fef97cf005d122ade9ee8c23d695b6c))
+
 ## [0.3.0](https://github.com/btraven00/scx/compare/scx-core-v0.2.0...scx-core-v0.3.0) (2026-07-02)
 
 
