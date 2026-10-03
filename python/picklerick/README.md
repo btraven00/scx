@@ -105,4 +105,4 @@ reason shown, when those fixtures are missing.
 
 ## License
 
-GPL-3.0-only.
+MIT.
