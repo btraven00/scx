@@ -483,9 +483,11 @@ impl DatasetWriter for H5SeuratWriter {
             ds.write(&Array1::from_vec(v))?;
         }
 
-        // Write dims attribute: [nrows, ncols].
+        // dims is R's [nrow, ncol] of the dgCMatrix. The IR matrix is
+        // cells x genes CSR, which on disk is a genes x cells CSC, so the
+        // order flips (as for X in write_x_chunk).
         let (nrows, ncols) = state.shape;
-        let dims = vec![nrows as i32, ncols as i32];
+        let dims = vec![ncols as i32, nrows as i32];
         let attr = grp.new_attr::<i32>().shape(2).create("dims")?;
         attr.write(&Array1::from_vec(dims))?;
 

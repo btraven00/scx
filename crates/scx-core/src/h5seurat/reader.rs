@@ -641,8 +641,15 @@ fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<
 
     let dims_attr = grp.attr("dims")?;
     let dims: Vec<i32> = dims_attr.read_1d::<i32>()?.to_vec();
-    // H5Seurat dims attr is [n_rows, n_cols] where columns = CSC dimension
-    let (nrows, ncols) = (dims[0] as usize, dims[1] as usize);
+    if dims.len() < 2 {
+        return Err(ScxError::InvalidFormat(format!(
+            "'dims' on {group_path} has fewer than 2 elements"
+        )));
+    }
+    // dims is R's [nrow, ncol] of the dgCMatrix, i.e. [genes, cells]; the
+    // CSC column pointers are per cell, so as a cells x genes CSR matrix
+    // the shape is (dims[1], dims[0]), as in the BPCells branch above.
+    let (nrows, ncols) = (dims[1] as usize, dims[0] as usize);
     let indptr = read_indptr_from(file, &format!("{group_path}/indptr"))?;
     Ok(SparseMatrixMeta {
         name: name.to_string(),

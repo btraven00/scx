@@ -417,20 +417,21 @@ async fn test_slot_parity_roundtrip() {
     };
 
     // layers["data"]: sparse chunk (n_vars × n_obs stored as CSR in H5Seurat convention)
+    // Like X, a layer is cells x genes (n_obs x n_vars).
     let layer_chunk = MatrixChunk {
         row_offset: 0,
-        nrows: n_vars,
+        nrows: n_obs,
         data: SparseMatrixCSR {
-            shape: (n_vars, n_obs),
-            indptr: vec![0, 1, 2, 3, 3],
+            shape: (n_obs, n_vars),
+            indptr: vec![0, 1, 2, 3],
             indices: vec![1, 0, 2],
             data: TypedVec::F32(vec![10.0, 20.0, 30.0]),
         },
     };
     let layer_meta = SparseMatrixMeta {
         name: "data".into(),
-        shape: (n_vars, n_obs),
-        indptr: vec![0, 1, 2, 3, 3],
+        shape: (n_obs, n_vars),
+        indptr: vec![0, 1, 2, 3],
     };
 
     // obsp["knn"]: 3×3 cell-cell graph
