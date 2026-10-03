@@ -49,7 +49,7 @@ hdf5-sys = { package = "hdf5-metno-sys", version = "0.12" }
 # libhdf5's single-threaded filter pipeline. See h5_chunk.rs.
 flate2 = "1"
 memmap2 = "0.9"
-ndarray = "0.16"
+ndarray = "0.17"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
