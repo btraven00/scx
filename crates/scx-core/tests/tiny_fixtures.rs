@@ -251,3 +251,24 @@ async fn h5ad_uns() {
         e["uns"]["params"]["resolution"]
     );
 }
+
+#[tokio::test]
+async fn h5seurat_v4_data_layer() {
+    // Read with layer "counts", the `data` slot (X in expected.json) is a layer.
+    let e = expected();
+    let mut reader = open("tiny_v4.h5seurat").await;
+    let metas = reader.layer_metas().await.unwrap();
+    let meta = metas.iter().find(|m| m.name == "data").expect("data layer");
+    let mut dense = vec![vec![0.0; 5]; 6];
+    let mut stream = reader.layer_stream(meta, 4);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        let values = chunk.data.data.to_f64();
+        for r in 0..chunk.nrows {
+            for k in chunk.data.indptr[r] as usize..chunk.data.indptr[r + 1] as usize {
+                dense[chunk.row_offset + r][chunk.data.indices[k] as usize] = values[k];
+            }
+        }
+    }
+    assert_eq!(dense, matrix(&e["X"]));
+}
