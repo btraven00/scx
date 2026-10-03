@@ -103,6 +103,7 @@ maturin  = ">=1.9,<2"
 install-picklerick         = { cmd = "maturin develop --manifest-path python/picklerick/Cargo.toml", description = "Build the picklerick extension (debug) into the py env" }
 install-picklerick-release = { cmd = "maturin develop --release --manifest-path python/picklerick/Cargo.toml", description = "Optimized build. REQUIRED before benchmarking: debug is ~3x slower on HDF5 decode." }
 test-picklerick            = { cmd = "pytest python/picklerick/tests -q", description = "Run the picklerick Python tests", depends-on = ["install-picklerick"] }
+make-tiny-fixtures         = { cmd = "python scripts/make_tiny_fixtures.py", description = "Regenerate tests/fixtures/tiny (then run make-tiny-fixtures-bpcells in the bpcells env)" }
 
 # ---------------------------------------------------------------------------
 # bpcells feature — r-base 4.4 environment for BPCells fixture generation
@@ -116,6 +117,7 @@ r-matrix   = "*"
 r-jsonlite = "*"
 
 [feature.bpcells.tasks]
+make-tiny-fixtures-bpcells = { cmd = "Rscript scripts/make_tiny_fixtures_bpcells.R", description = "Add the BPCells counts to tests/fixtures/tiny/tiny_v5_bpcells.h5seurat" }
 prepare-bpcells = { cmd = "Rscript scripts/prepare_bpcells_fixtures.R", description = "Generate BPCells golden fixtures for compat tests" }
 # Requires: bash scripts/download_large.sh (HLCA core h5ad, ~2 GB)
 prepare-bpcells-h5seurat = { cmd = "Rscript scripts/prepare_bpcells_h5seurat.R", description = "Generate BPCells-packed H5Seurat fixture from HLCA core (large benchmark)" }
