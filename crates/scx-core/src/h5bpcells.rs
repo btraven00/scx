@@ -1357,7 +1357,8 @@ mod tests {
 
     #[test]
     fn encode_for_roundtrip_various_lengths() {
-        for len in [1usize, 127, 128, 129, 256, 10_000] {
+        // 32_768 and 40_000 values are >= 256 chunks: the parallel decode path.
+        for len in [1usize, 127, 128, 129, 256, 10_000, 32_768, 40_000] {
             let values: Vec<u32> = (0..len).map(|i| ((i as u32) % 97) + 1).collect();
             let (data, idx) = encode_for(&values);
             let decoded = decode_for(&data, &wrap_idx(&idx), values.len());
@@ -1367,7 +1368,8 @@ mod tests {
 
     #[test]
     fn encode_d1z_roundtrip_various_lengths() {
-        for len in [1usize, 127, 128, 129, 256, 10_000] {
+        // 32_768 and 40_000 values are >= 256 chunks: the parallel decode path.
+        for len in [1usize, 127, 128, 129, 256, 10_000, 32_768, 40_000] {
             let mut cur = 0u32;
             let values: Vec<u32> = (0..len)
                 .map(|i| {
