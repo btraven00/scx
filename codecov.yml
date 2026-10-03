@@ -29,12 +29,28 @@ ignore:
   - "tests/**/*"
   - "docs/**/*"
   - "crates/*/benches/**/*"
-  # The pyo3 bindings crate is exercised via Python, not the Rust suite; it is
-  # also stripped from the uploaded lcov (--ignore-filename-regex 'python/').
-  - "python/**/*"
+  - "python/picklerick/tests/**/*"
+  - "r/picklerick/tests/**/*"
+  # R package: only its R code is measured (entrypoint.c is a registration stub).
+  - "r/picklerick/src/**/*"
+
+# covr writes R paths relative to the package ("R/read.R").
+fixes:
+  - "R/::r/picklerick/R/"
 
 flags:
   rust:
     paths:
       - crates/
+    carryforward: true
+  # Python package + the PyO3 bindings' Rust, both driven by pytest
+  # (python.yml coverage job).
+  python:
+    paths:
+      - python/
+    carryforward: true
+  # R code of the R package, via covr (r.yml).
+  r:
+    paths:
+      - r/
     carryforward: true

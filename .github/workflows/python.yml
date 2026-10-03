@@ -54,6 +54,39 @@ jobs:
           name: wheel-${{ matrix.os }}
           path: python/picklerick/dist/*.whl
 
+  # Coverage of the Python package and of the bindings' Rust (lib.rs), both
+  # exercised by pytest. scx-core lines hit along the way are dropped from
+  # the lcov: they belong to the `rust` flag, measured by ci.yml.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install system HDF5
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+      - name: Build instrumented extension and run pytest
+        run: |
+          python -m venv .venv && . .venv/bin/activate
+          pip install "maturin>=1.9,<2" pytest pytest-cov scipy anndata
+          eval "$(cargo llvm-cov show-env --export-prefix)"
+          export CARGO_TARGET_DIR=$CARGO_LLVM_COV_TARGET_DIR
+          maturin develop --manifest-path python/picklerick/Cargo.toml --no-default-features
+          pytest python/picklerick/tests -q --cov=picklerick --cov-report=xml:python-coverage.xml
+          cargo llvm-cov report --lcov --output-path python-rust.lcov --ignore-filename-regex 'crates/'
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./python-coverage.xml,./python-rust.lcov
+          flags: python
+          name: python-coverage
+          fail_ci_if_error: false
+
   sdist:
     runs-on: ubuntu-latest
     steps:
