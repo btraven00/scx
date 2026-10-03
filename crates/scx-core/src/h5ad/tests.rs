@@ -864,14 +864,14 @@ async fn dataframe_column_named_index_is_dropped() {
         index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
         columns: vec![
             // Offending column: same name as the reserved frame index.
-            Column {
-                name: "_index".into(),
-                data: ColumnData::String((0..n_obs).map(|i| format!("cell{i}")).collect()),
-            },
-            Column {
-                name: "celltype".into(),
-                data: ColumnData::String((0..n_obs).map(|i| format!("t{}", i % 2)).collect()),
-            },
+            Column::new(
+                "_index",
+                ColumnData::String((0..n_obs).map(|i| format!("cell{i}")).collect()),
+            ),
+            Column::new(
+                "celltype",
+                ColumnData::String((0..n_obs).map(|i| format!("t{}", i % 2)).collect()),
+            ),
         ],
     };
     let var = VarTable {
@@ -925,37 +925,34 @@ async fn synthetic_roundtrip_all_slots() {
     let obs = ObsTable {
         index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
         columns: vec![
-            Column {
-                name: "n_counts".into(),
-                data: ColumnData::Int((0..n_obs as i32).collect()),
-            },
-            Column {
-                name: "score".into(),
-                data: ColumnData::Float((0..n_obs).map(|i| i as f64 * 0.5).collect()),
-            },
-            Column {
-                name: "sample".into(),
-                data: ColumnData::String((0..n_obs).map(|i| format!("s{}", i % 3)).collect()),
-            },
-            Column {
-                name: "passed".into(),
-                data: ColumnData::Bool((0..n_obs).map(|i| i % 2 == 0).collect()),
-            },
-            Column {
-                name: "leiden".into(),
-                data: ColumnData::Categorical {
+            Column::new("n_counts", ColumnData::Int((0..n_obs as i32).collect())),
+            Column::new(
+                "score",
+                ColumnData::Float((0..n_obs).map(|i| i as f64 * 0.5).collect()),
+            ),
+            Column::new(
+                "sample",
+                ColumnData::String((0..n_obs).map(|i| format!("s{}", i % 3)).collect()),
+            ),
+            Column::new(
+                "passed",
+                ColumnData::Bool((0..n_obs).map(|i| i % 2 == 0).collect()),
+            ),
+            Column::new(
+                "leiden",
+                ColumnData::Categorical {
                     codes: (0..n_obs as u32).map(|i| i % 3).collect(),
                     levels: vec!["A".into(), "B".into(), "C".into()],
                 },
-            },
+            ),
         ],
     };
     let var = VarTable {
         index: (0..n_vars).map(|i| format!("g{i}")).collect(),
-        columns: vec![Column {
-            name: "highly_variable".into(),
-            data: ColumnData::Bool((0..n_vars).map(|i| i % 2 == 0).collect()),
-        }],
+        columns: vec![Column::new(
+            "highly_variable",
+            ColumnData::Bool((0..n_vars).map(|i| i % 2 == 0).collect()),
+        )],
     };
     let mut obsm = Embeddings::default();
     obsm.map.insert(
@@ -1104,21 +1101,18 @@ async fn write_synthetic_compressed(compression: Option<u8>) -> NamedTempFile {
     let obs = ObsTable {
         index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
         columns: vec![
-            Column {
-                name: "n_counts".into(),
-                data: ColumnData::Int((0..n_obs as i32).collect()),
-            },
-            Column {
-                name: "passed".into(),
-                data: ColumnData::Bool((0..n_obs).map(|i| i % 2 == 0).collect()),
-            },
-            Column {
-                name: "leiden".into(),
-                data: ColumnData::Categorical {
+            Column::new("n_counts", ColumnData::Int((0..n_obs as i32).collect())),
+            Column::new(
+                "passed",
+                ColumnData::Bool((0..n_obs).map(|i| i % 2 == 0).collect()),
+            ),
+            Column::new(
+                "leiden",
+                ColumnData::Categorical {
                     codes: (0..n_obs as u32).map(|i| i % 3).collect(),
                     levels: vec!["A".into(), "B".into(), "C".into()],
                 },
-            },
+            ),
         ],
     };
     let var = VarTable {
@@ -1209,10 +1203,7 @@ async fn write_big_compressible(path: &std::path::Path, compression: Option<u8>)
     let obs = ObsTable {
         index: (0..n_obs).map(|i| format!("c{i}")).collect(),
         // Constant column compresses to almost nothing.
-        columns: vec![Column {
-            name: "const".into(),
-            data: ColumnData::Float(vec![1.0; n_obs]),
-        }],
+        columns: vec![Column::new("const", ColumnData::Float(vec![1.0; n_obs]))],
     };
     let var = VarTable {
         index: (0..n_vars).map(|i| format!("g{i}")).collect(),
@@ -1433,17 +1424,17 @@ async fn bool_columns_are_written_as_h5_enum_not_integer() {
 
     let obs = ObsTable {
         index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
-        columns: vec![Column {
-            name: "is_primary_data".into(),
-            data: ColumnData::Bool(flags.clone()),
-        }],
+        columns: vec![Column::new(
+            "is_primary_data",
+            ColumnData::Bool(flags.clone()),
+        )],
     };
     let var = VarTable {
         index: (0..n_vars).map(|i| format!("g{i}")).collect(),
-        columns: vec![Column {
-            name: "feature_is_filtered".into(),
-            data: ColumnData::Bool(gene_flags.clone()),
-        }],
+        columns: vec![Column::new(
+            "feature_is_filtered",
+            ColumnData::Bool(gene_flags.clone()),
+        )],
     };
     let (indptr, indices, data) = diag_csr(n_obs, n_vars);
     let chunk = MatrixChunk {
@@ -1516,10 +1507,7 @@ async fn bool_columns_stay_enum_when_compressed() {
     let flags: Vec<bool> = (0..n_obs).map(|i| i % 3 == 0).collect();
     let obs = ObsTable {
         index: (0..n_obs).map(|i| format!("c{i}")).collect(),
-        columns: vec![Column {
-            name: "flag".into(),
-            data: ColumnData::Bool(flags.clone()),
-        }],
+        columns: vec![Column::new("flag", ColumnData::Bool(flags.clone()))],
     };
     let var = VarTable {
         index: (0..n_vars).map(|i| format!("g{i}")).collect(),
@@ -1600,13 +1588,13 @@ async fn categorical_codes_wider_than_i16_are_not_truncated() {
 
     let obs = ObsTable {
         index: (0..n_obs).map(|i| format!("cell{i}")).collect(),
-        columns: vec![Column {
-            name: "original_barcodes".into(),
-            data: ColumnData::Categorical {
+        columns: vec![Column::new(
+            "original_barcodes",
+            ColumnData::Categorical {
                 codes: codes.clone(),
                 levels: levels.clone(),
             },
-        }],
+        )],
     };
     let var = VarTable {
         index: (0..n_vars).map(|i| format!("g{i}")).collect(),
@@ -1688,13 +1676,13 @@ async fn categorical_codes_stay_narrow_for_small_level_counts() {
 
         let obs = ObsTable {
             index: (0..n_obs).map(|i| format!("c{i}")).collect(),
-            columns: vec![Column {
-                name: "grp".into(),
-                data: ColumnData::Categorical {
+            columns: vec![Column::new(
+                "grp",
+                ColumnData::Categorical {
                     codes: (0..n_obs as u32).collect(),
                     levels: (0..n_levels).map(|i| format!("l{i}")).collect(),
                 },
-            }],
+            )],
         };
         let var = VarTable {
             index: (0..n_vars).map(|i| format!("g{i}")).collect(),

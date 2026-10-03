@@ -509,10 +509,7 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
                 }
             }
         };
-        columns.push(Column {
-            name: col_name,
-            data: col_data,
-        });
+        columns.push(Column::new(col_name, col_data));
     }
 
     Ok((index, columns))

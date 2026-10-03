@@ -431,10 +431,7 @@ pub(super) fn read_col(col_dir: &Path, name: &str, cm: &ColumnMeta) -> Result<Co
             )))
         }
     };
-    Ok(Column {
-        name: name.to_string(),
-        data,
-    })
+    Ok(Column::new(name.to_string(), data))
 }
 
 pub(super) fn write_sparse(dir: &Path, csr: &SparseMatrixCSR) -> Result<()> {

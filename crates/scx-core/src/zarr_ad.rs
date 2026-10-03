@@ -540,7 +540,7 @@ fn read_dataframe(store: &Store, path: &str) -> Result<(Vec<String>, Vec<Column>
             ))),
         };
         match data {
-            Ok(data) => columns.push(Column { name, data }),
+            Ok(data) => columns.push(Column::new(name, data)),
             Err(e) => tracing::warn!("skipping column '{name}': {e}"),
         }
     }

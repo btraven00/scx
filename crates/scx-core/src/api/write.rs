@@ -1078,26 +1078,26 @@ mod tests {
         let obs = ObsTable {
             index: (0..6).map(|i| format!("c{i}")).collect(),
             columns: vec![
-                Column {
-                    name: "n_counts".into(),
-                    data: ColumnData::Float(vec![1.5, 2.5, 3.5, 4.5, 5.5, 6.5]),
-                },
-                Column {
-                    name: "batch".into(),
-                    data: ColumnData::String(
+                Column::new(
+                    "n_counts",
+                    ColumnData::Float(vec![1.5, 2.5, 3.5, 4.5, 5.5, 6.5]),
+                ),
+                Column::new(
+                    "batch",
+                    ColumnData::String(
                         vec!["a", "b", "a", "b", "a", "b"]
                             .into_iter()
                             .map(String::from)
                             .collect(),
                     ),
-                },
-                Column {
-                    name: "cluster".into(),
-                    data: ColumnData::Categorical {
+                ),
+                Column::new(
+                    "cluster",
+                    ColumnData::Categorical {
                         codes: vec![0, 1, 0, 2, 1, 2],
                         levels: vec!["A".into(), "B".into(), "C".into()],
                     },
-                },
+                ),
             ],
         };
         // NOTE: H5AdReader currently drops Bool columns from var/obs (and
@@ -1107,14 +1107,8 @@ mod tests {
         let var = VarTable {
             index: (0..3).map(|i| format!("g{i}")).collect(),
             columns: vec![
-                Column {
-                    name: "mean_expr".into(),
-                    data: ColumnData::Float(vec![0.1, 0.2, 0.3]),
-                },
-                Column {
-                    name: "n_cells".into(),
-                    data: ColumnData::Int(vec![5, 10, 15]),
-                },
+                Column::new("mean_expr", ColumnData::Float(vec![0.1, 0.2, 0.3])),
+                Column::new("n_cells", ColumnData::Int(vec![5, 10, 15])),
             ],
         };
 

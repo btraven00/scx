@@ -51,10 +51,10 @@ fn make_h5ad(path: &Path, cells: &[&str], genes: &[&str], rows: &[Vec<(u32, f32)
         futures::executor::block_on(async {
             let obs = ObsTable {
                 index: cells.iter().map(|s| s.to_string()).collect(),
-                columns: vec![Column {
-                    name: "batch".into(),
-                    data: ColumnData::String(vec![tag.to_string(); cells.len()]),
-                }],
+                columns: vec![Column::new(
+                    "batch",
+                    ColumnData::String(vec![tag.to_string(); cells.len()]),
+                )],
             };
             let var = VarTable {
                 index: genes.iter().map(|s| s.to_string()).collect(),

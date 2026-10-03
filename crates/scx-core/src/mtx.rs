@@ -470,10 +470,10 @@ impl DatasetReader for MtxReader {
             .clone()
             .unwrap_or_else(|| (0..self.n_vars).map(|i| i.to_string()).collect());
         let columns = match &self.var_names {
-            Some(names) if names.len() == index.len() => vec![Column {
-                name: "gene_symbols".to_string(),
-                data: ColumnData::String(names.clone()),
-            }],
+            Some(names) if names.len() == index.len() => vec![Column::new(
+                "gene_symbols".to_string(),
+                ColumnData::String(names.clone()),
+            )],
             _ => Vec::new(),
         };
         Ok(VarTable { index, columns })

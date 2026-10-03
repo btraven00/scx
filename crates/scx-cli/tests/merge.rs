@@ -107,10 +107,7 @@ fn make_obs_column_h5ad(
             index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
             columns: extra_cols
                 .into_iter()
-                .map(|(name, data)| Column {
-                    name: name.to_string(),
-                    data,
-                })
+                .map(|(name, data)| Column::new(name.to_string(), data))
                 .collect(),
         };
         let var = VarTable {

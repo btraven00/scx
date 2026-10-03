@@ -251,7 +251,7 @@ fn read_obs_sync(path: &Path) -> Result<ObsTable> {
         }
         let ds_path = format!("obs/{name}");
         match read_column_data_sync(&file, &ds_path) {
-            Ok(data) => columns.push(Column { name, data }),
+            Ok(data) => columns.push(Column::new(name, data)),
             Err(e) => tracing::warn!("skipping obs column '{}': {}", name, e),
         }
     }
@@ -269,7 +269,7 @@ fn read_var_sync(path: &Path) -> Result<VarTable> {
         }
         let ds_path = format!("var/{name}");
         match read_column_data_sync(&file, &ds_path) {
-            Ok(data) => columns.push(Column { name, data }),
+            Ok(data) => columns.push(Column::new(name, data)),
             Err(e) => tracing::warn!("skipping var column '{}': {}", name, e),
         }
     }

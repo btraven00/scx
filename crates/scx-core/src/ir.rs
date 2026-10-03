@@ -57,6 +57,45 @@ pub struct VarTable {
 pub struct Column {
     pub name: String,
     pub data: ColumnData,
+    /// Which values are present (`true`) or missing (NA, `false`); `None`
+    /// when nothing is missing. At a missing position `data` holds a
+    /// placeholder (0, NaN, false, "", code 0) that must not be read as a value.
+    pub mask: Option<Vec<bool>>,
+}
+
+impl Column {
+    /// A column with no missing values.
+    pub fn new(name: impl Into<String>, data: ColumnData) -> Self {
+        Self {
+            name: name.into(),
+            data,
+            mask: None,
+        }
+    }
+
+    /// A column whose values at `missing[i] == true` are NA. The mask is
+    /// dropped when nothing is missing.
+    pub fn with_missing(
+        name: impl Into<String>,
+        data: ColumnData,
+        missing: impl IntoIterator<Item = bool>,
+    ) -> Self {
+        let mask: Vec<bool> = missing.into_iter().map(|m| !m).collect();
+        Self {
+            name: name.into(),
+            data,
+            mask: if mask.iter().all(|&p| p) {
+                None
+            } else {
+                Some(mask)
+            },
+        }
+    }
+
+    /// Whether value `i` is missing.
+    pub fn is_na(&self, i: usize) -> bool {
+        self.mask.as_ref().is_some_and(|m| !m[i])
+    }
 }
 
 #[derive(Debug, Clone)]

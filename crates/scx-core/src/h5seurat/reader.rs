@@ -389,10 +389,7 @@ fn read_obs_sync(path: &Path) -> Result<ObsTable> {
             }
         };
 
-        columns.push(Column {
-            name: name.clone(),
-            data: col_data,
-        });
+        columns.push(Column::new(name.clone(), col_data));
     }
 
     Ok(ObsTable { index, columns })
@@ -479,10 +476,7 @@ fn read_var_sync(path: &Path, assay: &str) -> Result<VarTable> {
                         }
                     }
                 };
-                cols.push(Column {
-                    name,
-                    data: col_data,
-                });
+                cols.push(Column::new(name, col_data));
             }
             cols
         }
