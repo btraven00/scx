@@ -5,25 +5,19 @@ fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_scx"))
 }
 
-fn golden_path(filename: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/golden")
-        .join(filename)
-}
-
-fn fixture_exists(filename: &str) -> bool {
-    golden_path(filename).exists()
-}
+#[path = "../../scx-core/tests/common/golden.rs"]
+mod golden;
+use golden::golden;
 
 #[test]
 fn test_inspect_h5seurat() {
-    if !fixture_exists("pbmc3k.h5seurat") {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
+    };
 
     let output = Command::new(binary_path())
         .arg("inspect")
-        .arg(golden_path("pbmc3k.h5seurat"))
+        .arg(&golden_file)
         .output()
         .expect("failed to run scx inspect");
 
@@ -66,13 +60,13 @@ fn test_inspect_h5seurat() {
 
 #[test]
 fn test_inspect_h5ad() {
-    if !fixture_exists("pbmc3k_reference.h5ad") {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
+    };
 
     let output = Command::new(binary_path())
         .arg("inspect")
-        .arg(golden_path("pbmc3k_reference.h5ad"))
+        .arg(&golden_file)
         .output()
         .expect("failed to run scx inspect");
 
@@ -100,13 +94,13 @@ fn test_inspect_h5ad() {
 
 #[test]
 fn test_inspect_hlca() {
-    if !fixture_exists("hlca_core.h5ad") {
+    let Some(golden_file) = golden("hlca_core.h5ad") else {
         return;
-    }
+    };
 
     let output = Command::new(binary_path())
         .arg("inspect")
-        .arg(golden_path("hlca_core.h5ad"))
+        .arg(&golden_file)
         .output()
         .expect("failed to run scx inspect");
 

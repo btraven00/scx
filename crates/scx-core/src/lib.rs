@@ -27,3 +27,7 @@ pub mod tenx;
 pub mod validate;
 #[cfg(feature = "zarr")]
 pub mod zarr_ad;
+
+#[cfg(test)]
+#[path = "../tests/common/golden.rs"]
+mod golden;
