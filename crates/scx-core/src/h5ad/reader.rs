@@ -720,68 +720,6 @@ fn ad_read_obsm(path: &Path, n_obs: usize) -> Result<Embeddings> {
     Ok(Embeddings { map })
 }
 
-/// Recursively walk an HDF5 group into a serde_json::Value tree.
-fn ad_walk_group(file: &File, group_path: &str) -> Result<serde_json::Value> {
-    let grp = file.group(group_path)?;
-    let members = grp.member_names().unwrap_or_default();
-    let mut map = serde_json::Map::new();
-    for name in members {
-        let child_path = format!("{group_path}/{name}");
-        let is_group = file.group(&child_path).is_ok() && file.dataset(&child_path).is_err();
-        let value = if is_group {
-            ad_walk_group(file, &child_path).unwrap_or(serde_json::Value::Null)
-        } else {
-            ad_dataset_to_json(file, &child_path).unwrap_or(serde_json::Value::Null)
-        };
-        map.insert(name, value);
-    }
-    Ok(serde_json::Value::Object(map))
-}
-
-fn ad_dataset_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
-    let ds = file.dataset(path)?;
-    let is_scalar = ds.ndim() == 0;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(_) => {
-            if is_scalar {
-                let v = ds.read_scalar::<f64>()?;
-                Ok(serde_json::Value::from(v))
-            } else {
-                let v: Vec<f64> = ds.read_1d::<f64>()?.to_vec();
-                Ok(serde_json::json!(v))
-            }
-        }
-        TypeDescriptor::Integer(_) => {
-            if is_scalar {
-                let v = ds.read_scalar::<i64>()?;
-                Ok(serde_json::Value::from(v))
-            } else {
-                let v: Vec<i64> = ds.read_1d::<i64>()?.to_vec();
-                Ok(serde_json::json!(v))
-            }
-        }
-        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
-            if is_scalar {
-                let s = match ds.dtype()?.to_descriptor()? {
-                    TypeDescriptor::VarLenUnicode => ds.read_scalar::<VarLenUnicode>()?.to_string(),
-                    _ => ds.read_scalar::<hdf5::types::VarLenAscii>()?.to_string(),
-                };
-                Ok(serde_json::Value::String(s))
-            } else {
-                let strings = ad_read_strings(file, path)?;
-                if strings.len() == 1 {
-                    Ok(serde_json::Value::String(
-                        strings.into_iter().next().unwrap_or_default(),
-                    ))
-                } else {
-                    Ok(serde_json::json!(strings))
-                }
-            }
-        }
-        _ => Ok(serde_json::Value::Null),
-    }
-}
-
 /// Read the shape and indptr for an H5AD CSR sparse group — used to create a `SparseMatrixMeta`.
 fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
@@ -914,7 +852,7 @@ impl DatasetReader for H5AdReader {
         match file.group("uns") {
             Err(_) => Ok(UnsTable::default()),
             Ok(_) => {
-                let mut raw = ad_walk_group(&file, "uns")?;
+                let mut raw = crate::h5_json::read_json(&file, "uns")?;
                 // scx_provenance is stored as a JSON string to preserve keys
                 // containing "/" without HDF5 path-separator mangling.
                 // Parse it back to an Object so callers get the expected shape.

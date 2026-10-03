@@ -240,15 +240,7 @@ async fn h5ad_obsm_varm_obsp() {
 #[tokio::test]
 async fn h5ad_uns() {
     let uns = open("tiny.h5ad").await.uns().await.unwrap();
-    let e = expected();
-    for key in ["title", "n_pcs", "params", "colors", "weights"] {
-        assert!(uns.raw.get(key).is_some(), "uns.{key} missing: {}", uns.raw);
-    }
-    assert_eq!(uns.raw["title"], e["uns"]["title"]);
-    assert_eq!(
-        uns.raw["params"]["resolution"],
-        e["uns"]["params"]["resolution"]
-    );
+    assert_eq!(uns.raw, expected()["uns"]);
 }
 
 #[tokio::test]

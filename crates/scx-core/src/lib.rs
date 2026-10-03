@@ -8,6 +8,7 @@ mod factory;
 pub use factory::{open, OpenOptions};
 pub mod h5;
 pub mod h5_chunk;
+mod h5_json;
 pub mod h5_str;
 pub mod h5ad;
 pub mod h5bpcells;

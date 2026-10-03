@@ -104,115 +104,6 @@ pub fn read_version_attr(grp: &Group) -> Option<String> {
     None
 }
 
-fn seurat_write_json_value_local(
-    parent: &Group,
-    name: &str,
-    value: &serde_json::Value,
-) -> Result<()> {
-    match value {
-        serde_json::Value::Null => Ok(()),
-        serde_json::Value::Bool(b) => {
-            let ds = parent.new_dataset::<i32>().shape(()).create(name)?;
-            ds.write_scalar(&(*b as i32))?;
-            Ok(())
-        }
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                let ds = parent.new_dataset::<i64>().shape(()).create(name)?;
-                ds.write_scalar(&i)?;
-            } else if let Some(u) = n.as_u64() {
-                let ds = parent.new_dataset::<u64>().shape(()).create(name)?;
-                ds.write_scalar(&u)?;
-            } else if let Some(f) = n.as_f64() {
-                let ds = parent.new_dataset::<f64>().shape(()).create(name)?;
-                ds.write_scalar(&f)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::String(s) => {
-            let ds = parent
-                .new_dataset::<VarLenUnicode>()
-                .shape(1)
-                .create(name)?;
-            let vals = vec![VarLenUnicode::from_str(s).unwrap_or_default()];
-            ds.write(&Array1::from_vec(vals))?;
-            Ok(())
-        }
-        serde_json::Value::Array(arr) => {
-            if arr.is_empty() {
-                let ds = parent.new_dataset::<f64>().shape(0).create(name)?;
-                ds.write(&Array1::from_vec(Vec::<f64>::new()))?;
-                return Ok(());
-            }
-
-            if arr
-                .iter()
-                .all(|v| matches!(v, serde_json::Value::Number(_)))
-            {
-                let vals: Vec<f64> = arr.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
-                let ds = parent.new_dataset::<f64>().shape(vals.len()).create(name)?;
-                ds.write(&Array1::from_vec(vals))?;
-                return Ok(());
-            }
-
-            if arr
-                .iter()
-                .all(|v| matches!(v, serde_json::Value::String(_)))
-            {
-                let vals: Vec<VarLenUnicode> = arr
-                    .iter()
-                    .map(|v| {
-                        VarLenUnicode::from_str(v.as_str().unwrap_or_default()).unwrap_or_default()
-                    })
-                    .collect();
-                let ds = parent
-                    .new_dataset::<VarLenUnicode>()
-                    .shape(vals.len())
-                    .create(name)?;
-                ds.write(&Array1::from_vec(vals))?;
-                return Ok(());
-            }
-
-            let grp = parent.create_group(name)?;
-            for (i, elem) in arr.iter().enumerate() {
-                seurat_write_json_value_local(&grp, &i.to_string(), elem)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Object(map) => {
-            let grp = parent.create_group(name)?;
-            for (k, v) in map {
-                seurat_write_json_value_local(&grp, k, v)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn seurat_write_uns_local(file: &File, uns: &UnsTable) -> Result<()> {
-    if uns.raw.is_null() {
-        return Ok(());
-    }
-
-    let misc = match file.group("misc") {
-        Ok(g) => g,
-        Err(_) => file.create_group("misc")?,
-    };
-
-    match &uns.raw {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                seurat_write_json_value_local(&misc, k, v)?;
-            }
-        }
-        other => {
-            seurat_write_json_value_local(&misc, "value", other)?;
-        }
-    }
-
-    Ok(())
-}
-
 /// Write a 1-D uint32 dataset into an HDF5 group, replacing any existing one.
 fn write_u32s(grp: &Group, name: &str, values: &[u32]) -> Result<()> {
     if grp.link_exists(name) {
@@ -1091,7 +982,7 @@ impl DatasetWriter for BpcellsH5Writer {
         }
 
         if let Some(uns) = &self.uns {
-            seurat_write_uns_local(&self.file, uns)?;
+            crate::h5seurat::seurat_write_uns(&self.file, uns)?;
         }
 
         // Stream-finalize X. Datasets were appended during write_x_chunk; if no

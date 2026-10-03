@@ -323,6 +323,25 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
     Ok(())
 }
 
+/// `uns` goes to Seurat's `misc` slot, the free-form list SeuratDisk saves
+/// as a group.
+pub(crate) fn seurat_write_uns(file: &File, uns: &UnsTable) -> Result<()> {
+    let Some(map) = uns.raw.as_object() else {
+        return Ok(());
+    };
+    let misc = match file.group("misc") {
+        Ok(g) => g,
+        Err(_) => file.create_group("misc")?,
+    };
+    for (k, v) in map {
+        if misc.link_exists(k) {
+            misc.unlink(k)?;
+        }
+        crate::h5_json::write_json(&misc, k, v, crate::h5_json::Encoding::None)?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // DatasetWriter impl
 // ---------------------------------------------------------------------------
@@ -390,8 +409,8 @@ impl DatasetWriter for H5SeuratWriter {
         Ok(())
     }
 
-    async fn write_uns(&mut self, _uns: &UnsTable) -> Result<()> {
-        Ok(()) // H5Seurat has no uns equivalent
+    async fn write_uns(&mut self, uns: &UnsTable) -> Result<()> {
+        seurat_write_uns(&self.file, uns)
     }
 
     async fn begin_sparse(

@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use serde_json;
-
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use hdf5::types::{FloatSize, TypeDescriptor, VarLenUnicode};
@@ -502,69 +500,13 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
 // uns helpers — walk misc/ into a serde_json::Value tree
 // ---------------------------------------------------------------------------
 
-/// Recursively walk an HDF5 group into a JSON object.
-/// Unreadable or unsupported nodes are silently replaced with `null`.
-fn seurat_walk_group(file: &File, group_path: &str) -> serde_json::Value {
-    let grp = match file.group(group_path) {
-        Ok(g) => g,
-        Err(_) => return serde_json::Value::Null,
-    };
-    let members = grp.member_names().unwrap_or_default();
-    let mut map = serde_json::Map::new();
-    for name in members {
-        let child = format!("{group_path}/{name}");
-        let is_grp = file.group(&child).is_ok() && file.dataset(&child).is_err();
-        let value = if is_grp {
-            seurat_walk_group(file, &child)
-        } else {
-            seurat_ds_to_json(file, &child).unwrap_or(serde_json::Value::Null)
-        };
-        map.insert(name, value);
-    }
-    serde_json::Value::Object(map)
-}
-
-fn seurat_ds_to_json(file: &File, path: &str) -> Result<serde_json::Value> {
-    let ds = file.dataset(path)?;
-    let is_scalar = ds.ndim() == 0;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(_) => {
-            if is_scalar {
-                Ok(serde_json::Value::from(ds.read_scalar::<f64>()?))
-            } else {
-                let v: Vec<f64> = ds.read_1d::<f64>()?.to_vec();
-                Ok(serde_json::json!(v))
-            }
-        }
-        TypeDescriptor::Integer(_) => {
-            if is_scalar {
-                Ok(serde_json::Value::from(ds.read_scalar::<i64>()?))
-            } else {
-                let v: Vec<i64> = ds.read_1d::<i64>()?.to_vec();
-                Ok(serde_json::json!(v))
-            }
-        }
-        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
-            let strings = read_strings(file, path)?;
-            if is_scalar || strings.len() == 1 {
-                Ok(serde_json::Value::String(
-                    strings.into_iter().next().unwrap_or_default(),
-                ))
-            } else {
-                Ok(serde_json::json!(strings))
-            }
-        }
-        _ => Ok(serde_json::Value::Null),
-    }
-}
-
 fn read_uns_sync(path: &Path) -> Result<UnsTable> {
     let file = File::open(path)?;
     if file.group("misc").is_err() {
         return Ok(UnsTable::default());
     }
     Ok(UnsTable {
-        raw: seurat_walk_group(&file, "misc"),
+        raw: crate::h5_json::read_json(&file, "misc")?,
     })
 }
 

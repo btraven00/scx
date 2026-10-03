@@ -622,7 +622,7 @@ fn read_nullable(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)> {
 }
 
 // ---------------------------------------------------------------------------
-// uns (same JSON mapping as h5ad's ad_walk_group)
+// uns (same JSON mapping as h5_json::read_json)
 // ---------------------------------------------------------------------------
 
 fn walk_group(store: &Store, path: &str) -> Value {
