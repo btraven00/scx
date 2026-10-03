@@ -263,3 +263,77 @@ async fn h5seurat_v4_data_layer() {
     }
     assert_eq!(dense, matrix(&e["X"]));
 }
+
+async fn chunk_dtypes(
+    stream: impl futures::Stream<Item = scx_core::error::Result<scx_core::ir::MatrixChunk>>,
+) -> Vec<scx_core::dtype::DataType> {
+    stream.map(|c| c.unwrap().data.data.dtype()).collect().await
+}
+
+#[tokio::test]
+async fn empty_chunks_keep_the_matrix_dtype() {
+    use scx_core::dtype::DataType;
+    // Chunk size 1 makes row 1 (no counts) an empty chunk of its own.
+    let opts = scx_core::OpenOptions::new(1);
+    for (name, want) in [
+        ("tiny_v4.h5seurat", DataType::F64),
+        ("tiny_10x.h5", DataType::I32),
+    ] {
+        let mut r = scx_core::open(tiny(name).to_str().unwrap(), &opts)
+            .await
+            .unwrap();
+        let got = chunk_dtypes(r.x_stream()).await;
+        assert!(got.iter().all(|&d| d == want), "{name}: {got:?}");
+    }
+    let mut r = scx_core::open(tiny("tiny.h5ad").to_str().unwrap(), &opts)
+        .await
+        .unwrap();
+    let metas = r.layer_metas().await.unwrap();
+    let got = chunk_dtypes(r.layer_stream(&metas[0], 1)).await;
+    assert!(
+        got.iter().all(|&d| d == DataType::I32),
+        "tiny.h5ad counts: {got:?}"
+    );
+}
+
+#[tokio::test]
+async fn h5seurat_reads_wide_and_unsigned_storage() {
+    // The v4 fixture's counts rewritten as R never writes them but other
+    // tools do: int64 indptr, uint32 indices and uint32 values.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide.h5seurat");
+    std::fs::copy(tiny("tiny_v4.h5seurat"), &path).unwrap();
+    {
+        let f = hdf5::File::open_rw(&path).unwrap();
+        let g = f.group("assays/RNA/counts").unwrap();
+        let indptr: Vec<i64> = g.dataset("indptr").unwrap().read_raw::<i64>().unwrap();
+        let indices: Vec<u32> = g.dataset("indices").unwrap().read_raw::<u32>().unwrap();
+        let data: Vec<u32> = g
+            .dataset("data")
+            .unwrap()
+            .read_raw::<f64>()
+            .unwrap()
+            .iter()
+            .map(|&x| x as u32)
+            .collect();
+        for n in ["indptr", "indices", "data"] {
+            g.unlink(n).unwrap();
+        }
+        g.new_dataset_builder()
+            .with_data(&indptr)
+            .create("indptr")
+            .unwrap();
+        g.new_dataset_builder()
+            .with_data(&indices)
+            .create("indices")
+            .unwrap();
+        g.new_dataset_builder()
+            .with_data(&data)
+            .create("data")
+            .unwrap();
+    }
+    let opts = scx_core::OpenOptions::new(4);
+    let mut r = scx_core::open(path.to_str().unwrap(), &opts).await.unwrap();
+    assert_eq!(r.dtype(), scx_core::dtype::DataType::U32);
+    assert_eq!(dense_x(&mut *r).await, matrix(&expected()["counts"]));
+}

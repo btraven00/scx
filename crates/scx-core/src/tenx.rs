@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
-use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
+use hdf5::types::{IntSize, TypeDescriptor};
 use hdf5::File;
 use ndarray::s;
 
@@ -256,7 +256,7 @@ impl TenxH5Reader {
             }
         }
 
-        let indptr = read_int_dataset_u64(&file, "matrix/indptr")?;
+        let indptr = crate::h5::read_u64(&file.dataset("matrix/indptr")?)?;
         if indptr.len() != n_obs + 1 {
             return Err(ScxError::InvalidFormat(format!(
                 "10x /matrix/indptr length {} != n_barcodes+1 {}",
@@ -265,7 +265,7 @@ impl TenxH5Reader {
             )));
         }
 
-        let dtype = detect_dtype(&file, "matrix/data")?;
+        let dtype = crate::h5::value_dtype(&file.dataset("matrix/data")?)?;
 
         Ok(Self {
             path,
@@ -276,37 +276,6 @@ impl TenxH5Reader {
             dtype,
         })
     }
-}
-
-fn detect_dtype(file: &File, path: &str) -> Result<DataType> {
-    let ds = file.dataset(path)?;
-    Ok(match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-        TypeDescriptor::Float(_) => DataType::F64,
-        TypeDescriptor::Integer(IntSize::U4) => DataType::I32,
-        TypeDescriptor::Integer(IntSize::U8) => DataType::I32,
-        TypeDescriptor::Integer(_) => DataType::I32,
-        TypeDescriptor::Unsigned(_) => DataType::U32,
-        _ => DataType::F32,
-    })
-}
-
-fn read_int_dataset_u64(file: &File, path: &str) -> Result<Vec<u64>> {
-    let ds = file.dataset(path)?;
-    Ok(match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(IntSize::U8) => {
-            ds.read_1d::<i64>()?.iter().map(|&x| x as u64).collect()
-        }
-        TypeDescriptor::Integer(_) => ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect(),
-        TypeDescriptor::Unsigned(IntSize::U8) => ds.read_1d::<u64>()?.to_vec(),
-        TypeDescriptor::Unsigned(_) => ds.read_1d::<u32>()?.iter().map(|&x| x as u64).collect(),
-        other => {
-            return Err(ScxError::InvalidFormat(format!(
-                "unexpected integer dtype {:?} at {path}",
-                other
-            )))
-        }
-    })
 }
 
 fn read_str_dataset(file: &File, path: &str) -> Result<Vec<String>> {
@@ -364,12 +333,7 @@ fn read_indices(file: &File, a: usize, b: usize) -> Result<Vec<u32>> {
 /// a raw byte reinterpret would get wrong.
 fn read_data(file: &File, dtype: DataType, a: usize, b: usize) -> Result<TypedVec> {
     if b <= a {
-        return Ok(match dtype {
-            DataType::F32 => TypedVec::F32(Vec::new()),
-            DataType::F64 => TypedVec::F64(Vec::new()),
-            DataType::I32 => TypedVec::I32(Vec::new()),
-            DataType::U32 => TypedVec::U32(Vec::new()),
-        });
+        return Ok(TypedVec::empty(dtype));
     }
     let ds = file.dataset("matrix/data")?;
     let descr = ds.dtype()?.to_descriptor()?;
@@ -992,7 +956,7 @@ mod tests {
     fn dtype_detection_float_and_uint_and_i64_indptr() {
         let dir = tempfile::tempdir().unwrap();
 
-        // float32 data + i64 indptr/indices (exercises read_int_dataset_u64 i64 path).
+        // float32 data + i64 indptr/indices (exercises read_u64 on i64 indptr).
         let pf = dir.path().join("float.h5");
         {
             let f = File::create(&pf).unwrap();
