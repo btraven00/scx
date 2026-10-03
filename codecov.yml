@@ -32,7 +32,7 @@ ignore:
   - "python/picklerick/tests/**/*"
   - "r/picklerick/tests/**/*"
   # R package: only its R code is measured (entrypoint.c is a registration stub).
-  - "r/picklerick/src/**/*"
+  - "r/picklerick/src"
 
 # covr writes R paths relative to the package ("R/read.R").
 fixes:
