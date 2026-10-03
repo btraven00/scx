@@ -182,6 +182,9 @@ fn stream_dense_to_writer(
 // ---------------------------------------------------------------------------
 
 /// Streaming builder for `.h5ad`. Push row chunks via [`H5AdBuilder::push_x_csr_chunk`].
+///
+/// The chunk arguments take anything that converts into a `Vec`: slices are
+/// copied, owned vectors are moved in without a copy.
 pub struct H5AdBuilder {
     inner: H5AdWriter,
     n_obs: usize,
@@ -259,19 +262,20 @@ impl H5AdBuilder {
     pub fn push_x_csr_chunk(
         &mut self,
         row_offset: usize,
-        indptr: &[u64],
-        indices: &[u32],
-        data: &[f32],
+        indptr: impl Into<Vec<u64>>,
+        indices: impl Into<Vec<u32>>,
+        data: impl Into<Vec<f32>>,
     ) -> Result<&mut Self, ScxError> {
+        let (indptr, indices, data) = (indptr.into(), indices.into(), data.into());
         let nrows = indptr.len().saturating_sub(1);
         let chunk = MatrixChunk {
             row_offset,
             nrows,
             data: SparseMatrixCSR {
                 shape: (nrows, self.n_vars),
-                indptr: indptr.to_vec(),
-                indices: indices.to_vec(),
-                data: TypedVec::F32(data.to_vec()),
+                indptr,
+                indices,
+                data: TypedVec::F32(data),
             },
         };
         block_on(self.inner.write_x_chunk(&chunk)).map_err(map_err)?;
@@ -366,19 +370,20 @@ impl BpcellsH5SeuratBuilder {
     pub fn push_x_csr_chunk(
         &mut self,
         row_offset: usize,
-        indptr: &[u64],
-        indices: &[u32],
-        data: &[f32],
+        indptr: impl Into<Vec<u64>>,
+        indices: impl Into<Vec<u32>>,
+        data: impl Into<Vec<f32>>,
     ) -> Result<&mut Self, ScxError> {
+        let (indptr, indices, data) = (indptr.into(), indices.into(), data.into());
         let nrows = indptr.len().saturating_sub(1);
         let chunk = MatrixChunk {
             row_offset,
             nrows,
             data: SparseMatrixCSR {
                 shape: (nrows, self.n_vars),
-                indptr: indptr.to_vec(),
-                indices: indices.to_vec(),
-                data: TypedVec::F32(data.to_vec()),
+                indptr,
+                indices,
+                data: TypedVec::F32(data),
             },
         };
         block_on(self.inner.write_x_chunk(&chunk)).map_err(map_err)?;
@@ -473,19 +478,20 @@ impl H5SeuratBuilder {
     pub fn push_x_csr_chunk(
         &mut self,
         row_offset: usize,
-        indptr: &[u64],
-        indices: &[u32],
-        data: &[f32],
+        indptr: impl Into<Vec<u64>>,
+        indices: impl Into<Vec<u32>>,
+        data: impl Into<Vec<f32>>,
     ) -> Result<&mut Self, ScxError> {
+        let (indptr, indices, data) = (indptr.into(), indices.into(), data.into());
         let nrows = indptr.len().saturating_sub(1);
         let chunk = MatrixChunk {
             row_offset,
             nrows,
             data: SparseMatrixCSR {
                 shape: (nrows, self.n_vars),
-                indptr: indptr.to_vec(),
-                indices: indices.to_vec(),
-                data: TypedVec::F32(data.to_vec()),
+                indptr,
+                indices,
+                data: TypedVec::F32(data),
             },
         };
         block_on(self.inner.write_x_chunk(&chunk)).map_err(map_err)?;
@@ -816,7 +822,7 @@ mod tests {
         b.add_obsm(obsm).unwrap();
         // Empty X chunk per row, to satisfy n_obs.
         for r in 0..4 {
-            b.push_x_csr_chunk(r, &[0, 0], &[], &[]).unwrap();
+            b.push_x_csr_chunk(r, [0, 0], [], []).unwrap();
         }
         b.finalize().unwrap();
 
@@ -837,7 +843,7 @@ mod tests {
         let expected_nnz = layer.nnz();
         b.add_layer_csr("spliced", layer.view()).unwrap();
         for r in 0..5 {
-            b.push_x_csr_chunk(r, &[0, 0], &[], &[]).unwrap();
+            b.push_x_csr_chunk(r, [0, 0], [], []).unwrap();
         }
         b.finalize().unwrap();
 
@@ -1201,7 +1207,7 @@ mod tests {
         b.add_uns(uns).unwrap();
 
         for r in 0..3 {
-            b.push_x_csr_chunk(r, &[0, 0], &[], &[]).unwrap();
+            b.push_x_csr_chunk(r, [0, 0], [], []).unwrap();
         }
         b.finalize().unwrap();
 
@@ -1249,7 +1255,7 @@ mod tests {
         b.add_obsp_csr("connectivities", graph.view()).unwrap();
 
         for r in 0..4 {
-            b.push_x_csr_chunk(r, &[0, 0], &[], &[]).unwrap();
+            b.push_x_csr_chunk(r, [0, 0], [], []).unwrap();
         }
         b.finalize().unwrap();
 
@@ -1298,7 +1304,7 @@ mod tests {
         // H5AdWriter writes blindly, so this isn't expected to error at
         // chunk time — instead, the reader will reject it. We treat this
         // as a documentation test: shape responsibility is on the caller.
-        let pushed = b.push_x_csr_chunk(0, &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+        let pushed = b.push_x_csr_chunk(0, [0, 1, 2], [0, 1], [1.0, 2.0]);
         assert!(pushed.is_ok());
         // Finalize successfully; the writer doesn't validate index bounds.
         b.finalize().unwrap();
