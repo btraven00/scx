@@ -297,8 +297,9 @@ async fn check_cell_type(back: &mut (dyn DatasetReader + Send)) {
 
 async fn check_uns(back: &mut (dyn DatasetReader + Send)) {
     let uns = back.uns().await.unwrap();
-    for key in ["title", "n_pcs", "params", "colors", "weights"] {
-        assert!(uns.raw.get(key).is_some(), "uns.{key} lost: {}", uns.raw);
+    let e = expected();
+    for (key, want) in e["uns"].as_object().unwrap() {
+        assert_eq!(uns.raw.get(key), Some(want), "uns.{key}: {}", uns.raw);
     }
 }
 
@@ -331,7 +332,6 @@ async fn h5ad_to_h5ad_keeps_categorical_na() {
 }
 
 #[tokio::test]
-#[ignore = "bug: H5AdWriter::write_uns drops arrays and bools (uns.colors, uns.weights, uns.params.use_raw)"]
 async fn h5ad_to_h5ad_keeps_uns() {
     let (_dir, mut back) = convert("tiny.h5ad", Out::H5ad).await;
     check_uns(&mut *back).await;
@@ -356,7 +356,6 @@ async fn h5ad_to_h5seurat_keeps_categorical_na() {
 }
 
 #[tokio::test]
-#[ignore = "bug: H5SeuratWriter::write_uns is a no-op"]
 async fn h5ad_to_h5seurat_keeps_uns() {
     let (_dir, mut back) = convert("tiny.h5ad", Out::H5SeuratDgc).await;
     check_uns(&mut *back).await;
