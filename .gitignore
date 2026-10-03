@@ -16,3 +16,7 @@ r/picklerick/src/rust/target/
 .RData
 .Rhistory
 /lcov.info
+
+# coverage runs
+.coverage
+*.profraw
