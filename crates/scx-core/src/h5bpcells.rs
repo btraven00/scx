@@ -736,9 +736,7 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
             }
             DataType::F32 => self.sink.append("val", Arr::F32(&[])),
             DataType::F64 => self.sink.append("val", Arr::F64(&[])),
-            DataType::I32 => Err(ScxError::InvalidFormat(
-                "BPCells writer does not support I32 matrices".into(),
-            )),
+            DataType::I32 => unreachable!("I32 is stored as U32, see push_chunk"),
         }
     }
 
@@ -763,7 +761,14 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
                 "BPCells stream: CSR indices/data length mismatch".into(),
             ));
         }
-        self.ensure_val_kind(csr.data.dtype())?;
+        // BPCells has no signed integer type. Integer matrices are counts in
+        // practice, so I32 is stored as packed U32 (BPCells' format for
+        // counts); a negative value is an error rather than a silent cast.
+        let kind = match csr.data.dtype() {
+            DataType::I32 => DataType::U32,
+            k => k,
+        };
+        self.ensure_val_kind(kind)?;
 
         let lo = csr.indptr[0] as usize;
         let hi = csr.indptr[chunk.nrows] as usize;
@@ -776,7 +781,16 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
             // Float values are stored unpacked: stream them straight out.
             TypedVec::F32(v) => self.sink.append("val", Arr::F32(&v[lo..hi]))?,
             TypedVec::F64(v) => self.sink.append("val", Arr::F64(&v[lo..hi]))?,
-            TypedVec::I32(_) => unreachable!("I32 rejected by ensure_val_kind"),
+            TypedVec::I32(v) => {
+                let v = &v[lo..hi];
+                if let Some(neg) = v.iter().find(|&&x| x < 0) {
+                    return Err(ScxError::InvalidFormat(format!(
+                        "BPCells stores integers unsigned, but the matrix has a negative \
+                         value ({neg}); convert with a float dtype instead"
+                    )));
+                }
+                self.buf_u32.extend(v.iter().map(|&x| x as u32));
+            }
         }
         self.flush(false)
     }

@@ -221,7 +221,6 @@ macro_rules! cases {
 cases! {
     h5ad_to_h5ad: "tiny.h5ad", "X", H5ad;
     h5ad_to_h5seurat_dgc: "tiny.h5ad", "X", H5SeuratDgc;
-    #[ignore = "bug: BPCells writers reject I32 (integer counts) matrices; here the counts layer"]
     h5ad_to_h5seurat_bpcells: "tiny.h5ad", "X", H5SeuratBpcells;
     h5ad_to_bpcells_dir: "tiny.h5ad", "X", BpcellsDir;
     h5ad_to_npy: "tiny.h5ad", "X", Npy;
@@ -234,17 +233,13 @@ cases! {
 
     tenx_to_h5ad: "tiny_10x.h5", "counts", H5ad;
     tenx_to_h5seurat_dgc: "tiny_10x.h5", "counts", H5SeuratDgc;
-    #[ignore = "bug: BPCells writers reject I32 (integer counts) matrices"]
     tenx_to_h5seurat_bpcells: "tiny_10x.h5", "counts", H5SeuratBpcells;
-    #[ignore = "bug: BPCells writers reject I32 (integer counts) matrices"]
     tenx_to_bpcells_dir: "tiny_10x.h5", "counts", BpcellsDir;
     tenx_to_npy: "tiny_10x.h5", "counts", Npy;
 
     mtx_to_h5ad: "tiny_mtx", "counts", H5ad;
     mtx_to_h5seurat_dgc: "tiny_mtx", "counts", H5SeuratDgc;
-    #[ignore = "bug: BPCells writers reject I32 (integer counts) matrices"]
     mtx_to_h5seurat_bpcells: "tiny_mtx", "counts", H5SeuratBpcells;
-    #[ignore = "bug: BPCells writers reject I32 (integer counts) matrices"]
     mtx_to_bpcells_dir: "tiny_mtx", "counts", BpcellsDir;
     mtx_to_npy: "tiny_mtx", "counts", Npy;
 
@@ -372,4 +367,24 @@ async fn h5ad_to_h5seurat_keeps_categorical_na() {
 async fn h5ad_to_h5seurat_keeps_uns() {
     let (_dir, mut back) = convert("tiny.h5ad", Out::H5SeuratDgc).await;
     check_uns(&mut *back).await;
+}
+
+#[tokio::test]
+async fn bpcells_rejects_negative_integers() {
+    use scx_core::dtype::TypedVec;
+    use scx_core::ir::{MatrixChunk, SparseMatrixCSR};
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = BpcellsDirWriter::create(&dir.path().join("m"), 1, 2).unwrap();
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: 1,
+        data: SparseMatrixCSR {
+            shape: (1, 2),
+            indptr: vec![0, 2],
+            indices: vec![0, 1],
+            data: TypedVec::I32(vec![3, -1]),
+        },
+    };
+    let err = w.write_x_chunk(&chunk).await.unwrap_err();
+    assert!(err.to_string().contains("negative value (-1)"), "{err}");
 }
