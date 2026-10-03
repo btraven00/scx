@@ -16,37 +16,28 @@ fn synthetic_dataset() -> SingleCellDataset {
     let obs = ObsTable {
         index: vec!["cell1".into(), "cell2".into(), "cell3".into()],
         columns: vec![
-            Column {
-                name: "count".into(),
-                data: ColumnData::Int(vec![10, 20, 30]),
-            },
-            Column {
-                name: "score".into(),
-                data: ColumnData::Float(vec![1.1, 2.2, 3.3]),
-            },
-            Column {
-                name: "active".into(),
-                data: ColumnData::Bool(vec![true, false, true]),
-            },
-            Column {
-                name: "label".into(),
-                data: ColumnData::Categorical {
+            Column::new("count", ColumnData::Int(vec![10, 20, 30])),
+            Column::new("score", ColumnData::Float(vec![1.1, 2.2, 3.3])),
+            Column::new("active", ColumnData::Bool(vec![true, false, true])),
+            Column::new(
+                "label",
+                ColumnData::Categorical {
                     codes: vec![0, 1, 0],
                     levels: vec!["A".into(), "B".into()],
                 },
-            },
-            Column {
-                name: "notes".into(),
-                data: ColumnData::String(vec!["x".into(), "y".into(), "z".into()]),
-            },
+            ),
+            Column::new(
+                "notes",
+                ColumnData::String(vec!["x".into(), "y".into(), "z".into()]),
+            ),
         ],
     };
     let var = VarTable {
         index: vec!["g1".into(), "g2".into(), "g3".into(), "g4".into()],
-        columns: vec![Column {
-            name: "highly_variable".into(),
-            data: ColumnData::Bool(vec![true, false, true, false]),
-        }],
+        columns: vec![Column::new(
+            "highly_variable",
+            ColumnData::Bool(vec![true, false, true, false]),
+        )],
     };
     let obsm = Embeddings {
         map: [(

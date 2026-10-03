@@ -495,10 +495,7 @@ fn build_obs(
             .iter()
             .map(|t| t.columns.iter().find(|c| c.name == name).map(|c| &c.data))
             .collect();
-        columns.push(Column {
-            data: concat_column(&cols, lens),
-            name,
-        });
+        columns.push(Column::new(name, concat_column(&cols, lens)));
     }
 
     if let Some(label) = &opts.label {
@@ -512,13 +509,13 @@ fn build_obs(
             .enumerate()
             .flat_map(|(i, &n)| std::iter::repeat_n(i as u32, n))
             .collect();
-        columns.push(Column {
-            name: label.clone(),
-            data: ColumnData::Categorical {
+        columns.push(Column::new(
+            label.clone(),
+            ColumnData::Categorical {
                 codes,
                 levels: keys.to_vec(),
             },
-        });
+        ));
     }
 
     Ok(ObsTable { index, columns })
@@ -761,10 +758,7 @@ fn merge_var_columns(
         };
         if keep {
             let first = present[0];
-            out.push(Column {
-                name,
-                data: aligned[first].clone().unwrap(),
-            });
+            out.push(Column::new(name, aligned[first].clone().unwrap()));
         }
     }
     out
@@ -946,10 +940,8 @@ mod tests {
     #[test]
     fn merge_var_columns_strategies() {
         let idx = sv(&["g1", "g2"]);
-        let col = |name: &str, vals: &[&str]| Column {
-            name: name.to_string(),
-            data: ColumnData::String(sv(vals)),
-        };
+        let col =
+            |name: &str, vals: &[&str]| Column::new(name.to_string(), ColumnData::String(sv(vals)));
         let vars = vec![
             VarTable {
                 index: idx.clone(),

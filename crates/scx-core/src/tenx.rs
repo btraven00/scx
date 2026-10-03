@@ -512,10 +512,9 @@ impl DatasetReader for TenxH5Reader {
             }
             if let Ok(ds) = file.dataset(h5_name) {
                 match read_str_dataset_raw(&ds) {
-                    Ok(v) if !v.is_empty() => columns.push(Column {
-                        name: (*col_name).to_string(),
-                        data: ColumnData::String(v),
-                    }),
+                    Ok(v) if !v.is_empty() => {
+                        columns.push(Column::new((*col_name).to_string(), ColumnData::String(v)))
+                    }
                     Ok(_) => {}
                     Err(e) => tracing::warn!("skipping var column '{col_name}': {e}"),
                 }

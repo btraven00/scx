@@ -197,10 +197,7 @@ impl ParquetReader {
             index,
             columns: accs
                 .into_iter()
-                .map(|a| Column {
-                    name: a.name,
-                    data: a.data,
-                })
+                .map(|a| Column::new(a.name, a.data))
                 .collect(),
         })
     }

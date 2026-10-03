@@ -2047,29 +2047,23 @@ mod tests {
         let obs = ObsTable {
             index: vec!["cell_A".into(), "cell_B".into(), "cell_C".into()],
             columns: vec![
-                Column {
-                    name: "n_counts".into(),
-                    data: ColumnData::Float(vec![100.0, 200.0, 300.0]),
-                },
-                Column {
-                    name: "is_doublet".into(),
-                    data: ColumnData::Bool(vec![false, true, false]),
-                },
-                Column {
-                    name: "cell_type".into(),
-                    data: ColumnData::Categorical {
+                Column::new("n_counts", ColumnData::Float(vec![100.0, 200.0, 300.0])),
+                Column::new("is_doublet", ColumnData::Bool(vec![false, true, false])),
+                Column::new(
+                    "cell_type",
+                    ColumnData::Categorical {
                         codes: vec![0, 1, 0],
                         levels: vec!["T cell".into(), "B cell".into()],
                     },
-                },
+                ),
             ],
         };
         let var = VarTable {
             index: vec!["GeneA".into(), "GeneB".into()],
-            columns: vec![Column {
-                name: "highly_variable".into(),
-                data: ColumnData::Bool(vec![true, false]),
-            }],
+            columns: vec![Column::new(
+                "highly_variable",
+                ColumnData::Bool(vec![true, false]),
+            )],
         };
 
         let chunk = MatrixChunk {

@@ -102,10 +102,10 @@ impl GeneDict {
 
         let var = VarTable {
             index: ensembl,
-            columns: vec![Column {
-                name: SYMBOL_COL.to_string(),
-                data: ColumnData::String(symbol),
-            }],
+            columns: vec![Column::new(
+                SYMBOL_COL.to_string(),
+                ColumnData::String(symbol),
+            )],
         };
 
         Ok(Self {
