@@ -33,21 +33,60 @@ pub struct ProvenanceRecord {
 }
 
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let mut reader = BufReader::new(std::fs::File::open(path)?);
     let mut hasher = Sha256::new();
+    hash_file(&mut hasher, path)?;
+    Ok(hex(hasher))
+}
+
+/// SHA-256 of a file, or of a directory-backed dataset (Zarr, BPCells,
+/// MatrixMarket): every file under it in sorted relative-path order, each as
+/// its path, a NUL, then its bytes. Stable across machines and listings.
+pub fn sha256_path(path: &Path) -> std::io::Result<String> {
+    if !path.is_dir() {
+        return sha256_file(path);
+    }
+    fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let p = entry?.path();
+            if p.is_dir() {
+                files(&p, out)?;
+            } else {
+                out.push(p);
+            }
+        }
+        Ok(())
+    }
+    let mut all = Vec::new();
+    files(path, &mut all)?;
+    all.sort();
+    let mut hasher = Sha256::new();
+    for f in &all {
+        let rel = f.strip_prefix(path).unwrap_or(f);
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update([0u8]);
+        hash_file(&mut hasher, f)?;
+    }
+    Ok(hex(hasher))
+}
+
+fn hash_file(hasher: &mut Sha256, path: &Path) -> std::io::Result<()> {
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
     let mut buf = [0u8; 65536];
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
-            break;
+            return Ok(());
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher
+}
+
+fn hex(hasher: Sha256) -> String {
+    hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect())
+        .collect()
 }
 
 pub fn utc_now_rfc3339() -> String {
@@ -83,4 +122,33 @@ pub fn write_sidecar(record: &ProvenanceRecord, output: &Path) -> std::io::Resul
     s.push(".prov.json");
     let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
     std::fs::write(Path::new(&s), json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_path_hashes_directories_by_content() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for d in [a.path(), b.path()] {
+            std::fs::create_dir(d.join("X")).unwrap();
+            std::fs::write(d.join("X/data"), b"123").unwrap();
+            std::fs::write(d.join(".zattrs"), b"{}").unwrap();
+        }
+        let ha = sha256_path(a.path()).unwrap();
+        assert_eq!(
+            ha,
+            sha256_path(b.path()).unwrap(),
+            "same content, same hash"
+        );
+        std::fs::write(b.path().join("X/data"), b"124").unwrap();
+        assert_ne!(ha, sha256_path(b.path()).unwrap(), "content change shows");
+        std::fs::write(a.path().join("f"), b"x").unwrap();
+        assert_eq!(
+            sha256_path(&a.path().join("f")).unwrap(),
+            sha256_file(&a.path().join("f")).unwrap()
+        );
+    }
 }

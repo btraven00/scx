@@ -502,6 +502,41 @@ fn test_merge_create_uns() {
     });
 }
 
+/// A patch can come from any format scx reads, not only h5ad: here obsm
+/// from an AnnData Zarr store (merge used to open every non-BPCells,
+/// non-H5Seurat patch as h5ad).
+#[test]
+fn test_merge_patch_from_zarr() {
+    let dir = TempDir::new().unwrap();
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/zarr");
+    let out = dir.path().join("merged.h5ad");
+    let base = fixtures.join("small.h5ad");
+    let patch = fixtures.join("small_v2.zarr");
+
+    assert_success(&scx(&[
+        "merge",
+        "--base",
+        base.to_str().unwrap(),
+        "--patch",
+        &format!("{}:obsm/X_pca", patch.display()),
+        "--on-conflict",
+        "overwrite",
+        "--output",
+        out.to_str().unwrap(),
+    ]));
+
+    with_hdf5(|| {
+        futures::executor::block_on(async {
+            let mut merged = H5AdReader::open(&out, 5).unwrap();
+            let mut expect = H5AdReader::open(&base, 5).unwrap();
+            assert_eq!(
+                merged.obsm().await.unwrap().map["X_pca"].data,
+                expect.obsm().await.unwrap().map["X_pca"].data
+            );
+        });
+    });
+}
+
 #[test]
 fn test_merge_varp_rejected() {
     let dir = TempDir::new().unwrap();

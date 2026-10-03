@@ -4,11 +4,8 @@ use std::path::{Path, PathBuf};
 use futures::StreamExt;
 
 use crate::{
-    bpcells::BpcellsDatasetReader,
-    detect::{sniff, sniff_dir, Format},
     error::{Result, ScxError},
     h5ad::{H5AdReader, H5AdWriter},
-    h5seurat::open_h5seurat,
     ir::DenseMatrix,
     stream::{DatasetReader, DatasetWriter},
 };
@@ -323,13 +320,20 @@ async fn apply_patches(
         let sha256 = match &patch.source_sha256 {
             Some(s) => s.clone(),
             None => {
-                let s = crate::provenance::sha256_file(&patch.source)?;
+                let s = crate::provenance::sha256_path(&patch.source)?;
                 patch.source_sha256 = Some(s.clone());
                 s
             }
         };
 
-        let mut reader = open_patch_reader(&patch.source, chunk_size)?;
+        // Any format scx reads can be a patch source.
+        let source = patch.source.to_str().ok_or_else(|| {
+            ScxError::InvalidFormat(format!(
+                "patch path is not UTF-8: {}",
+                patch.source.display()
+            ))
+        })?;
+        let mut reader = crate::open(source, &crate::OpenOptions::new(chunk_size)).await?;
         let conflict = patch.conflict;
         let source_str = patch.source.to_string_lossy().into_owned();
 
@@ -381,16 +385,6 @@ async fn apply_patches(
         }
     }
     Ok(())
-}
-
-/// Open a reader for any supported format using content-based detection.
-fn open_patch_reader(path: &Path, chunk_size: usize) -> Result<Box<dyn DatasetReader + Send>> {
-    let fmt = sniff_dir(path).or_else(|| sniff(path));
-    Ok(match fmt {
-        Some(Format::BPCells) => Box::new(BpcellsDatasetReader::open(path, chunk_size)?),
-        Some(Format::H5Seurat) => open_h5seurat(path, chunk_size, None, None)?,
-        _ => Box::new(H5AdReader::open(path, chunk_size)?),
-    })
 }
 
 /// Stream one named layer from `reader` into `writer`, with conflict handling.
