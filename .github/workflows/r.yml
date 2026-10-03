@@ -1,0 +1,44 @@
+name: R
+
+on:
+  pull_request:
+    paths:
+      - "r/picklerick/**"
+      - "tests/fixtures/**"
+      - ".github/workflows/r.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # covr over the testthat suite. Tests that need generated golden files skip;
+  # SCX_ROOT points them at the repo's tracked fixtures, since covr runs the
+  # tests from a temporary copy of the package.
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      SCX_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: r/picklerick
+          extra-packages: any::covr, any::xml2
+          needs: coverage
+      - name: Coverage
+        run: |
+          cov <- covr::package_coverage("r/picklerick", type = "tests", quiet = FALSE)
+          print(cov)
+          covr::to_cobertura(cov, "r-coverage.xml")
+        shell: Rscript {0}
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./r-coverage.xml
+          flags: r
+          name: r-coverage
+          fail_ci_if_error: false
