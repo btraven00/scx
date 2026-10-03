@@ -112,7 +112,7 @@ impl H5AdReader {
                 }
             };
 
-            let indptr = ad_read_indptr(&file, &format!("{base}/indptr"))?;
+            let indptr = crate::h5::read_u64(&file.dataset(&format!("{base}/indptr"))?)?;
             if indptr.len() != n_obs + 1 {
                 return Err(ScxError::InvalidFormat(format!(
                     "{base}/indptr length {} != n_obs+1 {}",
@@ -199,33 +199,8 @@ fn read_str_attr_on_dataset(ds: &Dataset, name: &str) -> Result<String> {
     Ok(attr.read_scalar::<VarLenUnicode>()?.to_string())
 }
 
-fn ad_read_indptr(file: &File, path: &str) -> Result<Vec<u64>> {
-    let ds = file.dataset(path)?;
-    Ok(match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(IntSize::U8) => {
-            ds.read_1d::<i64>()?.iter().map(|&x| x as u64).collect()
-        }
-        TypeDescriptor::Integer(_) => ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect(),
-        TypeDescriptor::Float(_) => ds.read_1d::<f64>()?.iter().map(|&x| x as u64).collect(),
-        other => {
-            return Err(ScxError::InvalidFormat(format!(
-                "unexpected indptr dtype {:?} at {path}",
-                other
-            )))
-        }
-    })
-}
-
 pub(super) fn ad_detect_dtype(file: &File, path: &str) -> Result<DataType> {
-    let ds = file.dataset(path)?;
-    Ok(match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-        TypeDescriptor::Float(_) => DataType::F64,
-        TypeDescriptor::Integer(IntSize::U4) => DataType::I32,
-        TypeDescriptor::Integer(IntSize::U8) => DataType::I32, // i64 → i32 (counts fit)
-        TypeDescriptor::Unsigned(IntSize::U4) => DataType::U32,
-        _ => DataType::F32,
-    })
+    crate::h5::value_dtype(&file.dataset(path)?)
 }
 
 /// Read a row slice of a dense 2-D dataset and convert to a sparse CSR chunk.
@@ -433,7 +408,7 @@ fn ad_read_chunk(
     let data: TypedVec = if nnz > 0 {
         read_x_data(&file, base, nnz_start, nnz_end, dtype)?
     } else {
-        TypedVec::F32(Vec::new())
+        TypedVec::empty(dtype)
     };
 
     // Normalise indptr to start from 0 for this chunk
@@ -734,7 +709,7 @@ fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<Spar
             (s[0] as usize, s[1] as usize)
         }
     };
-    let indptr = ad_read_indptr(file, &format!("{group_path}/indptr"))?;
+    let indptr = crate::h5::read_u64(&file.dataset(&format!("{group_path}/indptr"))?)?;
     Ok(SparseMatrixMeta {
         name: name.to_string(),
         shape: (nrows, ncols),
@@ -776,22 +751,12 @@ fn ad_read_sparse_chunk(
         Vec::new()
     };
 
+    let data_ds = file.dataset(&format!("{group_path}/data"))?;
+    let dtype = crate::h5::value_dtype(&data_ds)?;
     let data: TypedVec = if nnz > 0 {
-        let ds = file.dataset(&format!("{group_path}/data"))?;
-        match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Float(FloatSize::U4) => {
-                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            TypeDescriptor::Float(_) => {
-                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            TypeDescriptor::Integer(_) => {
-                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            _ => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
-        }
+        crate::h5::read_values(&data_ds, dtype, nnz_start..nnz_end)?
     } else {
-        TypedVec::F32(Vec::new())
+        TypedVec::empty(dtype)
     };
 
     let csr_indptr: Vec<u64> = meta.indptr[row_start..=row_end]

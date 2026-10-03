@@ -4,10 +4,10 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
-use hdf5::types::{FloatSize, TypeDescriptor, VarLenUnicode};
+use hdf5::types::{TypeDescriptor, VarLenUnicode};
 use hdf5::File;
-use ndarray::s;
 
+use crate::h5::{read_u32_range, read_u64, read_values, value_dtype};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
@@ -108,7 +108,7 @@ impl H5SeuratReader {
             XBackend::BpCells
         } else {
             let indptr_ds_path = format!("{dims_path}/indptr");
-            let indptr = read_indptr_from(&file, &indptr_ds_path)?;
+            let indptr = read_u64(&file.dataset(&indptr_ds_path)?)?;
             if indptr.len() != n_obs + 1 {
                 return Err(ScxError::InvalidFormat(format!(
                     "indptr length {} != n_obs+1 {}",
@@ -118,7 +118,7 @@ impl H5SeuratReader {
             }
 
             let data_ds_path = format!("{dims_path}/data");
-            let dtype = detect_dtype(&file, &data_ds_path)?;
+            let dtype = value_dtype(&file.dataset(&data_ds_path)?)?;
             XBackend::DgCMatrix { indptr, dtype }
         };
 
@@ -225,42 +225,6 @@ fn list_layer_groups(file: &File, assay: &str) -> Vec<(String, String)> {
     out
 }
 
-fn read_indptr_from(file: &File, path: &str) -> Result<Vec<u64>> {
-    let ds = file.dataset(path)?;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(_) => Ok(ds.read_1d::<f64>()?.iter().map(|&x| x as u64).collect()),
-        TypeDescriptor::Integer(_) => Ok(ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect()),
-        other => Err(ScxError::InvalidFormat(format!(
-            "unexpected indptr type at {path}: {:?}",
-            other
-        ))),
-    }
-}
-
-fn read_indices_at(file: &File, path: &str, start: usize, end: usize) -> Result<Vec<u32>> {
-    let ds = file.dataset(path)?;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(_) => Ok(ds
-            .read_slice_1d::<i32, _>(s![start..end])?
-            .iter()
-            .map(|&x| x as u32)
-            .collect()),
-        _ => Err(ScxError::InvalidFormat(format!(
-            "unexpected indices type at {path}"
-        ))),
-    }
-}
-
-fn detect_dtype(file: &File, path: &str) -> Result<DataType> {
-    let ds = file.dataset(path)?;
-    Ok(match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-        TypeDescriptor::Float(_) => DataType::F64,
-        TypeDescriptor::Integer(_) => DataType::I32,
-        _ => DataType::F32,
-    })
-}
-
 fn read_strings(file: &File, path: &str) -> Result<Vec<String>> {
     let ds = file.dataset(path)?;
     match ds.dtype()?.to_descriptor()? {
@@ -295,29 +259,22 @@ fn read_chunk_sync(
     let nnz = nnz_end - nnz_start;
 
     let gene_indices: Vec<u32> = if nnz > 0 {
-        read_indices_at(&file, &format!("{base}/indices"), nnz_start, nnz_end)?
+        read_u32_range(
+            &file.dataset(&format!("{base}/indices"))?,
+            nnz_start..nnz_end,
+        )?
     } else {
         Vec::new()
     };
 
     let data: TypedVec = if nnz > 0 {
-        let ds = file.dataset(&format!("{base}/data"))?;
-        match dtype {
-            DataType::F32 => {
-                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::F64 => {
-                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::I32 => {
-                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::U32 => {
-                TypedVec::U32(ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-        }
+        read_values(
+            &file.dataset(&format!("{base}/data"))?,
+            dtype,
+            nnz_start..nnz_end,
+        )?
     } else {
-        TypedVec::F32(Vec::new())
+        TypedVec::empty(dtype)
     };
 
     // CSC column pointers → CSR row pointers (same data, zero-copy reinterpretation).
@@ -592,7 +549,7 @@ fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<
     // CSC column pointers are per cell, so as a cells x genes CSR matrix
     // the shape is (dims[1], dims[0]), as in the BPCells branch above.
     let (nrows, ncols) = (dims[1] as usize, dims[0] as usize);
-    let indptr = read_indptr_from(file, &format!("{group_path}/indptr"))?;
+    let indptr = read_u64(&file.dataset(&format!("{group_path}/indptr"))?)?;
     Ok(SparseMatrixMeta {
         name: name.to_string(),
         shape: (nrows, ncols),
@@ -617,27 +574,20 @@ fn seurat_read_sparse_chunk(
     let nnz = nnz_end - nnz_start;
 
     let indices: Vec<u32> = if nnz > 0 {
-        read_indices_at(&file, &format!("{group_path}/indices"), nnz_start, nnz_end)?
+        read_u32_range(
+            &file.dataset(&format!("{group_path}/indices"))?,
+            nnz_start..nnz_end,
+        )?
     } else {
         Vec::new()
     };
 
+    let data_ds = file.dataset(&format!("{group_path}/data"))?;
+    let dtype = value_dtype(&data_ds)?;
     let data: TypedVec = if nnz > 0 {
-        let ds = file.dataset(&format!("{group_path}/data"))?;
-        match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Float(FloatSize::U4) => {
-                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            TypeDescriptor::Float(_) => {
-                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            TypeDescriptor::Integer(_) => {
-                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            _ => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec()),
-        }
+        read_values(&data_ds, dtype, nnz_start..nnz_end)?
     } else {
-        TypedVec::F32(Vec::new())
+        TypedVec::empty(dtype)
     };
 
     // CSC column pointers → CSR row pointers (zero-based within chunk).

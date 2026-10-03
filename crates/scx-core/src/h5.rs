@@ -76,7 +76,7 @@ impl ScxH5Reader {
             (v, o)
         };
 
-        let indptr: Vec<u64> = read_indptr(&file)?;
+        let indptr: Vec<u64> = read_u64(&file.dataset("X/indptr")?)?;
 
         if indptr.len() != n_obs + 1 {
             return Err(ScxError::InvalidFormat(format!(
@@ -100,33 +100,85 @@ impl ScxH5Reader {
 }
 
 // ---------------------------------------------------------------------------
-// Sync helpers (HDF5 crate is synchronous)
+// Typed reads shared by the HDF5 readers (h5ad, H5Seurat, 10x, SCX H5)
 // ---------------------------------------------------------------------------
 
-/// Read /X/indptr as u64, handling both float64 (rhdf5) and int32 (hdf5r) storage.
-fn read_indptr(file: &File) -> Result<Vec<u64>> {
-    let ds = file.dataset("X/indptr")?;
+/// Read an index dataset (indptr, shape, ...) as u64, whatever its integer
+/// width or signedness. Float is accepted too: rhdf5 writes R doubles.
+pub(crate) fn read_u64(ds: &hdf5::Dataset) -> Result<Vec<u64>> {
     match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(_) => Ok(ds.read_1d::<f64>()?.iter().map(|&x| x as u64).collect()),
-        TypeDescriptor::Integer(_) => Ok(ds.read_1d::<i32>()?.iter().map(|&x| x as u64).collect()),
+        TypeDescriptor::Unsigned(_) => Ok(ds.read_raw::<u64>()?),
+        TypeDescriptor::Integer(_) => ds
+            .read_raw::<i64>()?
+            .into_iter()
+            .map(|x| {
+                u64::try_from(x).map_err(|_| {
+                    ScxError::InvalidFormat(format!("negative index {x} in {}", ds.name()))
+                })
+            })
+            .collect(),
+        TypeDescriptor::Float(_) => Ok(ds
+            .read_raw::<f64>()?
+            .into_iter()
+            .map(|x| x as u64)
+            .collect()),
         other => Err(ScxError::InvalidFormat(format!(
-            "unexpected indptr type: {:?}",
-            other
+            "{}: expected integers, found {other:?}",
+            ds.name()
         ))),
     }
 }
 
-/// Read /X/indices as u32, handling both int32 and uint32 storage.
-fn read_indices_slice(ds: &hdf5::Dataset, start: usize, end: usize) -> Result<Vec<u32>> {
+/// Read `range` of an integer index dataset (indices) as u32.
+pub(crate) fn read_u32_range(
+    ds: &hdf5::Dataset,
+    range: std::ops::Range<usize>,
+) -> Result<Vec<u32>> {
     match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(_) => Ok(ds
-            .read_slice_1d::<i32, _>(s![start..end])?
-            .iter()
-            .map(|&x| x as u32)
-            .collect()),
-        _ => Err(ScxError::InvalidFormat("unexpected indices type".into())),
+        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
+            Ok(ds.read_slice_1d::<u32, _>(s![range])?.to_vec())
+        }
+        other => Err(ScxError::InvalidFormat(format!(
+            "{}: expected integers, found {other:?}",
+            ds.name()
+        ))),
     }
 }
+
+/// The DataType a matrix values dataset is read as. Integers of any width map
+/// to I32 (signed) or U32 (unsigned): counts fit in 32 bits.
+pub(crate) fn value_dtype(ds: &hdf5::Dataset) -> Result<DataType> {
+    Ok(match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
+        TypeDescriptor::Float(_) => DataType::F64,
+        TypeDescriptor::Integer(_) => DataType::I32,
+        TypeDescriptor::Unsigned(_) | TypeDescriptor::Boolean => DataType::U32,
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "{}: unsupported matrix value type {other:?}",
+                ds.name()
+            )))
+        }
+    })
+}
+
+/// Read `range` of a values dataset as `dtype`.
+pub(crate) fn read_values(
+    ds: &hdf5::Dataset,
+    dtype: DataType,
+    range: std::ops::Range<usize>,
+) -> Result<TypedVec> {
+    Ok(match dtype {
+        DataType::F32 => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![range])?.to_vec()),
+        DataType::F64 => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![range])?.to_vec()),
+        DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![range])?.to_vec()),
+        DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![range])?.to_vec()),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sync helpers (HDF5 crate is synchronous)
+// ---------------------------------------------------------------------------
 
 fn detect_x_dtype(file: &File) -> Result<DataType> {
     let ds = file.dataset("X/data")?;
@@ -142,13 +194,7 @@ fn detect_x_dtype(file: &File) -> Result<DataType> {
             });
         }
     }
-    // Fall back to inspecting the HDF5 datatype
-    Ok(match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-        TypeDescriptor::Float(_) => DataType::F64,
-        TypeDescriptor::Integer(_) => DataType::I32,
-        _ => DataType::F32,
-    })
+    value_dtype(&ds)
 }
 
 /// Read a cell-chunk [cell_start, cell_end) from a CSC matrix and return it
@@ -170,29 +216,15 @@ fn read_chunk_sync(
 
     let gene_indices: Vec<u32> = if nnz > 0 {
         let ds = file.dataset("X/indices")?;
-        read_indices_slice(&ds, nnz_start, nnz_end)?
+        read_u32_range(&ds, nnz_start..nnz_end)?
     } else {
         Vec::new()
     };
 
     let data: TypedVec = if nnz > 0 {
-        let ds = file.dataset("X/data")?;
-        match dtype {
-            DataType::F32 => {
-                TypedVec::F32(ds.read_slice_1d::<f32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::F64 => {
-                TypedVec::F64(ds.read_slice_1d::<f64, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::I32 => {
-                TypedVec::I32(ds.read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-            DataType::U32 => {
-                TypedVec::U32(ds.read_slice_1d::<u32, _>(s![nnz_start..nnz_end])?.to_vec())
-            }
-        }
+        read_values(&file.dataset("X/data")?, dtype, nnz_start..nnz_end)?
     } else {
-        TypedVec::F32(Vec::new())
+        TypedVec::empty(dtype)
     };
 
     // CSC column pointers for [cell_start..=cell_end] become CSR row pointers.

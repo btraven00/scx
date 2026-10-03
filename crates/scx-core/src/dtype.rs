@@ -28,6 +28,16 @@ pub enum TypedVec {
 }
 
 impl TypedVec {
+    /// An empty vector of `dtype`; an empty chunk keeps the matrix's dtype.
+    pub fn empty(dtype: DataType) -> Self {
+        match dtype {
+            DataType::F32 => TypedVec::F32(Vec::new()),
+            DataType::F64 => TypedVec::F64(Vec::new()),
+            DataType::I32 => TypedVec::I32(Vec::new()),
+            DataType::U32 => TypedVec::U32(Vec::new()),
+        }
+    }
+
     pub fn dtype(&self) -> DataType {
         match self {
             TypedVec::F32(_) => DataType::F32,
