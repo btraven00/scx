@@ -343,88 +343,104 @@ fn read_chunk_sync(
 fn read_obs_sync(path: &Path) -> Result<ObsTable> {
     let file = File::open(path)?;
     let index = read_strings(&file, "cell.names")?;
-
-    // Collect which columns are logical (encoded 0/1/2)
-    let logicals: std::collections::HashSet<String> = {
-        let grp = file.group("meta.data")?;
-        if let Ok(attr) = grp.attr("logicals") {
-            let raw: ndarray::Array1<VarLenUnicode> = attr.read_1d().unwrap_or_default();
-            raw.into_iter().map(|s| s.to_string()).collect()
-        } else {
-            std::collections::HashSet::new()
-        }
-    };
-
-    let meta_grp = file.group("meta.data")?;
-    let members = meta_grp.member_names()?;
-    let mut columns = Vec::new();
-
-    for name in &members {
-        // Each member is either a dataset (numeric/logical/string) or a group (factor)
-        let is_group = file.group(&format!("meta.data/{name}")).is_ok()
-            && file.dataset(&format!("meta.data/{name}")).is_err();
-
-        let col_data = if is_group {
-            // Factor: group with values (1-indexed int) + levels (string)
-            match read_factor_column(&file, &format!("meta.data/{name}")) {
-                Ok(cd) => cd,
-                Err(e) => {
-                    tracing::warn!("skipping factor column '{name}': {e}");
-                    continue;
-                }
-            }
-        } else if logicals.contains(name.as_str()) {
-            // Logical: int32 (0=F, 1=T, 2=NA) → Bool (NA → false for now)
-            let ds = file.dataset(&format!("meta.data/{name}"))?;
-            let vals: Vec<i32> = ds.read_1d::<i32>()?.to_vec();
-            ColumnData::Bool(vals.into_iter().map(|v| v == 1).collect())
-        } else {
-            // Numeric or string dataset
-            match read_meta_column(&file, &format!("meta.data/{name}")) {
-                Ok(cd) => cd,
-                Err(e) => {
-                    tracing::warn!("skipping obs column '{name}': {e}");
-                    continue;
-                }
-            }
-        };
-
-        columns.push(Column::new(name.clone(), col_data));
-    }
-
+    let columns = read_seurat_frame(&file, &file.group("meta.data")?, "meta.data")?;
     Ok(ObsTable { index, columns })
 }
 
-fn read_factor_column(file: &File, grp_path: &str) -> Result<ColumnData> {
-    let values_path = format!("{grp_path}/values");
-    let levels_path = format!("{grp_path}/levels");
-    let codes: Vec<u32> = file
-        .dataset(&values_path)?
-        .read_1d::<i32>()?
-        .iter()
-        .map(|&v| (v - 1).max(0) as u32) // 1-indexed → 0-indexed
-        .collect();
-    let levels = read_strings(file, &levels_path)?;
-    Ok(ColumnData::Categorical { codes, levels })
+/// Columns of a SeuratDisk data.frame group (`meta.data`, `meta.features`):
+/// factors are groups of 1-based `values` + `levels`, logicals are int32
+/// 0/1/2 listed in the `logicals` attribute, the rest plain datasets. R's
+/// missing values (NA_integer_, logical 2) become masked entries.
+fn read_seurat_frame(file: &File, grp: &hdf5::Group, grp_path: &str) -> Result<Vec<Column>> {
+    let logicals: std::collections::HashSet<String> = match grp.attr("logicals") {
+        Ok(attr) => attr
+            .read_1d::<VarLenUnicode>()
+            .map(|a| a.into_iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default(),
+        Err(_) => Default::default(),
+    };
+    // Column order is the `colnames` attribute when present; HDF5 itself
+    // lists members alphabetically.
+    let names: Vec<String> = match grp.attr("colnames") {
+        Ok(attr) => attr
+            .read_1d::<VarLenUnicode>()?
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+        Err(_) => grp.member_names()?,
+    };
+    let mut columns = Vec::new();
+    for name in names {
+        let path = format!("{grp_path}/{name}");
+        let is_group = file.group(&path).is_ok() && file.dataset(&path).is_err();
+        let read = if is_group {
+            read_factor_column(file, &path)
+        } else if logicals.contains(&name) {
+            read_logical_column(file, &path)
+        } else {
+            read_meta_column(file, &path)
+        };
+        match read {
+            Ok((data, missing)) => columns.push(Column::with_missing(name, data, missing)),
+            Err(e) => tracing::warn!("skipping column '{path}': {e}"),
+        }
+    }
+    Ok(columns)
 }
 
-fn read_meta_column(file: &File, ds_path: &str) -> Result<ColumnData> {
+/// R's NA for integers and factor codes.
+const NA_INTEGER: i32 = i32::MIN;
+
+fn read_factor_column(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
+    let raw = file
+        .dataset(&format!("{grp_path}/values"))?
+        .read_1d::<i32>()?;
+    let levels = read_strings(file, &format!("{grp_path}/levels"))?;
+    // 1-based codes; NA_integer_ (or any code < 1) is missing.
+    let missing = raw.iter().map(|&v| v < 1).collect();
+    let codes = raw
+        .iter()
+        .map(|&v| if v < 1 { 0 } else { v as u32 - 1 })
+        .collect();
+    Ok((ColumnData::Categorical { codes, levels }, missing))
+}
+
+fn read_logical_column(file: &File, ds_path: &str) -> Result<(ColumnData, Vec<bool>)> {
+    let raw = file.dataset(ds_path)?.read_1d::<i32>()?;
+    // 0 = FALSE, 1 = TRUE, 2 = NA
+    let missing = raw.iter().map(|&v| v == 2).collect();
+    Ok((
+        ColumnData::Bool(raw.iter().map(|&v| v == 1).collect()),
+        missing,
+    ))
+}
+
+fn read_meta_column(file: &File, ds_path: &str) -> Result<(ColumnData, Vec<bool>)> {
     let ds = file.dataset(ds_path)?;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(FloatSize::U4) => {
-            let v: Vec<f32> = ds.read_1d::<f32>()?.to_vec();
-            Ok(ColumnData::Float(v.into_iter().map(|x| x as f64).collect()))
+    Ok(match ds.dtype()?.to_descriptor()? {
+        // NA_real_ is a NaN, so float NAs need no mask.
+        TypeDescriptor::Float(_) => (ColumnData::Float(ds.read_1d::<f64>()?.to_vec()), Vec::new()),
+        TypeDescriptor::Integer(_) => {
+            let v = ds.read_1d::<i32>()?.to_vec();
+            let missing = v.iter().map(|&x| x == NA_INTEGER).collect();
+            (
+                ColumnData::Int(
+                    v.iter()
+                        .map(|&x| if x == NA_INTEGER { 0 } else { x })
+                        .collect(),
+                ),
+                missing,
+            )
         }
-        TypeDescriptor::Float(_) => Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec())),
-        TypeDescriptor::Integer(_) => Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec())),
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
-            Ok(ColumnData::String(read_strings(file, ds_path)?))
+            (ColumnData::String(read_strings(file, ds_path)?), Vec::new())
         }
-        other => Err(ScxError::InvalidFormat(format!(
-            "unsupported column type {:?} at {ds_path}",
-            other
-        ))),
-    }
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "unsupported column type {other:?} at {ds_path}"
+            )))
+        }
+    })
 }
 
 fn read_var_sync(path: &Path, assay: &str) -> Result<VarTable> {
@@ -433,53 +449,8 @@ fn read_var_sync(path: &Path, assay: &str) -> Result<VarTable> {
 
     let mf_grp_path = format!("assays/{assay}/meta.features");
     let columns = match file.group(&mf_grp_path) {
+        Ok(grp) => read_seurat_frame(&file, &grp, &mf_grp_path)?,
         Err(_) => Vec::new(),
-        Ok(grp) => {
-            // Which columns are logical (0/1/2 encoded)
-            let logicals: std::collections::HashSet<String> = {
-                if let Ok(attr) = grp.attr("logicals") {
-                    let raw: ndarray::Array1<VarLenUnicode> = attr.read_1d().unwrap_or_default();
-                    raw.into_iter().map(|s| s.to_string()).collect()
-                } else {
-                    std::collections::HashSet::new()
-                }
-            };
-
-            let mut cols = Vec::new();
-            for name in grp.member_names().unwrap_or_default() {
-                let ds_path = format!("{mf_grp_path}/{name}");
-                let is_group = file.group(&ds_path).is_ok() && file.dataset(&ds_path).is_err();
-                let col_data = if is_group {
-                    match read_factor_column(&file, &ds_path) {
-                        Ok(cd) => cd,
-                        Err(e) => {
-                            tracing::warn!("skipping var factor '{name}': {e}");
-                            continue;
-                        }
-                    }
-                } else if logicals.contains(name.as_str()) {
-                    let ds = match file.dataset(&ds_path) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            tracing::warn!("skipping var logical '{name}': {e}");
-                            continue;
-                        }
-                    };
-                    let vals: Vec<i32> = ds.read_1d::<i32>()?.to_vec();
-                    ColumnData::Bool(vals.into_iter().map(|v| v == 1).collect())
-                } else {
-                    match read_meta_column(&file, &ds_path) {
-                        Ok(cd) => cd,
-                        Err(e) => {
-                            tracing::warn!("skipping var column '{name}': {e}");
-                            continue;
-                        }
-                    }
-                };
-                cols.push(Column::new(name, col_data));
-            }
-            cols
-        }
     };
 
     Ok(VarTable { index, columns })

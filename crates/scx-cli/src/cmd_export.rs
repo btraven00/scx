@@ -79,7 +79,7 @@ fn obs_to_dataframe(obs: ObsTable) -> anyhow::Result<DataFrame> {
     let mut columns: Vec<Column> = Vec::with_capacity(obs.columns.len() + 1);
     columns.push(Column::new("index".into(), obs.index.as_slice()));
     for col in &obs.columns {
-        columns.push(column_data_to_column(&col.name, &col.data)?);
+        columns.push(column_data_to_column(col)?);
     }
     Ok(DataFrame::new(columns)?)
 }
@@ -88,24 +88,31 @@ fn var_to_dataframe(var: VarTable) -> anyhow::Result<DataFrame> {
     let mut columns: Vec<Column> = Vec::with_capacity(var.columns.len() + 1);
     columns.push(Column::new("index".into(), var.index.as_slice()));
     for col in &var.columns {
-        columns.push(column_data_to_column(&col.name, &col.data)?);
+        columns.push(column_data_to_column(col)?);
     }
     Ok(DataFrame::new(columns)?)
 }
 
-fn column_data_to_column(name: &str, data: &ColumnData) -> anyhow::Result<Column> {
-    let name: PlSmallStr = name.into();
-    Ok(match data {
-        ColumnData::Int(v) => Column::new(name, v.as_slice()),
-        ColumnData::Float(v) => Column::new(name, v.as_slice()),
-        ColumnData::String(v) => Column::new(name, v.as_slice()),
-        ColumnData::Bool(v) => Column::new(name, v.as_slice()),
+/// A polars column with nulls where the scx column is NA.
+fn column_data_to_column(col: &scx_core::ir::Column) -> anyhow::Result<Column> {
+    let name: PlSmallStr = col.name.as_str().into();
+    fn opt<T: Clone>(col: &scx_core::ir::Column, v: &[T]) -> Vec<Option<T>> {
+        v.iter()
+            .enumerate()
+            .map(|(i, x)| (!col.is_na(i)).then(|| x.clone()))
+            .collect()
+    }
+    Ok(match &col.data {
+        ColumnData::Int(v) => Column::new(name, opt(col, v)),
+        ColumnData::Float(v) => Column::new(name, opt(col, v)),
+        ColumnData::String(v) => Column::new(name, opt(col, v)),
+        ColumnData::Bool(v) => Column::new(name, opt(col, v)),
         ColumnData::Categorical { codes, levels } => {
             let decoded: Vec<&str> = codes
                 .iter()
                 .map(|&c| levels.get(c as usize).map(|s| s.as_str()).unwrap_or(""))
                 .collect();
-            Column::new(name, decoded.as_slice())
+            Column::new(name, opt(col, &decoded))
         }
     })
 }

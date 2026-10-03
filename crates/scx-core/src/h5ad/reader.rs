@@ -480,36 +480,24 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
         // Groups are categorical; datasets are array/string-array
         let is_group = file.group(&col_path).is_ok() && file.dataset(&col_path).is_err();
 
-        let col_data = if is_group {
+        let read = if is_group {
             // Distinguish categorical (codes+categories) from nullable (values+mask)
-            let has_codes = file.dataset(&format!("{col_path}/codes")).is_ok();
-            let has_values = file.dataset(&format!("{col_path}/values")).is_ok();
-            let result = if has_codes {
+            if file.dataset(&format!("{col_path}/codes")).is_ok() {
                 ad_read_categorical(file, &col_path)
-            } else if has_values {
+            } else if file.dataset(&format!("{col_path}/values")).is_ok() {
                 ad_read_nullable(file, &col_path)
             } else {
                 Err(ScxError::InvalidFormat(format!(
                     "unknown group encoding at '{col_path}'"
                 )))
-            };
-            match result {
-                Ok(cd) => cd,
-                Err(e) => {
-                    tracing::warn!("skipping column '{col_name}': {e}");
-                    continue;
-                }
             }
         } else {
-            match ad_read_column(file, &col_path) {
-                Ok(cd) => cd,
-                Err(e) => {
-                    tracing::warn!("skipping column '{col_name}': {e}");
-                    continue;
-                }
-            }
+            ad_read_column(file, &col_path).map(|cd| (cd, Vec::new()))
         };
-        columns.push(Column::new(col_name, col_data));
+        match read {
+            Ok((data, missing)) => columns.push(Column::with_missing(col_name, data, missing)),
+            Err(e) => tracing::warn!("skipping column '{col_name}': {e}"),
+        }
     }
 
     Ok((index, columns))
@@ -577,35 +565,32 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
 }
 
 /// Read a categorical group: codes (i8 or i16) + categories (string-array).
-pub(super) fn ad_read_categorical(file: &File, grp_path: &str) -> Result<ColumnData> {
-    let codes_path = format!("{grp_path}/codes");
-    let codes_ds = file.dataset(&codes_path)?;
-    let codes: Vec<u32> = match codes_ds.dtype()?.to_descriptor()? {
+/// Read a categorical group. Code -1 is NA: it becomes code 0 with
+/// `missing[i] == true`.
+pub(super) fn ad_read_categorical(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
+    let codes_ds = file.dataset(&format!("{grp_path}/codes"))?;
+    let raw: Vec<i64> = match codes_ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Integer(IntSize::U1) => codes_ds
             .read_1d::<i8>()?
             .iter()
-            .map(|&x| x as u32)
+            .map(|&x| x as i64)
             .collect(),
         TypeDescriptor::Integer(IntSize::U2) => codes_ds
             .read_1d::<i16>()?
             .iter()
-            .map(|&x| x as u32)
+            .map(|&x| x as i64)
             .collect(),
-        TypeDescriptor::Integer(_) => codes_ds
-            .read_1d::<i32>()?
-            .iter()
-            .map(|&x| x as u32)
-            .collect(),
+        TypeDescriptor::Integer(_) => codes_ds.read_1d::<i64>()?.to_vec(),
         other => {
             return Err(ScxError::InvalidFormat(format!(
-                "unexpected categorical codes dtype {:?}",
-                other
+                "unexpected categorical codes dtype {other:?}"
             )))
         }
     };
-
     let levels = ad_read_levels(file, &format!("{grp_path}/categories"))?;
-    Ok(ColumnData::Categorical { codes, levels })
+    let missing: Vec<bool> = raw.iter().map(|&c| c < 0).collect();
+    let codes = raw.iter().map(|&c| c.max(0) as u32).collect();
+    Ok((ColumnData::Categorical { codes, levels }, missing))
 }
 
 /// Read a categorical `categories` dataset as level labels. AnnData usually
@@ -658,106 +643,42 @@ fn ad_read_levels(file: &File, path: &str) -> Result<Vec<String>> {
     }
 }
 
-/// Read a nullable column group (values + mask) as ColumnData.
-/// mask == 0 means valid, mask == 1 means NA.
-/// Float/Int columns use NaN for NA; Bool columns use false.
-fn ad_read_nullable(file: &File, grp_path: &str) -> Result<ColumnData> {
-    let values_path = format!("{grp_path}/values");
-    let mask_path = format!("{grp_path}/mask");
-
-    let ds = file.dataset(&values_path)?;
-    let mask: Vec<bool> = if let Ok(mds) = file.dataset(&mask_path) {
-        match mds.dtype()?.to_descriptor()? {
+/// Read a nullable column group (`values` + `mask`, mask true = NA), as
+/// written for pandas' nullable integer, boolean and string dtypes. Returns
+/// the values and the per-value missing flags.
+fn ad_read_nullable(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
+    let ds = file.dataset(&format!("{grp_path}/values"))?;
+    let missing: Vec<bool> = match file.dataset(&format!("{grp_path}/mask")) {
+        Ok(mds) => match mds.dtype()?.to_descriptor()? {
             TypeDescriptor::Boolean => mds.read_1d::<bool>()?.to_vec(),
-            TypeDescriptor::Integer(_) => mds.read_1d::<i8>()?.iter().map(|&x| x != 0).collect(),
-            _ => vec![false; ds.shape().first().copied().unwrap_or(0)],
-        }
-    } else {
-        vec![false; ds.shape().first().copied().unwrap_or(0)]
+            TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
+                mds.read_1d::<i8>()?.iter().map(|&x| x != 0).collect()
+            }
+            other => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "unsupported nullable mask dtype {other:?} at '{grp_path}'"
+                )))
+            }
+        },
+        Err(_) => Vec::new(),
     };
-
-    // Strings do not round-trip through the numeric arms below, and anndata
-    // 0.13 writes ordinary string columns this way. NA becomes "", matching the
-    // fill policy used everywhere else for a missing string.
-    if matches!(
-        ds.dtype()?.to_descriptor()?,
+    let data = match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::VarLenUnicode
-            | TypeDescriptor::VarLenAscii
-            | TypeDescriptor::FixedUnicode(_)
-            | TypeDescriptor::FixedAscii(_)
-    ) {
-        let vals = crate::h5_str::read_str_1d(&ds)?;
-        return Ok(ColumnData::String(
-            vals.into_iter()
-                .zip(mask.iter().chain(std::iter::repeat(&false)))
-                .map(|(v, &na)| if na { String::new() } else { v })
-                .collect(),
-        ));
-    }
-
-    // Strings do not round-trip through the numeric arms below, and anndata
-    // 0.13 writes ordinary string columns as nullable-string-array. Without
-    // this the column is dropped with a warning rather than read. NA becomes
-    // "", the same fill a missing string gets everywhere else.
-    if matches!(
-        ds.dtype()?.to_descriptor()?,
-        TypeDescriptor::VarLenUnicode
-            | TypeDescriptor::VarLenAscii
-            | TypeDescriptor::FixedUnicode(_)
-            | TypeDescriptor::FixedAscii(_)
-    ) {
-        let vals = crate::h5_str::read_str_1d(&ds)?;
-        return Ok(ColumnData::String(
-            vals.into_iter()
-                .zip(mask.iter().copied().chain(std::iter::repeat(false)))
-                .map(|(v, na)| if na { String::new() } else { v })
-                .collect(),
-        ));
-    }
-
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Float(FloatSize::U4) => {
-            let vals: Vec<f32> = ds.read_1d::<f32>()?.to_vec();
-            Ok(ColumnData::Float(
-                vals.iter()
-                    .zip(&mask)
-                    .map(|(&v, &na)| if na { f64::NAN } else { v as f64 })
-                    .collect(),
-            ))
+        | TypeDescriptor::VarLenAscii
+        | TypeDescriptor::FixedUnicode(_)
+        | TypeDescriptor::FixedAscii(_) => ColumnData::String(crate::h5_str::read_str_1d(&ds)?),
+        TypeDescriptor::Float(_) => ColumnData::Float(ds.read_1d::<f64>()?.to_vec()),
+        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
+            ColumnData::Int(ds.read_1d::<i32>()?.to_vec())
         }
-        TypeDescriptor::Float(_) => {
-            let vals: Vec<f64> = ds.read_1d::<f64>()?.to_vec();
-            Ok(ColumnData::Float(
-                vals.iter()
-                    .zip(&mask)
-                    .map(|(&v, &na)| if na { f64::NAN } else { v })
-                    .collect(),
-            ))
+        TypeDescriptor::Boolean => ColumnData::Bool(ds.read_1d::<bool>()?.to_vec()),
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "unsupported nullable column dtype {other:?} at '{grp_path}'"
+            )))
         }
-        TypeDescriptor::Integer(_) => {
-            // Widen nullable int to f64 with NaN for NA
-            let vals: Vec<i32> = ds.read_1d::<i32>()?.to_vec();
-            Ok(ColumnData::Float(
-                vals.iter()
-                    .zip(&mask)
-                    .map(|(&v, &na)| if na { f64::NAN } else { v as f64 })
-                    .collect(),
-            ))
-        }
-        TypeDescriptor::Boolean => {
-            let vals: Vec<bool> = ds.read_1d::<bool>()?.to_vec();
-            Ok(ColumnData::Bool(
-                vals.iter()
-                    .zip(&mask)
-                    .map(|(&v, &na)| if na { false } else { v })
-                    .collect(),
-            ))
-        }
-        other => Err(ScxError::InvalidFormat(format!(
-            "unsupported nullable column dtype {:?} at '{grp_path}'",
-            other
-        ))),
-    }
+    };
+    Ok((data, missing))
 }
 
 /// Read the obsm group as named dense matrices.

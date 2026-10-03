@@ -411,6 +411,9 @@ pub(super) fn write_col(col_dir: &Path, col: &Column) -> Result<()> {
             write_txt(&col_dir.join(format!("{}_levels.txt", col.name)), levels)?;
         }
     }
+    if let Some(mask) = &col.mask {
+        write_1d_bool(&col_dir.join(format!("{}_mask.npy", col.name)), mask)?;
+    }
     Ok(())
 }
 
@@ -431,7 +434,12 @@ pub(super) fn read_col(col_dir: &Path, name: &str, cm: &ColumnMeta) -> Result<Co
             )))
         }
     };
-    Ok(Column::new(name.to_string(), data))
+    let mask_path = col_dir.join(format!("{name}_mask.npy"));
+    let mut col = Column::new(name.to_string(), data);
+    if mask_path.exists() {
+        col.mask = Some(read_1d_bool(&mask_path)?);
+    }
+    Ok(col)
 }
 
 pub(super) fn write_sparse(dir: &Path, csr: &SparseMatrixCSR) -> Result<()> {

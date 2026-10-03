@@ -202,13 +202,13 @@ impl H5AdWriter {
     /// Add a single column to `/obs`, updating the `column-order` attribute.
     ///
     /// Safe to call on both Create and Append mode writers.
-    pub fn add_obs_column(&self, name: &str, data: &ColumnData) -> Result<()> {
-        add_dataframe_column(&self.file, "obs", name, data, self.compression)
+    pub fn add_obs_column(&self, col: &Column) -> Result<()> {
+        add_dataframe_column(&self.file, "obs", col, self.compression)
     }
 
     /// Add a single column to `/var`, updating the `column-order` attribute.
-    pub fn add_var_column(&self, name: &str, data: &ColumnData) -> Result<()> {
-        add_dataframe_column(&self.file, "var", name, data, self.compression)
+    pub fn add_var_column(&self, col: &Column) -> Result<()> {
+        add_dataframe_column(&self.file, "var", col, self.compression)
     }
 
     /// Add a single entry to `/obsm` (creates the group if absent).
@@ -478,23 +478,78 @@ fn write_dataframe(
 
     // columns
     for col in columns {
-        write_column(&grp, &col.name, &col.data, compression)?;
+        write_column(&grp, col, compression)?;
     }
 
     Ok(())
 }
 
-fn write_column(grp: &Group, name: &str, data: &ColumnData, compression: Option<u8>) -> Result<()> {
-    match data {
-        ColumnData::Float(v) => {
+/// A pandas nullable column (`nullable-integer` / `-boolean` /
+/// `-string-array`): a group of `values` + `mask`, mask true = NA.
+fn write_nullable<T: hdf5::H5Type>(
+    grp: &Group,
+    name: &str,
+    encoding: &str,
+    values: Array1<T>,
+    mask: &[bool],
+    compression: Option<u8>,
+) -> Result<Group> {
+    let g = grp.create_group(name)?;
+    write_encoding_on_group(&g, encoding, "0.1.0")?;
+    write_1d(&g, "values", values, compression)?;
+    let missing: Vec<bool> = mask.iter().map(|&present| !present).collect();
+    write_1d(&g, "mask", Array1::from_vec(missing), compression)?;
+    Ok(g)
+}
+
+fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()> {
+    let name = col.name.as_str();
+    match (&col.data, &col.mask) {
+        (ColumnData::Float(v), mask) => {
+            // Float NA is NaN, so no mask group is needed.
+            let vals: Vec<f64> = match mask {
+                None => v.clone(),
+                Some(m) => v
+                    .iter()
+                    .zip(m)
+                    .map(|(&x, &p)| if p { x } else { f64::NAN })
+                    .collect(),
+            };
+            let ds = write_1d(grp, name, Array1::from_vec(vals), compression)?;
+            write_encoding_on_ds(&ds, "array", "0.2.0")?;
+        }
+        (ColumnData::Int(v), Some(m)) => {
+            write_nullable(
+                grp,
+                name,
+                "nullable-integer",
+                Array1::from_vec(v.clone()),
+                m,
+                compression,
+            )?;
+        }
+        (ColumnData::Bool(v), Some(m)) => {
+            write_nullable(
+                grp,
+                name,
+                "nullable-boolean",
+                Array1::from_vec(v.clone()),
+                m,
+                compression,
+            )?;
+        }
+        (ColumnData::String(v), Some(m)) => {
+            let g = grp.create_group(name)?;
+            write_encoding_on_group(&g, "nullable-string-array", "0.1.0")?;
+            write_vlen_str_dataset(&g, "values", v)?;
+            let missing: Vec<bool> = m.iter().map(|&present| !present).collect();
+            write_1d(&g, "mask", Array1::from_vec(missing), compression)?;
+        }
+        (ColumnData::Int(v), None) => {
             let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
-        ColumnData::Int(v) => {
-            let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
-            write_encoding_on_ds(&ds, "array", "0.2.0")?;
-        }
-        ColumnData::Bool(v) => {
+        (ColumnData::Bool(v), None) => {
             // Write as Rust `bool`, which hdf5 maps to the H5T_ENUM {FALSE=0,
             // TRUE=1} that h5py/AnnData use for booleans. Writing a plain u8
             // here instead produces an H5T_INTEGER that readers key off dtype
@@ -503,12 +558,12 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData, compression: Option<
             let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
-        ColumnData::String(v) => {
+        (ColumnData::String(v), None) => {
             // VarLen strings don't support HDF5 filters — written uncompressed.
             let ds = write_vlen_str_dataset(grp, name, v)?;
             write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
         }
-        ColumnData::Categorical { codes, levels } => {
+        (ColumnData::Categorical { codes, levels }, _) => {
             let cat_grp = grp.create_group(name)?;
             write_encoding_on_group(&cat_grp, "categorical", "0.2.0")?;
             // ordered = false (stored as uint8 boolean)
@@ -520,6 +575,11 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData, compression: Option<
             // The i32 arm matters: `as i16` silently wraps, so a column with
             // more than 32767 levels (cell barcodes, cell names) used to be
             // written as garbage codes that no reader could detect.
+            let codes: Vec<i32> = codes
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| if col.is_na(i) { -1 } else { c as i32 })
+                .collect();
             let ds = if levels.len() <= i8::MAX as usize {
                 let c: Vec<i8> = codes.iter().map(|&x| x as i8).collect();
                 write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?
@@ -527,8 +587,7 @@ fn write_column(grp: &Group, name: &str, data: &ColumnData, compression: Option<
                 let c: Vec<i16> = codes.iter().map(|&x| x as i16).collect();
                 write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?
             } else {
-                let c: Vec<i32> = codes.iter().map(|&x| x as i32).collect();
-                write_1d(&cat_grp, "codes", Array1::from_vec(c), compression)?
+                write_1d(&cat_grp, "codes", Array1::from_vec(codes), compression)?
             };
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
@@ -870,10 +929,10 @@ impl DatasetWriter for H5AdWriter {
 fn add_dataframe_column(
     file: &File,
     group_name: &str,
-    col_name: &str,
-    data: &ColumnData,
+    col: &Column,
     compression: Option<u8>,
 ) -> Result<()> {
+    let col_name = col.name.as_str();
     let grp = file.group(group_name)?;
 
     // Read existing column-order (tolerate missing attr for older files).
@@ -904,7 +963,7 @@ fn add_dataframe_column(
         attr.write(&ndarray::Array1::from_vec(vals))?;
     }
 
-    write_column(&grp, col_name, data, compression)
+    write_column(&grp, col, compression)
 }
 
 /// Add a dense 2-D matrix as a named entry inside `/obsm` or `/varm`.

@@ -200,11 +200,20 @@ fn seurat_init_resizable<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()>
     Ok(())
 }
 
-fn seurat_write_strings(grp: &Group, name: &str, strings: &[String]) -> Result<()> {
-    let vals: Vec<VarLenUnicode> = strings
+/// A string dataset, replacing one of the same name. Invalid strings are an
+/// error, not silently blanked.
+pub(crate) fn seurat_write_strings(grp: &Group, name: &str, strings: &[String]) -> Result<()> {
+    if grp.link_exists(name) {
+        grp.unlink(name)?;
+    }
+    let vals = strings
         .iter()
-        .map(|s| VarLenUnicode::from_str(s).unwrap_or_default())
-        .collect();
+        .map(|s| {
+            VarLenUnicode::from_str(s).map_err(|e| {
+                ScxError::InvalidFormat(format!("H5Seurat: invalid string in '{name}': {e}"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let ds = grp
         .new_dataset::<VarLenUnicode>()
         .shape(vals.len())
@@ -213,55 +222,101 @@ fn seurat_write_strings(grp: &Group, name: &str, strings: &[String]) -> Result<(
     Ok(())
 }
 
-/// Write all metadata columns into `grp`.  Also writes the `logicals` attribute
-/// listing the names of Bool columns (R's integer-encoded logicals convention).
-fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
-    let logical_names: Vec<VarLenUnicode> = columns
+fn str_attr(grp: &Group, name: &str, values: &[&str]) -> Result<()> {
+    let vals = values
+        .iter()
+        .map(|s| VarLenUnicode::from_str(s))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| ScxError::InvalidFormat(format!("H5Seurat: invalid attribute string: {e}")))?;
+    grp.new_attr::<VarLenUnicode>()
+        .shape(vals.len())
+        .create(name)?
+        .write(&Array1::from_vec(vals))?;
+    Ok(())
+}
+
+/// Write a SeuratDisk data.frame group (`meta.data`, `meta.features`): its
+/// columns plus the `colnames`, `logicals` and (for meta.data) `_class`
+/// attributes.
+pub(crate) fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    str_attr(grp, "colnames", &names)?;
+    let logicals: Vec<&str> = columns
         .iter()
         .filter(|c| matches!(c.data, ColumnData::Bool(_)))
-        .map(|c| VarLenUnicode::from_str(&c.name).unwrap_or_default())
+        .map(|c| c.name.as_str())
         .collect();
-    if !logical_names.is_empty() {
-        let attr = grp
-            .new_attr::<VarLenUnicode>()
-            .shape(logical_names.len())
-            .create("logicals")?;
-        attr.write(&Array1::from_vec(logical_names))?;
+    if !logicals.is_empty() {
+        str_attr(grp, "logicals", &logicals)?;
+    }
+    if grp.name() == "/meta.data" {
+        str_attr(grp, "_class", &["data.frame"])?;
     }
     for col in columns {
-        seurat_write_col(grp, &col.name, &col.data)?;
+        seurat_write_col(grp, col)?;
     }
     Ok(())
 }
 
-fn seurat_write_col(grp: &Group, name: &str, data: &ColumnData) -> Result<()> {
-    match data {
+/// R's NA for integers and factor codes.
+const NA_INTEGER: i32 = i32::MIN;
+
+fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
+    let name = col.name.as_str();
+    let na = |i: usize| col.is_na(i);
+    let write_i32 = |g: &Group, n: &str, v: Vec<i32>| -> Result<()> {
+        g.new_dataset::<i32>()
+            .shape(v.len())
+            .create(n)?
+            .write(&Array1::from_vec(v))?;
+        Ok(())
+    };
+    match &col.data {
         ColumnData::Float(v) => {
-            let ds = grp.new_dataset::<f64>().shape(v.len()).create(name)?;
-            ds.write(&Array1::from_vec(v.clone()))?;
+            // NA_real_ is a NaN.
+            let v: Vec<f64> = v
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| if na(i) { f64::NAN } else { x })
+                .collect();
+            grp.new_dataset::<f64>()
+                .shape(v.len())
+                .create(name)?
+                .write(&Array1::from_vec(v))?;
         }
         ColumnData::Int(v) => {
-            let ds = grp.new_dataset::<i32>().shape(v.len()).create(name)?;
-            ds.write(&Array1::from_vec(v.clone()))?;
+            write_i32(
+                grp,
+                name,
+                v.iter()
+                    .enumerate()
+                    .map(|(i, &x)| if na(i) { NA_INTEGER } else { x })
+                    .collect(),
+            )?;
         }
         ColumnData::Bool(v) => {
-            // Stored as int32 (0/1); column name is tracked in the `logicals` attr
-            let vi: Vec<i32> = v.iter().map(|&b| b as i32).collect();
-            let ds = grp.new_dataset::<i32>().shape(vi.len()).create(name)?;
-            ds.write(&Array1::from_vec(vi))?;
+            // int32 0/1/2 (FALSE/TRUE/NA); the name goes in the `logicals` attr.
+            write_i32(
+                grp,
+                name,
+                v.iter()
+                    .enumerate()
+                    .map(|(i, &b)| if na(i) { 2 } else { b as i32 })
+                    .collect(),
+            )?;
         }
-        ColumnData::String(v) => {
-            seurat_write_strings(grp, name, v)?;
-        }
+        // ponytail: a missing string is written as "" (SeuratDisk has no NA for
+        // plain character columns); write it as a factor if NA must survive.
+        ColumnData::String(v) => seurat_write_strings(grp, name, v)?,
         ColumnData::Categorical { codes, levels } => {
             let col_grp = grp.create_group(name)?;
-            // 0-indexed codes → 1-indexed values (R dgCMatrix convention)
-            let values: Vec<i32> = codes.iter().map(|&c| c as i32 + 1).collect();
-            let ds = col_grp
-                .new_dataset::<i32>()
-                .shape(values.len())
-                .create("values")?;
-            ds.write(&Array1::from_vec(values))?;
+            // 1-based codes, NA_integer_ for missing.
+            let values = codes
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| if na(i) { NA_INTEGER } else { c as i32 + 1 })
+                .collect();
+            write_i32(&col_grp, "values", values)?;
             seurat_write_strings(&col_grp, "levels", levels)?;
         }
     }

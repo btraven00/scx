@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::{error::Result, ir::ColumnData};
+use crate::{
+    error::Result,
+    ir::{Column, ColumnData},
+};
 
 /// Build a row-reindex map from a patch index into a base index.
 ///
@@ -33,17 +36,11 @@ pub fn build_var_reindex(
     build_obs_reindex(base_index, patch_index)
 }
 
-/// Reindex a `ColumnData` according to a row-reindex map.
-///
-/// NA-fill values per variant:
-/// - Float   → `f64::NAN`
-/// - Int     → `0`
-/// - Bool    → `false`
-/// - String  → `""`
-/// - Categorical → code `0` (first level; caller should ensure level 0 is a
-///   sentinel like `"NA"` when this matters)
-pub fn reindex_column(col: &ColumnData, reindex: &[Option<usize>]) -> ColumnData {
-    match col {
+/// Reindex a column according to a row-reindex map. Rows with no source
+/// (`None`) and rows that were already NA come out masked as missing; their
+/// placeholder value is the variant's usual fill (NaN, 0, false, "", code 0).
+pub fn reindex_column(col: &Column, reindex: &[Option<usize>]) -> Column {
+    let data = match &col.data {
         ColumnData::Float(v) => ColumnData::Float(
             reindex
                 .iter()
@@ -78,7 +75,9 @@ pub fn reindex_column(col: &ColumnData, reindex: &[Option<usize>]) -> ColumnData
                 levels: levels.clone(),
             }
         }
-    }
+    };
+    let missing = reindex.iter().map(|r| r.is_none_or(|i| col.is_na(i)));
+    Column::with_missing(col.name.clone(), data, missing)
 }
 
 /// Merge two categorical level lists into a single unified list.
@@ -136,9 +135,11 @@ mod tests {
 
     #[test]
     fn reindex_column_float_na_fill() {
-        let col = ColumnData::Float(vec![1.0, 2.0]);
+        let col = Column::new("x", ColumnData::Float(vec![1.0, 2.0]));
         let ri = vec![Some(0), None, Some(1)];
-        match reindex_column(&col, &ri) {
+        let out = reindex_column(&col, &ri);
+        assert_eq!(out.mask, Some(vec![true, false, true]));
+        match out.data {
             ColumnData::Float(v) => {
                 assert_eq!(v[0], 1.0);
                 assert!(v[1].is_nan());
@@ -150,12 +151,17 @@ mod tests {
 
     #[test]
     fn reindex_column_categorical() {
-        let col = ColumnData::Categorical {
-            codes: vec![0, 1, 0],
-            levels: vec!["A".to_string(), "B".to_string()],
-        };
+        let col = Column::new(
+            "x",
+            ColumnData::Categorical {
+                codes: vec![0, 1, 0],
+                levels: vec!["A".to_string(), "B".to_string()],
+            },
+        );
         let ri = vec![Some(2), None, Some(0)];
-        match reindex_column(&col, &ri) {
+        let out = reindex_column(&col, &ri);
+        assert!(out.is_na(1));
+        match out.data {
             ColumnData::Categorical { codes, levels } => {
                 assert_eq!(codes, vec![0, 0, 0]); // patch[2]=0, NA→0, patch[0]=0
                 assert_eq!(levels, vec!["A", "B"]);

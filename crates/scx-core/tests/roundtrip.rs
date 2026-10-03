@@ -243,13 +243,9 @@ cases! {
     mtx_to_bpcells_dir: "tiny_mtx", "counts", BpcellsDir;
     mtx_to_npy: "tiny_mtx", "counts", Npy;
 
-    #[ignore = "bug: H5Seurat NA factor code overflows `(v - 1).max(0)` when reading obs"]
     h5seurat_to_h5ad: "tiny_v4.h5seurat", "counts", H5ad;
-    #[ignore = "bug: H5Seurat NA factor code overflows `(v - 1).max(0)` when reading obs"]
     h5seurat_to_h5seurat_dgc: "tiny_v4.h5seurat", "counts", H5SeuratDgc;
-    #[ignore = "bug: H5Seurat NA factor code overflows `(v - 1).max(0)` when reading obs"]
     h5seurat_to_h5seurat_bpcells: "tiny_v4.h5seurat", "counts", H5SeuratBpcells;
-    #[ignore = "bug: H5Seurat NA factor code overflows `(v - 1).max(0)` when reading obs"]
     h5seurat_to_bpcells_dir: "tiny_v4.h5seurat", "counts", BpcellsDir;
     #[ignore = "bug: H5Seurat NA factor code overflows `(v - 1).max(0)` when reading obs"]
     h5seurat_to_npy: "tiny_v4.h5seurat", "counts", Npy;
@@ -290,10 +286,8 @@ async fn check_cell_type(back: &mut (dyn DatasetReader + Send)) {
     let scx_core::ir::ColumnData::Categorical { codes, levels } = &col.data else {
         panic!("cell_type is {}", col.data.dtype_str());
     };
-    // A code past the end of `levels` stands for NA (the IR has no NA yet).
-    let got: Vec<Option<&str>> = codes
-        .iter()
-        .map(|&c| levels.get(c as usize).map(String::as_str))
+    let got: Vec<Option<&str>> = (0..codes.len())
+        .map(|i| (!col.is_na(i)).then(|| levels[codes[i] as usize].as_str()))
         .collect();
     assert_eq!(
         got,
@@ -356,7 +350,6 @@ async fn h5ad_to_h5seurat_keeps_counts_and_obsm() {
 }
 
 #[tokio::test]
-#[ignore = "bug: through H5Seurat a categorical NA silently becomes the first level"]
 async fn h5ad_to_h5seurat_keeps_categorical_na() {
     let (_dir, mut back) = convert("tiny.h5ad", Out::H5SeuratDgc).await;
     check_cell_type(&mut *back).await;
