@@ -732,12 +732,12 @@ impl DatasetWriter for H5AdWriter {
             data_ds.resize(new_len)?;
 
             match (&csr.data, self.dtype) {
-                // Same-type: clone is a memcpy, already optimal.
+                // Same-type: write straight from the chunk, no copy.
                 (TypedVec::F32(v), DataType::F32) => {
-                    data_ds.write_slice(&Array1::from_vec(v.clone()), s![old_len..new_len])?;
+                    data_ds.write_slice(v.as_slice(), s![old_len..new_len])?;
                 }
                 (TypedVec::F64(v), DataType::F64) => {
-                    data_ds.write_slice(&Array1::from_vec(v.clone()), s![old_len..new_len])?;
+                    data_ds.write_slice(v.as_slice(), s![old_len..new_len])?;
                 }
                 // Cross-type direct paths — parallelize when large.
                 (TypedVec::F64(v), DataType::F32) => {
