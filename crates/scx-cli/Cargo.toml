@@ -2,6 +2,8 @@
 name = "scx-cli"
 version = "0.3.0"
 edition = "2021"
+# zarrs needs 1.91; checked by the msrv job in ci.yml.
+rust-version = "1.91"
 description = "Swiss-army knife for single-cell data formats"
 authors = ["btraven <ben.uzh@pm.me>"]
 license = "MIT"

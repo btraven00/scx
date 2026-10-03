@@ -2,6 +2,8 @@
 name = "picklerick-py-native"
 version = "0.1.0-alpha.1"
 edition = "2021"
+# zarrs needs 1.91; checked by the msrv job in ci.yml.
+rust-version = "1.91"
 description = "PyO3 bindings behind the scx-picklerick Python package"
 publish = false
 
