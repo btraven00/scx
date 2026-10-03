@@ -47,7 +47,9 @@ enum XBackend {
 pub struct H5SeuratReader {
     path: PathBuf,
     assay: String,
-    layer: String,
+    /// The X matrix group: `assays/{assay}/{layer}` (v3/v4) or
+    /// `assays/{assay}/layers/{layer}` (v5), see `candidate_group_paths`.
+    x_path: String,
     n_obs: usize,
     n_vars: usize,
     chunk_size: usize,
@@ -72,10 +74,11 @@ impl H5SeuratReader {
         // The requested assay may not exist (e.g. multimodal references default
         // to "SCT", not "RNA"); fall back to the file's active/first assay.
         let assay = resolve_assay(&file, &assay)?;
-        let dims_path = format!("assays/{assay}/{layer}");
-        let dims_grp = file
-            .group(&dims_path)
-            .map_err(|_| missing_layer_err(&file, &assay, &layer))?;
+        let dims_path = candidate_group_paths(&assay, &layer)
+            .into_iter()
+            .find(|p| file.group(p).is_ok())
+            .ok_or_else(|| missing_layer_err(&file, &assay, &layer))?;
+        let dims_grp = file.group(&dims_path)?;
 
         // Standard dgCMatrix groups carry a `dims` attribute [ngenes, ncells].
         // BPCells-backed groups instead store a `shape` dataset [nrow, ncol],
@@ -124,7 +127,7 @@ impl H5SeuratReader {
         Ok(Self {
             path,
             assay,
-            layer,
+            x_path: dims_path,
             n_obs,
             n_vars,
             chunk_size,
@@ -197,14 +200,31 @@ fn resolve_assay(file: &File, requested: &str) -> Result<String> {
 
 /// A helpful error for a missing layer: name the assay and list what's there.
 fn missing_layer_err(file: &File, assay: &str, layer: &str) -> ScxError {
-    let layers = file
-        .group(&format!("assays/{assay}"))
-        .and_then(|g| g.member_names())
-        .unwrap_or_default();
+    let layers = list_layer_groups(file, assay)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
     ScxError::InvalidFormat(format!(
-        "layer '{layer}' not found in assay '{assay}' (looked for assays/{assay}/{layer}); \
-         available layers: {layers:?} — pass --layer to choose one"
+        "layer '{layer}' not found in assay '{assay}' (looked for {}); \
+         available layers: {layers:?} — pass --layer to choose one",
+        candidate_group_paths(assay, layer).join(" and ")
     ))
+}
+
+/// Sparse matrix groups of an assay, as (name, path), from both the v3/v4
+/// (`assays/{assay}/{name}`) and v5 (`assays/{assay}/layers/{name}`) layouts.
+fn list_layer_groups(file: &File, assay: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for base in [format!("assays/{assay}"), format!("assays/{assay}/layers")] {
+        let Ok(grp) = file.group(&base) else { continue };
+        for name in grp.member_names().unwrap_or_default() {
+            let path = format!("{base}/{name}");
+            if detect_sparse_group_kind(file, &path).is_some() {
+                out.push((name, path));
+            }
+        }
+    }
+    out
 }
 
 fn read_indptr_from(file: &File, path: &str) -> Result<Vec<u64>> {
@@ -261,11 +281,9 @@ fn read_strings(file: &File, path: &str) -> Result<Vec<String>> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_chunk_sync(
     path: &Path,
-    assay: &str,
-    layer: &str,
+    base: &str,
     indptr: &[u64],
     cell_start: usize,
     cell_end: usize,
@@ -277,8 +295,6 @@ fn read_chunk_sync(
     let nnz_start = indptr[cell_start] as usize;
     let nnz_end = indptr[cell_end] as usize;
     let nnz = nnz_end - nnz_start;
-
-    let base = format!("assays/{assay}/{layer}");
 
     let gene_indices: Vec<u32> = if nnz > 0 {
         read_indices_at(&file, &format!("{base}/indices"), nnz_start, nnz_end)?
@@ -728,27 +744,13 @@ fn seurat_read_sparse_chunk(
     })
 }
 
-fn read_layer_metas_sync(
-    path: &Path,
-    assay: &str,
-    primary_layer: &str,
-) -> Result<Vec<SparseMatrixMeta>> {
+fn read_layer_metas_sync(path: &Path, assay: &str, x_path: &str) -> Result<Vec<SparseMatrixMeta>> {
     let file = File::open(path)?;
-    let assay_grp = match file.group(&format!("assays/{assay}")) {
-        Err(_) => return Ok(Vec::new()),
-        Ok(g) => g,
-    };
     let mut metas = Vec::new();
-    for name in assay_grp.member_names().unwrap_or_default() {
-        if name == primary_layer {
+    for (name, grp_path) in list_layer_groups(&file, assay) {
+        if grp_path == x_path {
             continue;
         }
-        let grp_path = format!("assays/{assay}/{name}");
-
-        if detect_sparse_group_kind(&file, &grp_path).is_none() {
-            continue;
-        }
-
         match seurat_read_sparse_meta(&file, &name, &grp_path) {
             Ok(m) => metas.push(m),
             Err(e) => tracing::warn!("skipping assay layer '{name}': {e}"),
@@ -897,7 +899,7 @@ impl DatasetReader for H5SeuratReader {
     }
 
     async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        read_layer_metas_sync(&self.path, &self.assay, &self.layer)
+        read_layer_metas_sync(&self.path, &self.assay, &self.x_path)
     }
 
     async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
@@ -910,8 +912,14 @@ impl DatasetReader for H5SeuratReader {
         chunk_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
         let path = self.path.clone();
-        let assay = self.assay.clone();
-        let grp_path = format!("assays/{}/{}", assay, meta.name);
+        let grp_path = File::open(&path)
+            .ok()
+            .and_then(|file| {
+                candidate_group_paths(&self.assay, &meta.name)
+                    .into_iter()
+                    .find(|p| file.group(p).is_ok())
+            })
+            .unwrap_or_else(|| format!("assays/{}/{}", self.assay, meta.name));
         let n_rows = meta.shape.0;
 
         let is_bpcells = {
@@ -1033,8 +1041,7 @@ impl DatasetReader for H5SeuratReader {
         match &self.x_backend {
             XBackend::DgCMatrix { indptr, dtype } => {
                 let path = self.path.clone();
-                let assay = self.assay.clone();
-                let layer = self.layer.clone();
+                let x_path = self.x_path.clone();
                 let n_obs = self.n_obs;
                 let n_vars = self.n_vars;
                 let chunk_size = self.chunk_size;
@@ -1043,8 +1050,7 @@ impl DatasetReader for H5SeuratReader {
 
                 Box::pin(stream::unfold(0usize, move |cell_start| {
                     let path = path.clone();
-                    let assay = assay.clone();
-                    let layer = layer.clone();
+                    let x_path = x_path.clone();
                     let indptr = indptr.clone();
                     async move {
                         if cell_start >= n_obs {
@@ -1052,7 +1058,7 @@ impl DatasetReader for H5SeuratReader {
                         }
                         let cell_end = (cell_start + chunk_size).min(n_obs);
                         let chunk = read_chunk_sync(
-                            &path, &assay, &layer, &indptr, cell_start, cell_end, n_vars, dtype,
+                            &path, &x_path, &indptr, cell_start, cell_end, n_vars, dtype,
                         );
                         Some((chunk, cell_end))
                     }
@@ -1060,8 +1066,6 @@ impl DatasetReader for H5SeuratReader {
             }
             XBackend::BpCells => {
                 let path = self.path.clone();
-                let assay = self.assay.clone();
-                let layer = self.layer.clone();
                 let n_obs = self.n_obs;
                 let chunk_size = self.chunk_size;
 
@@ -1072,20 +1076,7 @@ impl DatasetReader for H5SeuratReader {
                             return Box::pin(stream::once(async move { Err(ScxError::from(e)) }));
                         }
                     };
-                    let grp_path = match candidate_group_paths(&assay, &layer)
-                        .into_iter()
-                        .find(|p| file.group(p).is_ok())
-                    {
-                        Some(p) => p,
-                        None => {
-                            return Box::pin(stream::once(async move {
-                                Err(ScxError::InvalidFormat(
-                                    "missing assay/layer group for BPCells backend".into(),
-                                ))
-                            }));
-                        }
-                    };
-                    match crate::h5bpcells::open_bpcells_h5(&file, &grp_path, chunk_size) {
+                    match crate::h5bpcells::open_bpcells_h5(&file, &self.x_path, chunk_size) {
                         Ok(reader) => reader,
                         Err(e) => return Box::pin(stream::once(async move { Err(e) })),
                     }

@@ -134,7 +134,6 @@ async fn h5seurat_v4_matrix() {
 }
 
 #[tokio::test]
-#[ignore = "bug: H5SeuratReader::open only probes assays/RNA/counts, not the v5 assays/RNA/layers/counts"]
 async fn h5seurat_v5_bpcells_matrix() {
     check_matrix("tiny_v5_bpcells.h5seurat", "counts").await;
 }
