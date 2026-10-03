@@ -398,27 +398,8 @@ mod tests {
 
     const GOLDEN: &str = "../../tests/golden/pbmc3k.h5";
 
-    fn golden_exists() -> bool {
-        std::path::Path::new(GOLDEN).exists()
-    }
-
-    #[test]
-    fn test_string_type_descriptor() {
-        if !golden_exists() {
-            return;
-        }
-        let file = File::open(GOLDEN).unwrap();
-        let ds = file.dataset("obs/index").unwrap();
-        let td = ds.dtype().unwrap().to_descriptor().unwrap();
-        println!("obs/index dtype: {:?}", td);
-        // Helps diagnose charset mismatch between rhdf5 and hdf5 Rust crate.
-    }
-
     #[tokio::test]
     async fn test_open_shape() {
-        if !golden_exists() {
-            return;
-        }
         let reader = ScxH5Reader::open(GOLDEN, 1000).unwrap();
         let (n_obs, n_vars) = reader.shape();
         assert_eq!(n_obs, 2700, "expected 2700 cells");
@@ -427,9 +408,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_obs() {
-        if !golden_exists() {
-            return;
-        }
         let mut reader = ScxH5Reader::open(GOLDEN, 1000).unwrap();
         let obs = reader.obs().await.unwrap();
         assert_eq!(obs.index.len(), 2700);
@@ -439,9 +417,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_var() {
-        if !golden_exists() {
-            return;
-        }
         let mut reader = ScxH5Reader::open(GOLDEN, 1000).unwrap();
         let var = reader.var().await.unwrap();
         assert_eq!(var.index.len(), 13714);
@@ -449,9 +424,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_obsm() {
-        if !golden_exists() {
-            return;
-        }
         let mut reader = ScxH5Reader::open(GOLDEN, 1000).unwrap();
         let obsm = reader.obsm().await.unwrap();
         assert!(obsm.map.contains_key("X_pca"));
@@ -464,9 +436,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_chunks_cover_all_cells() {
-        if !golden_exists() {
-            return;
-        }
         let mut reader = ScxH5Reader::open(GOLDEN, 1000).unwrap();
         let mut total_cells = 0usize;
         let mut total_nnz = 0usize;
@@ -487,9 +456,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_bounded_streaming() {
-        if !golden_exists() {
-            return;
-        }
         // Stream chunk-by-chunk and assert no single chunk exceeds 2× chunk budget.
         // (n_cells_per_chunk * avg_nnz_per_cell * bytes_per_f32 * 2)
         let chunk_size = 500usize;

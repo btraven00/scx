@@ -5,28 +5,22 @@ fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_scx"))
 }
 
-fn golden_path(filename: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/golden")
-        .join(filename)
-}
-
-fn fixture_exists(filename: &str) -> bool {
-    golden_path(filename).exists()
-}
+#[path = "../../scx-core/tests/common/golden.rs"]
+mod golden;
+use golden::golden;
 
 #[test]
 fn test_convert_h5ad_to_h5seurat_bpcells_default() {
-    if !fixture_exists("pbmc3k_reference.h5ad") {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
+    };
 
     let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
     let out = tmp.path().to_path_buf();
 
     let output = Command::new(binary_path())
         .arg("convert")
-        .arg(golden_path("pbmc3k_reference.h5ad"))
+        .arg(&golden_file)
         .arg(&out)
         .output()
         .expect("failed to run scx convert --bpcells");
@@ -86,16 +80,16 @@ fn test_convert_h5ad_to_h5seurat_bpcells_default() {
 
 #[test]
 fn test_convert_h5seurat_to_h5seurat_bpcells_default() {
-    if !fixture_exists("pbmc3k.h5seurat") {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
+    };
 
     let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
     let out = tmp.path().to_path_buf();
 
     let output = Command::new(binary_path())
         .arg("convert")
-        .arg(golden_path("pbmc3k.h5seurat"))
+        .arg(&golden_file)
         .arg(&out)
         .output()
         .expect("failed to run scx convert h5seurat -> h5seurat --bpcells");
@@ -155,16 +149,16 @@ fn test_convert_h5seurat_to_h5seurat_bpcells_default() {
 
 #[test]
 fn test_convert_h5ad_to_h5seurat_dgcmatrix_opt_out() {
-    if !fixture_exists("pbmc3k_reference.h5ad") {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
+    };
 
     let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
     let out = tmp.path().to_path_buf();
 
     let output = Command::new(binary_path())
         .arg("convert")
-        .arg(golden_path("pbmc3k_reference.h5ad"))
+        .arg(&golden_file)
         .arg(&out)
         .arg("--dgcmatrix")
         .output()

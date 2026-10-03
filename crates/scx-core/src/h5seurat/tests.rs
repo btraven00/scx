@@ -8,19 +8,11 @@ use ndarray::Array1;
 use std::str::FromStr;
 
 use crate::dtype::*;
+use crate::golden::golden;
 use crate::ir::*;
 use crate::stream::{DatasetReader, DatasetWriter};
 
-const GOLDEN: &str = "../../tests/golden/pbmc3k.h5seurat";
 const NORMAN_FIXTURE: &str = "../../tests/fixtures/norman_subset.h5ad";
-
-fn golden_exists() -> bool {
-    std::path::Path::new(GOLDEN).exists()
-}
-
-fn norman_exists() -> bool {
-    std::path::Path::new(NORMAN_FIXTURE).exists()
-}
 
 #[test]
 fn test_detect_sparse_group_kind_bpcells_layer() {
@@ -67,10 +59,10 @@ fn test_detect_sparse_group_kind_bpcells_layer() {
 
 #[tokio::test]
 async fn test_open_shape() {
-    if !golden_exists() {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
-    let reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
+    };
+    let reader = H5SeuratReader::open(&golden_file, 1000, None, None).unwrap();
     let (n_obs, n_vars) = reader.shape();
     assert_eq!(n_obs, 2700, "expected 2700 cells");
     assert_eq!(n_vars, 13714, "expected 13714 genes");
@@ -78,10 +70,10 @@ async fn test_open_shape() {
 
 #[tokio::test]
 async fn test_obs() {
-    if !golden_exists() {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
-    let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
+    };
+    let mut reader = H5SeuratReader::open(&golden_file, 1000, None, None).unwrap();
     let obs = reader.obs().await.unwrap();
     assert_eq!(obs.index.len(), 2700);
     assert!(!obs.columns.is_empty());
@@ -90,10 +82,10 @@ async fn test_obs() {
 
 #[tokio::test]
 async fn test_var() {
-    if !golden_exists() {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
-    let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
+    };
+    let mut reader = H5SeuratReader::open(&golden_file, 1000, None, None).unwrap();
     let var = reader.var().await.unwrap();
     assert_eq!(var.index.len(), 13714);
     assert!(!var.columns.is_empty(), "expected meta.features columns");
@@ -110,10 +102,10 @@ async fn test_var() {
 
 #[tokio::test]
 async fn test_obsm() {
-    if !golden_exists() {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
-    let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
+    };
+    let mut reader = H5SeuratReader::open(&golden_file, 1000, None, None).unwrap();
     let obsm = reader.obsm().await.unwrap();
     assert!(obsm.map.contains_key("X_pca"), "missing X_pca");
     assert!(obsm.map.contains_key("X_umap"), "missing X_umap");
@@ -123,10 +115,10 @@ async fn test_obsm() {
 
 #[tokio::test]
 async fn test_stream_coverage() {
-    if !golden_exists() {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
-    let mut reader = H5SeuratReader::open(GOLDEN, 1000, None, None).unwrap();
+    };
+    let mut reader = H5SeuratReader::open(&golden_file, 1000, None, None).unwrap();
     let mut total_cells = 0usize;
     let mut total_nnz = 0usize;
     let mut stream = reader.x_stream();
@@ -141,11 +133,11 @@ async fn test_stream_coverage() {
 
 #[tokio::test]
 async fn test_h5seurat_roundtrip() {
-    if !golden_exists() {
+    let Some(golden_file) = golden("pbmc3k.h5seurat") else {
         return;
-    }
+    };
 
-    let mut reader = H5SeuratReader::open(GOLDEN, 500, None, None).unwrap();
+    let mut reader = H5SeuratReader::open(&golden_file, 500, None, None).unwrap();
     let (n_obs, n_vars) = reader.shape();
 
     let obs = reader.obs().await.unwrap();
@@ -546,10 +538,6 @@ async fn test_slot_parity_roundtrip() {
 async fn test_norman_obs_roundtrip() {
     use crate::h5ad::H5AdReader;
     use tempfile::NamedTempFile;
-
-    if !norman_exists() {
-        return;
-    }
 
     // Read the Norman subset H5AD.
     let fixture = std::path::Path::new(NORMAN_FIXTURE);

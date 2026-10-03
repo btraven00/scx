@@ -9,19 +9,14 @@ use std::str::FromStr;
 use tempfile::NamedTempFile;
 
 use crate::dtype::*;
+use crate::golden::golden;
 use crate::h5::ScxH5Reader;
 use crate::ir::*;
 use crate::stream::{DatasetReader, DatasetWriter};
 
-// Golden fixture produced by zellkonverter (via scripts/prepare_h5ad_reference.R)
-const GOLDEN_REF: &str = "../../tests/golden/pbmc3k_reference.h5ad";
 const GOLDEN: &str = "../../tests/golden/pbmc3k.h5";
 // Committed subset fixture (generate with scripts/prepare_norman_subset.py)
 const NORMAN_SUBSET: &str = "../../tests/fixtures/norman_subset.h5ad";
-
-fn ref_exists() -> bool {
-    std::path::Path::new(GOLDEN_REF).exists()
-}
 
 /// Return the path to the Norman H5AD to test against.
 /// Prefers the full file via `NORMAN_H5AD` env var (dev/CI with large data),
@@ -46,10 +41,10 @@ fn norman_path() -> Option<std::path::PathBuf> {
 
 #[tokio::test]
 async fn test_reader_shape() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
-    let reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
+    };
+    let reader = H5AdReader::open(&golden_file, 500).unwrap();
     let (n_obs, n_vars) = reader.shape();
     assert_eq!(n_obs, 2700, "expected 2700 cells");
     assert_eq!(n_vars, 13714, "expected 13714 genes");
@@ -57,10 +52,10 @@ async fn test_reader_shape() {
 
 #[tokio::test]
 async fn test_reader_obs() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
-    let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
+    };
+    let mut reader = H5AdReader::open(&golden_file, 500).unwrap();
     let obs = reader.obs().await.unwrap();
     assert_eq!(obs.index.len(), 2700, "obs index length");
     assert!(!obs.columns.is_empty(), "obs should have columns");
@@ -72,10 +67,10 @@ async fn test_reader_obs() {
 
 #[tokio::test]
 async fn test_reader_obs_categorical() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
-    let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
+    };
+    let mut reader = H5AdReader::open(&golden_file, 500).unwrap();
     let obs = reader.obs().await.unwrap();
     // Seurat factor columns become categoricals in AnnData
     let cat_cols: Vec<_> = obs
@@ -91,20 +86,20 @@ async fn test_reader_obs_categorical() {
 
 #[tokio::test]
 async fn test_reader_var() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
-    let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
+    };
+    let mut reader = H5AdReader::open(&golden_file, 500).unwrap();
     let var = reader.var().await.unwrap();
     assert_eq!(var.index.len(), 13714, "var index length");
 }
 
 #[tokio::test]
 async fn test_reader_obsm() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
-    let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
+    };
+    let mut reader = H5AdReader::open(&golden_file, 500).unwrap();
     let obsm = reader.obsm().await.unwrap();
     assert!(obsm.map.contains_key("X_pca"), "missing X_pca");
     assert!(obsm.map.contains_key("X_umap"), "missing X_umap");
@@ -114,10 +109,10 @@ async fn test_reader_obsm() {
 
 #[tokio::test]
 async fn test_reader_stream_coverage() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
-    let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
+    };
+    let mut reader = H5AdReader::open(&golden_file, 500).unwrap();
     let mut total_cells = 0usize;
     let mut total_nnz = 0usize;
     let mut stream = reader.x_stream();
@@ -133,11 +128,11 @@ async fn test_reader_stream_coverage() {
 
 #[tokio::test]
 async fn test_reader_chunk_size_respected() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
+    };
     let chunk_size = 300usize;
-    let mut reader = H5AdReader::open(GOLDEN_REF, chunk_size).unwrap();
+    let mut reader = H5AdReader::open(&golden_file, chunk_size).unwrap();
     let mut stream = reader.x_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.unwrap();
@@ -149,11 +144,11 @@ async fn test_reader_chunk_size_respected() {
 
 #[tokio::test]
 async fn test_h5ad_roundtrip() {
-    if !ref_exists() {
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
         return;
-    }
+    };
 
-    let mut reader = H5AdReader::open(GOLDEN_REF, 500).unwrap();
+    let mut reader = H5AdReader::open(&golden_file, 500).unwrap();
     let (n_obs, n_vars) = reader.shape();
     let dtype = reader.dtype();
 
@@ -203,17 +198,9 @@ async fn test_h5ad_roundtrip() {
     assert_eq!(total_nnz, 2282976, "nnz changed after H5AD roundtrip");
 }
 
-fn golden_exists() -> bool {
-    std::path::Path::new(GOLDEN).exists()
-}
-
 /// Full round-trip: read PBMC 3k → write h5ad → verify structure
 #[tokio::test]
 async fn test_roundtrip_pbmc3k() {
-    if !golden_exists() {
-        return;
-    }
-
     let mut reader = ScxH5Reader::open(GOLDEN, 500).unwrap();
     let (n_obs, n_vars) = reader.shape();
 

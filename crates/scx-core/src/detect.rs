@@ -207,23 +207,20 @@ pub fn sniff(path: &Path) -> Option<Format> {
 mod tests {
     use super::*;
 
-    const H5SEURAT: &str = "../../tests/golden/pbmc3k.h5seurat";
+    use crate::golden::golden;
+
     const SCX_H5: &str = "../../tests/golden/pbmc3k.h5";
-    const H5AD_REF: &str = "../../tests/golden/pbmc3k_reference.h5ad";
 
     #[test]
     fn test_sniff_h5seurat() {
-        if !Path::new(H5SEURAT).exists() {
+        let Some(golden_file) = golden("pbmc3k.h5seurat") else {
             return;
-        }
-        assert_eq!(sniff(Path::new(H5SEURAT)), Some(Format::H5Seurat));
+        };
+        assert_eq!(sniff(&golden_file), Some(Format::H5Seurat));
     }
 
     #[test]
     fn test_sniff_scx_h5() {
-        if !Path::new(SCX_H5).exists() {
-            return;
-        }
         assert_eq!(sniff(Path::new(SCX_H5)), Some(Format::ScxH5));
     }
 
@@ -238,9 +235,9 @@ mod tests {
 
     #[test]
     fn test_sniff_h5ad() {
-        if !Path::new(H5AD_REF).exists() {
+        let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
             return;
-        }
-        assert_eq!(sniff(Path::new(H5AD_REF)), Some(Format::H5Ad));
+        };
+        assert_eq!(sniff(&golden_file), Some(Format::H5Ad));
     }
 }
