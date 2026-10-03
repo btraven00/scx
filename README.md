@@ -17,7 +17,7 @@ cargo build --release -p scx-cli
 # binary at target/release/scx
 ```
 
-Requires Rust ≥ 1.70. HDF5 is built from source and statically linked by
+Requires Rust ≥ 1.91. HDF5 is built from source and statically linked by
 default, so the resulting binary has no system `libhdf5` dependency. Cold
 builds add ~1–2 min for compiling HDF5; CMake and a C compiler must be on
 PATH.

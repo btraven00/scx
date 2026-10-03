@@ -8,21 +8,30 @@ on:
 
 jobs:
   test:
-    name: Test & Lint (${{ matrix.hdf5 }})
-    runs-on: ubuntu-latest
+    name: Test & Lint (${{ matrix.os }}, ${{ matrix.hdf5 }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # Default build path: vendored static HDF5 + zlib. No system libhdf5
           # needed. This is what cargo install / wheels / source-tree users get.
-          - hdf5: vendored
-            cargo_flags: ""
+          # Also the one job that builds and tests the `net` feature.
+          - os: ubuntu-latest
+            hdf5: vendored
+            cargo_flags: "--features scx-cli/net"
             apt_packages: ""
           # Conda + distro packager path: link the system libhdf5.
-          - hdf5: system
+          - os: ubuntu-latest
+            hdf5: system
             cargo_flags: "--no-default-features"
             apt_packages: "libhdf5-dev"
+          # The PyO3 crate needs maturin's link flags on macOS; its wheel is
+          # built and tested in python.yml instead.
+          - os: macos-14
+            hdf5: vendored
+            cargo_flags: "--workspace --exclude picklerick-py-native"
+            apt_packages: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -41,11 +50,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-${{ matrix.hdf5 }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ matrix.hdf5 }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-
 
       - name: fmt
-        if: matrix.hdf5 == 'vendored'
+        if: matrix.hdf5 == 'vendored' && runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
       - name: clippy
@@ -55,6 +64,17 @@ jobs:
         env:
           HDF5_USE_FILE_LOCKING: "FALSE"
         run: cargo test --all ${{ matrix.cargo_flags }}
+
+  # Builds on the declared rust-version (Cargo.toml), so it can't drift.
+  msrv:
+    name: MSRV (1.91)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91
+      - name: Install system HDF5
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+      - run: cargo check --workspace --all-targets --no-default-features --features scx-cli/net
 
   # Rust coverage → Codecov. Runs against system HDF5 (fast: skips the
   # from-source vendored build). Gating is done by Codecov's project/patch
@@ -75,7 +95,7 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         # Strip the pyo3 bindings crate (exercised via Python, not the Rust
         # suite) so the lcov is just crates/.
-        run: cargo llvm-cov --all --no-default-features --ignore-filename-regex 'python/' --lcov --output-path lcov.info
+        run: cargo llvm-cov --all --no-default-features --features scx-cli/net --ignore-filename-regex 'python/' --lcov --output-path lcov.info
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
