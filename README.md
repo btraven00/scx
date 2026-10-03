@@ -73,4 +73,4 @@ Each cell is a file; size = lines, color = coverage.
 
 ## License
 
-GPL-3.
+MIT. See [LICENSE](LICENSE).

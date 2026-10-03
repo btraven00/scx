@@ -8,7 +8,7 @@ Description: R bindings to the SCX streaming interop engine for single-cell
     genomics. Converts between H5Seurat, H5AD, and SCX internal formats via
     a memory-bounded streaming pipeline. Inspect file metadata without loading
     data into memory. No Python dependency.
-License: GPL-3
+License: MIT + file LICENSE
 Imports:
     methods,
     Matrix,

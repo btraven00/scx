@@ -8,13 +8,13 @@ dynamic = ["version"]
 description = "Streaming conversion between single-cell formats (H5AD, H5Seurat, BPCells, 10x, MTX, Zarr), powered by the SCX Rust engine"
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "GPL-3.0-only" }
+license = { text = "MIT" }
 authors = [{ name = "ben", email = "ben.uzh@proton.me" }]
 keywords = ["single-cell", "anndata", "seurat", "h5ad", "bpcells", "bioinformatics"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "License :: OSI Approved :: MIT License",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",

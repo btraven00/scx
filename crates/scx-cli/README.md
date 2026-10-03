@@ -19,4 +19,4 @@ scx inspect <file>             summarise slots without loading the matrix
 
 ## License
 
-GPL-3.
+MIT.

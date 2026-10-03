@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2021"
 description = "Swiss-army knife for single-cell data formats"
 authors = ["btraven <ben.uzh@pm.me>"]
-license = "GPL-3.0"
+license = "MIT"
 repository = "https://github.com/btraven00/scx"
 
 [[bin]]

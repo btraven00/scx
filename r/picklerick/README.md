@@ -75,4 +75,4 @@ See `docs/usage.md` for full details.
 
 ## License
 
-GPL-3. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
