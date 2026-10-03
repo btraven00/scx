@@ -469,7 +469,7 @@ async fn apply_obs_column_patch(
             ScxError::InvalidFormat(format!("column '{name}' not found in patch obs"))
         })?;
     let reindex = align::build_obs_reindex(&base_meta.obs_index, &patch_obs.index)?;
-    writer.add_obs_column(name, &align::reindex_column(&col.data, &reindex))?;
+    writer.add_obs_column(&align::reindex_column(col, &reindex))?;
     Ok(true)
 }
 
@@ -493,7 +493,7 @@ async fn apply_var_column_patch(
             ScxError::InvalidFormat(format!("column '{name}' not found in patch var"))
         })?;
     let reindex = align::build_var_reindex(&base_meta.var_index, &patch_var.index)?;
-    writer.add_var_column(name, &align::reindex_column(&col.data, &reindex))?;
+    writer.add_var_column(&align::reindex_column(col, &reindex))?;
     Ok(true)
 }
 

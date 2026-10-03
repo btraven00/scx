@@ -534,13 +534,13 @@ fn read_dataframe(store: &Store, path: &str) -> Result<(Vec<String>, Vec<Column>
                     )))
                 }
             }
-            Some(Node::Array(arr)) => read_column(&arr),
+            Some(Node::Array(arr)) => read_column(&arr).map(|d| (d, Vec::new())),
             None => Err(ScxError::InvalidFormat(format!(
                 "missing column '{col_path}'"
             ))),
         };
         match data {
-            Ok(data) => columns.push(Column::new(name, data)),
+            Ok((data, missing)) => columns.push(Column::with_missing(name, data, missing)),
             Err(e) => tracing::warn!("skipping column '{name}': {e}"),
         }
     }
@@ -573,11 +573,11 @@ fn read_column(arr: &ZArray) -> Result<ColumnData> {
     }
 }
 
-fn read_categorical(store: &Store, path: &str) -> Result<ColumnData> {
-    let codes = read_i64(&open_array(store, &format!("{path}/codes"))?, None)?
-        .into_iter()
-        .map(|x| x as u32)
-        .collect();
+/// Code -1 is NA: it becomes code 0 with `missing[i] == true`.
+fn read_categorical(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)> {
+    let raw = read_i64(&open_array(store, &format!("{path}/codes"))?, None)?;
+    let missing = raw.iter().map(|&c| c < 0).collect();
+    let codes = raw.iter().map(|&c| c.max(0) as u32).collect();
     let cats = open_array(store, &format!("{path}/categories"))?;
     let levels = if is_string(&cats) {
         read_strings(&cats)?
@@ -594,43 +594,31 @@ fn read_categorical(store: &Store, path: &str) -> Result<ColumnData> {
             .map(|v| v.to_string())
             .collect()
     };
-    Ok(ColumnData::Categorical { codes, levels })
+    Ok((ColumnData::Categorical { codes, levels }, missing))
 }
 
-/// values + mask (mask true = NA): strings → "", numbers → NaN, bools → false.
-fn read_nullable(store: &Store, path: &str) -> Result<ColumnData> {
+/// `values` + `mask` (mask true = NA), as for pandas' nullable dtypes.
+fn read_nullable(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)> {
     let values = open_array(store, &format!("{path}/values"))?;
-    let n = values.shape().first().copied().unwrap_or(0) as usize;
-    let mask = match open_array(store, &format!("{path}/mask")) {
+    let missing = match open_array(store, &format!("{path}/mask")) {
         Ok(m) => read_bools(&m)?,
-        Err(_) => vec![false; n],
+        Err(_) => Vec::new(),
     };
-    let na = |i: usize| mask.get(i).copied().unwrap_or(false);
-    Ok(if is_string(&values) {
-        ColumnData::String(
-            read_strings(&values)?
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| if na(i) { String::new() } else { v })
-                .collect(),
-        )
+    let data = if is_string(&values) {
+        ColumnData::String(read_strings(&values)?)
     } else if *values.data_type() == zdt::bool() {
-        ColumnData::Bool(
-            read_bools(&values)?
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| !na(i) && v)
-                .collect(),
-        )
+        ColumnData::Bool(read_bools(&values)?)
+    } else if is_float(&values) {
+        ColumnData::Float(read_f64(&values, None)?)
     } else {
-        ColumnData::Float(
-            read_f64(&values, None)?
+        ColumnData::Int(
+            read_i64(&values, None)?
                 .into_iter()
-                .enumerate()
-                .map(|(i, v)| if na(i) { f64::NAN } else { v })
+                .map(|v| v as i32)
                 .collect(),
         )
-    })
+    };
+    Ok((data, missing))
 }
 
 // ---------------------------------------------------------------------------

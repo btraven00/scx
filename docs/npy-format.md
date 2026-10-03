@@ -91,6 +91,7 @@ ir_snapshot/                       ← any directory name; conventionally *.scxd
     {col}_strings.txt               # string obs column, one value per line
     {col}_codes.npy                 # categorical obs column: codes (u32, <u4)
     {col}_levels.txt                # categorical obs column: levels, one per line
+    {col}_mask.npy                  # optional, any column kind: bool, true = value present (absent = no NAs)
 
   var/
     {col}.npy / {col}_strings.txt / {col}_codes.npy / {col}_levels.txt

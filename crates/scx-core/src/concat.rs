@@ -491,11 +491,12 @@ fn build_obs(
             .collect::<Vec<_>>(),
         opts.join,
     ) {
-        let cols: Vec<Option<&ColumnData>> = tables
+        let cols: Vec<Option<&Column>> = tables
             .iter()
-            .map(|t| t.columns.iter().find(|c| c.name == name).map(|c| &c.data))
+            .map(|t| t.columns.iter().find(|c| c.name == name))
             .collect();
-        columns.push(Column::new(name, concat_column(&cols, lens)));
+        let (data, missing) = concat_column(&cols, lens);
+        columns.push(Column::with_missing(name, data, missing));
     }
 
     if let Some(label) = &opts.label {
@@ -540,12 +541,23 @@ fn kind_of(c: &ColumnData) -> Kind {
     }
 }
 
-/// Stack one obs column across all inputs. Inputs missing the column are
-/// NA-filled (Float→NaN, Int→0, Bool→false, String→"", Categorical→"NA" level),
-/// matching the merge path's fill policy. Mixed dtypes promote:
+/// Stack one obs column across all inputs; returns the data and the
+/// per-value missing flags. Values from an input without the column are
+/// missing, as are values already NA in their input. Mixed dtypes promote:
 /// int+float→float, string+categorical→categorical, anything else→string
 /// (pandas' object fallback).
-fn concat_column(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
+fn concat_column(cols: &[Option<&Column>], lens: &[usize]) -> (ColumnData, Vec<bool>) {
+    let missing: Vec<bool> = cols
+        .iter()
+        .zip(lens)
+        .flat_map(|(c, &n)| (0..n).map(move |i| c.is_none_or(|c| c.is_na(i))))
+        .collect();
+    let data: Vec<Option<&ColumnData>> = cols.iter().map(|c| c.map(|c| &c.data)).collect();
+    (concat_data(&data, lens), missing)
+}
+
+/// The data half of `concat_column`; missing values get placeholders.
+fn concat_data(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
     let kinds: Vec<Kind> = cols.iter().flatten().map(|c| kind_of(c)).collect();
     if kinds.is_empty() {
         return ColumnData::String(vec![String::new(); lens.iter().sum()]);
@@ -607,16 +619,12 @@ fn concat_column(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
                 match c {
                     Some(ColumnData::Categorical { codes, levels }) => {
                         let remap: Vec<u32> = levels.iter().map(|l| b.level(l)).collect();
-                        for &code in codes {
-                            // Out-of-range codes only appear in malformed input;
-                            // "NA" is created lazily so a clean concat has no
-                            // spurious level.
-                            let mapped = match remap.get(code as usize) {
-                                Some(&m) => m,
-                                None => b.level("NA"),
-                            };
-                            b.codes.push(mapped);
-                        }
+                        // A masked code is a placeholder; any in-range value will do.
+                        b.codes.extend(
+                            codes
+                                .iter()
+                                .map(|&c| remap.get(c as usize).copied().unwrap_or(0)),
+                        );
                     }
                     Some(other) => {
                         for s in col_str(other) {
@@ -624,10 +632,7 @@ fn concat_column(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
                             b.codes.push(code);
                         }
                     }
-                    None => {
-                        let na = b.level("NA");
-                        b.codes.extend(std::iter::repeat_n(na, n));
-                    }
+                    None => b.codes.extend(std::iter::repeat_n(0, n)),
                 }
             }
             ColumnData::Categorical {
@@ -722,14 +727,14 @@ fn merge_var_columns(
 
     let mut out = Vec::new();
     for name in names {
-        let aligned: Vec<Option<ColumnData>> = vars
+        let aligned: Vec<Option<Column>> = vars
             .iter()
             .zip(&inverses)
             .map(|(v, inv)| {
                 v.columns
                     .iter()
                     .find(|c| c.name == name)
-                    .map(|c| reindex_column(&c.data, inv))
+                    .map(|c| reindex_column(c, inv))
             })
             .collect();
         let present: Vec<usize> = aligned
@@ -741,8 +746,8 @@ fn merge_var_columns(
 
         let agree = |a: usize, b: usize| {
             let (x, y) = (
-                col_str(aligned[a].as_ref().unwrap()),
-                col_str(aligned[b].as_ref().unwrap()),
+                col_str(&aligned[a].as_ref().unwrap().data),
+                col_str(&aligned[b].as_ref().unwrap().data),
             );
             (0..n_out_vars)
                 .all(|i| inverses[a][i].is_none() || inverses[b][i].is_none() || x[i] == y[i])
@@ -758,7 +763,7 @@ fn merge_var_columns(
         };
         if keep {
             let first = present[0];
-            out.push(Column::new(name, aligned[first].clone().unwrap()));
+            out.push(aligned[first].clone().unwrap());
         }
     }
     out
@@ -903,27 +908,32 @@ mod tests {
 
     #[test]
     fn concat_column_promotes_and_na_fills() {
-        // int + float -> float, missing -> NaN
-        let a = ColumnData::Int(vec![1, 2]);
-        let b = ColumnData::Float(vec![3.5]);
-        match concat_column(&[Some(&a), Some(&b), None], &[2, 1, 2]) {
-            ColumnData::Float(v) => {
-                assert_eq!(v[..3], [1.0, 2.0, 3.5]);
-                assert!(v[3].is_nan() && v[4].is_nan());
-            }
+        // int + float -> float; the input without the column is missing
+        let a = Column::new("c", ColumnData::Int(vec![1, 2]));
+        let b = Column::new("c", ColumnData::Float(vec![3.5]));
+        let (data, missing) = concat_column(&[Some(&a), Some(&b), None], &[2, 1, 2]);
+        assert_eq!(missing, [false, false, false, true, true]);
+        match data {
+            ColumnData::Float(v) => assert_eq!(v[..3], [1.0, 2.0, 3.5]),
             _ => panic!("expected float"),
         }
 
-        // categorical + string -> categorical with unified levels
-        let a = ColumnData::Categorical {
-            codes: vec![0, 1],
-            levels: sv(&["x", "y"]),
-        };
-        let b = ColumnData::String(sv(&["y", "z"]));
-        match concat_column(&[Some(&a), Some(&b), None], &[2, 2, 1]) {
+        // categorical (with an NA) + string -> categorical with unified levels
+        let a = Column::with_missing(
+            "c",
+            ColumnData::Categorical {
+                codes: vec![0, 1],
+                levels: sv(&["x", "y"]),
+            },
+            [false, true],
+        );
+        let b = Column::new("c", ColumnData::String(sv(&["y", "z"])));
+        let (data, missing) = concat_column(&[Some(&a), Some(&b), None], &[2, 2, 1]);
+        assert_eq!(missing, [false, true, false, false, true]);
+        match data {
             ColumnData::Categorical { codes, levels } => {
-                assert_eq!(levels, sv(&["x", "y", "z", "NA"]));
-                assert_eq!(codes, vec![0, 1, 1, 2, 3]);
+                assert_eq!(levels, sv(&["x", "y", "z"]), "no spurious \"NA\" level");
+                assert_eq!([codes[0], codes[2], codes[3]], [0, 1, 2]);
             }
             _ => panic!("expected categorical"),
         }

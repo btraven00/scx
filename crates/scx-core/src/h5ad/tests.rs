@@ -783,7 +783,7 @@ fn test_categorical_int64_levels() {
     let tmp = NamedTempFile::with_suffix(".h5").unwrap();
     // codes index into integer levels [10, 20, 30].
     let file = write_cat_group::<i64>(tmp.path(), &[0, 2, 1, 0], &[10, 20, 30]);
-    match ad_read_categorical(&file, "col").unwrap() {
+    match ad_read_categorical(&file, "col").unwrap().0 {
         ColumnData::Categorical { codes, levels } => {
             assert_eq!(levels, vec!["10", "20", "30"]);
             assert_eq!(codes, vec![0, 2, 1, 0]);
@@ -796,7 +796,7 @@ fn test_categorical_int64_levels() {
 fn test_categorical_uint32_levels() {
     let tmp = NamedTempFile::with_suffix(".h5").unwrap();
     let file = write_cat_group::<u32>(tmp.path(), &[1, 0], &[100u32, 200u32]);
-    match ad_read_categorical(&file, "col").unwrap() {
+    match ad_read_categorical(&file, "col").unwrap().0 {
         ColumnData::Categorical { codes, levels } => {
             assert_eq!(levels, vec!["100", "200"]);
             assert_eq!(codes, vec![1, 0]);
@@ -818,7 +818,7 @@ fn test_categorical_string_levels_unchanged() {
         .write(&Array1::from_vec(vec![0i8, 1, 0]))
         .unwrap();
     write_vlen_str_dataset(&grp, "categories", &["a".into(), "b".into()]).unwrap();
-    match ad_read_categorical(&file, "col").unwrap() {
+    match ad_read_categorical(&file, "col").unwrap().0 {
         ColumnData::Categorical { codes, levels } => {
             assert_eq!(levels, vec!["a", "b"]);
             assert_eq!(codes, vec![0, 1, 0]);
@@ -1391,12 +1391,10 @@ async fn test_reads_anndata_013_nullable_string_index_and_column() {
         .find(|c| c.name == "batch")
         .expect("nullable string column must be read, not skipped");
     match &batch.data {
-        ColumnData::String(v) => {
-            // Masked entries become "", the fill a missing string gets elsewhere.
-            assert_eq!(v, &vec!["s1".to_string(), String::new()]);
-        }
+        ColumnData::String(v) => assert_eq!(v[0], "s1"),
         other => panic!("expected String column, got {other:?}"),
     }
+    assert!(!batch.is_na(0) && batch.is_na(1), "the masked entry is NA");
 }
 
 /// Regression: boolean obs/var columns must be written as the HDF5 enum

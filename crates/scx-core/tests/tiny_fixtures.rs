@@ -103,7 +103,6 @@ async fn obs_names() {
 }
 
 #[tokio::test]
-#[ignore = "bug: NA factor code (NA_integer_) overflows `(v - 1).max(0)` in the H5Seurat reader"]
 async fn h5seurat_v4_obs_names() {
     check_obs_names("tiny_v4.h5seurat").await;
 }
@@ -162,15 +161,13 @@ async fn h5ad_counts_layer() {
     assert_eq!(dense, matrix(&e["counts"]));
 }
 
-/// Categorical values with NA as `None`; a code past the end of `levels` is
-/// read as NA until the IR gets an explicit missing-value representation.
+/// Categorical values with NA as `None`.
 fn categorical_values(col: &Column) -> Vec<Option<String>> {
     let ColumnData::Categorical { codes, levels } = &col.data else {
         panic!("{} is {}, not categorical", col.name, col.data.dtype_str());
     };
-    codes
-        .iter()
-        .map(|&c| levels.get(c as usize).cloned())
+    (0..codes.len())
+        .map(|i| (!col.is_na(i)).then(|| levels[codes[i] as usize].clone()))
         .collect()
 }
 
@@ -203,22 +200,25 @@ async fn h5ad_categorical_with_na() {
 }
 
 #[tokio::test]
-#[ignore = "bug: NA factor code (NA_integer_) overflows `(v - 1).max(0)` in the H5Seurat reader"]
 async fn h5seurat_v4_categorical_with_na() {
     check_cell_type("tiny_v4.h5seurat").await;
 }
 
 #[tokio::test]
-#[ignore = "bug: nullable bool NA is read as false (the IR has no missing values)"]
-async fn h5ad_nullable_bool_keeps_na() {
+async fn h5ad_nullable_bool_and_int_keep_na() {
+    let e = expected();
     let obs = open("tiny.h5ad").await.obs().await.unwrap();
-    let col = obs.columns.iter().find(|c| c.name == "flag").expect("flag");
-    // [true, NA, false, true, NA, false]: whatever the representation, the
-    // two NAs must stay distinguishable from false.
-    let ColumnData::Bool(v) = &col.data else {
-        return; // a representation that can hold NA passes
-    };
-    assert_ne!(v[1], v[2], "NA collapsed into false");
+    for name in ["flag", "batch"] {
+        let col = obs.columns.iter().find(|c| c.name == name).expect(name);
+        let na: Vec<bool> = (0..6).map(|i| col.is_na(i)).collect();
+        let want: Vec<bool> = e["obs"][name]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::is_null)
+            .collect();
+        assert_eq!(na, want, "{name}");
+    }
 }
 
 #[tokio::test]
