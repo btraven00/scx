@@ -247,7 +247,6 @@ cases! {
     h5seurat_to_h5seurat_dgc: "tiny_v4.h5seurat", "counts", H5SeuratDgc;
     h5seurat_to_h5seurat_bpcells: "tiny_v4.h5seurat", "counts", H5SeuratBpcells;
     h5seurat_to_bpcells_dir: "tiny_v4.h5seurat", "counts", BpcellsDir;
-    #[ignore = "bug: H5Seurat NA factor code overflows `(v - 1).max(0)` when reading obs"]
     h5seurat_to_npy: "tiny_v4.h5seurat", "counts", Npy;
 }
 
