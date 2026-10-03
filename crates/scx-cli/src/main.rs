@@ -575,9 +575,23 @@ async fn run() -> anyhow::Result<()> {
             let mut reader = scx_core::open(&input, &opts)
                 .await
                 .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
-            let (n_obs, n_vars) = convert_with_reader(
+            // Convert into a sibling path and rename on success, so a failed
+            // run leaves nothing behind and doesn't clobber an existing output.
+            // The name keeps the extension, which picks the writer.
+            if output_path.is_dir() {
+                anyhow::bail!("output '{output}' already exists");
+            }
+            let partial = output_path.with_file_name(format!(
+                ".partial-{}",
+                output_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default()
+            ));
+            remove_path(&partial)?; // left over from a killed run
+            let converted = convert_with_reader(
                 &mut *reader,
-                output_path,
+                &partial,
                 out_dtype,
                 &assay,
                 &layer,
@@ -592,7 +606,17 @@ async fn run() -> anyhow::Result<()> {
                 compress,
                 &filter,
             )
-            .await?;
+            .await;
+            let (n_obs, n_vars) = match converted {
+                Ok(dims) => {
+                    std::fs::rename(&partial, output_path)?;
+                    dims
+                }
+                Err(e) => {
+                    remove_path(&partial)?;
+                    return Err(e);
+                }
+            };
 
             let output_sha256 = if output_path.is_file() {
                 Some(
@@ -748,6 +772,16 @@ fn parse_dtype(s: &str) -> anyhow::Result<DataType> {
         "i32" => Ok(DataType::I32),
         "u32" => Ok(DataType::U32),
         other => anyhow::bail!("unknown dtype '{other}': use f32, f64, i32, u32"),
+    }
+}
+
+/// Remove a file or directory if it exists.
+fn remove_path(p: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(p),
+        Ok(_) => std::fs::remove_file(p),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
