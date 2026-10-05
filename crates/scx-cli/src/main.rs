@@ -11,6 +11,7 @@ use scx_core::{
     detect,
     detect::Format,
     dtype::DataType,
+    h5::{walk_h5, H5Node, H5NodeKind},
     h5ad::{H5AdReader, H5AdWriter},
     h5bpcells::BpcellsH5Writer,
     h5seurat::{open_h5seurat, H5SeuratWriter},
@@ -18,7 +19,7 @@ use scx_core::{
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     provenance::{self, OutputInfo, ProvenanceRecord, SourceInfo},
     stream::{DatasetReader, DatasetWriter},
-    tenx::{read_tenx_summary, walk_h5, H5Node, H5NodeKind, TenxH5Reader},
+    tenx::{read_tenx_summary, TenxH5Reader},
     validate::{run_validation, ValidationSchema},
 };
 

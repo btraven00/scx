@@ -5,6 +5,7 @@
 use hdf5::types::{FloatSize, TypeDescriptor};
 use hdf5::File;
 use ndarray::s;
+use std::path::Path;
 
 use crate::{
     dtype::{DataType, TypedVec},
@@ -111,4 +112,144 @@ pub(crate) fn read_values(
         DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![range])?.to_vec()),
         DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![range])?.to_vec()),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Generic tree walk, for `scx inspect` on HDF5 files of no known format
+// ---------------------------------------------------------------------------
+
+/// A node in the HDF5 file tree.
+pub struct H5Node {
+    pub name: String,
+    pub kind: H5NodeKind,
+}
+
+pub enum H5NodeKind {
+    Dataset {
+        shape: Vec<usize>,
+        dtype: String,
+    },
+    Group {
+        children: Vec<H5Node>,
+        /// Number of children that were omitted due to depth limit.
+        truncated: usize,
+    },
+}
+
+/// Walk the root of an HDF5 file up to `max_depth` levels deep.
+pub fn walk_h5(path: &Path, max_depth: usize) -> Result<Vec<H5Node>> {
+    let file = File::open(path)?;
+    let root = file
+        .group("/")
+        .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+    walk_group(&file, &root, max_depth)
+}
+
+fn walk_group(file: &File, grp: &hdf5::Group, depth: usize) -> Result<Vec<H5Node>> {
+    let names = grp.member_names().unwrap_or_default();
+    let mut nodes = Vec::with_capacity(names.len());
+
+    for name in &names {
+        let full_path = {
+            let grp_name = grp.name();
+            if grp_name == "/" {
+                format!("/{name}")
+            } else {
+                format!("{grp_name}/{name}")
+            }
+        };
+
+        let is_group = file.group(&full_path).is_ok() && file.dataset(&full_path).is_err();
+
+        let kind = if is_group {
+            if depth == 0 {
+                H5NodeKind::Group {
+                    children: Vec::new(),
+                    truncated: file
+                        .group(&full_path)
+                        .ok()
+                        .and_then(|g| g.member_names().ok())
+                        .map(|v| v.len())
+                        .unwrap_or(0),
+                }
+            } else {
+                let child_grp = file
+                    .group(&full_path)
+                    .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+                let children = walk_group(file, &child_grp, depth - 1)?;
+                H5NodeKind::Group {
+                    children,
+                    truncated: 0,
+                }
+            }
+        } else {
+            match file.dataset(&full_path) {
+                Ok(ds) => {
+                    let shape = ds.shape();
+                    let dtype = dtype_str(&ds);
+                    H5NodeKind::Dataset { shape, dtype }
+                }
+                Err(_) => continue,
+            }
+        };
+
+        nodes.push(H5Node {
+            name: name.clone(),
+            kind,
+        });
+    }
+
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(nodes)
+}
+
+fn dtype_str(ds: &hdf5::Dataset) -> String {
+    match ds.dtype().and_then(|d| d.to_descriptor()) {
+        Ok(TypeDescriptor::Float(s)) => format!("f{}", (s as usize) * 8),
+        Ok(TypeDescriptor::Integer(s)) => format!("i{}", (s as usize) * 8),
+        Ok(TypeDescriptor::Unsigned(s)) => format!("u{}", (s as usize) * 8),
+        Ok(TypeDescriptor::Boolean) => "bool".into(),
+        Ok(TypeDescriptor::VarLenUnicode) => "str".into(),
+        Ok(TypeDescriptor::VarLenAscii) => "str".into(),
+        Ok(TypeDescriptor::FixedAscii(n)) => format!("str[{n}]"),
+        Ok(TypeDescriptor::FixedUnicode(n)) => format!("str[{n}]"),
+        _ => "?".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walk_h5_tree_and_depth_truncation() {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny/tiny_10x.h5");
+        let nodes = walk_h5(&p, 3).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "matrix");
+        let H5NodeKind::Group {
+            children,
+            truncated,
+        } = &nodes[0].kind
+        else {
+            panic!("matrix should be a group");
+        };
+        assert_eq!(*truncated, 0);
+        let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+        for expected in ["barcodes", "data", "features", "indices", "indptr", "shape"] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+
+        // depth 0: the matrix group's children are omitted but counted.
+        let shallow = walk_h5(&p, 0).unwrap();
+        let H5NodeKind::Group {
+            children,
+            truncated,
+        } = &shallow[0].kind
+        else {
+            panic!("matrix should be a group");
+        };
+        assert!(children.is_empty());
+        assert!(*truncated > 0);
+    }
 }
