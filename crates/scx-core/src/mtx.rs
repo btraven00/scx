@@ -14,18 +14,15 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use async_trait::async_trait;
 use flate2::read::MultiGzDecoder;
-use futures::stream::{self, Stream};
+use futures::stream::{self};
 
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
-use crate::ir::{
-    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta,
-    UnsTable, VarTable, Varm,
-};
+use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
+use crate::stream::ChunkStream;
 use crate::stream::DatasetReader;
 
 /// Open a path (dir or file) as a `.mtx` reader.
@@ -479,43 +476,7 @@ impl DatasetReader for MtxReader {
         Ok(VarTable { index, columns })
     }
 
-    async fn obsm(&mut self) -> Result<Embeddings> {
-        Ok(Embeddings::default())
-    }
-
-    async fn uns(&mut self) -> Result<UnsTable> {
-        Ok(UnsTable::default())
-    }
-
-    async fn varm(&mut self) -> Result<Varm> {
-        Ok(Varm::default())
-    }
-
-    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-
-    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-
-    fn layer_stream<'a>(
-        &'a self,
-        _meta: &'a SparseMatrixMeta,
-        _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        Box::pin(stream::empty())
-    }
-
-    fn obsp_stream<'a>(
-        &'a self,
-        _meta: &'a SparseMatrixMeta,
-        _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        Box::pin(stream::empty())
-    }
-
-    fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+    fn x_stream(&mut self) -> ChunkStream<'_> {
         let mtx_path = self.mtx_path.clone();
         let chunk_size = self.chunk_size;
         let cfg = ScanCfg {

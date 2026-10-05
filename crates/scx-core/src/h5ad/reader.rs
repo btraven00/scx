@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
 use hdf5::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 use ndarray::{s, Array1, Array2};
 
 use crate::h5_str::{read_str_attr, read_strings};
+use crate::stream::row_chunks;
+use crate::stream::ChunkStream;
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
@@ -753,50 +753,30 @@ impl DatasetReader for H5AdReader {
         &'a self,
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    ) -> ChunkStream<'a> {
         let path = self.path.clone();
         let grp_path = format!("layers/{}", meta.name);
         let n_rows = meta.shape.0;
         let n_cols = meta.shape.1;
         let is_dense = meta.indptr.is_empty();
-        Box::pin(stream::unfold(0usize, move |row_start| {
-            let path = path.clone();
-            let grp_path = grp_path.clone();
-            async move {
-                if row_start >= n_rows {
-                    return None;
-                }
-                let row_end = (row_start + chunk_size).min(n_rows);
-                let chunk = if is_dense {
-                    ad_read_dense_chunk_at(&path, &grp_path, row_start, row_end, n_cols)
-                } else {
-                    ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
-                };
-                Some((chunk, row_end))
+        row_chunks(n_rows, chunk_size, move |rows| {
+            let (row_start, row_end) = (rows.start, rows.end);
+            if is_dense {
+                ad_read_dense_chunk_at(&path, &grp_path, row_start, row_end, n_cols)
+            } else {
+                ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
             }
-        }))
+        })
     }
 
-    fn obsp_stream<'a>(
-        &'a self,
-        meta: &'a SparseMatrixMeta,
-        chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
         let path = self.path.clone();
         let grp_path = format!("obsp/{}", meta.name);
         let n_rows = meta.shape.0;
-        Box::pin(stream::unfold(0usize, move |row_start| {
-            let path = path.clone();
-            let grp_path = grp_path.clone();
-            async move {
-                if row_start >= n_rows {
-                    return None;
-                }
-                let row_end = (row_start + chunk_size).min(n_rows);
-                let chunk = ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
-                Some((chunk, row_end))
-            }
-        }))
+        row_chunks(n_rows, chunk_size, move |rows| {
+            let (row_start, row_end) = (rows.start, rows.end);
+            ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
+        })
     }
 
     async fn varm(&mut self) -> Result<Varm> {
@@ -828,7 +808,7 @@ impl DatasetReader for H5AdReader {
         Ok(Varm { map })
     }
 
-    fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+    fn x_stream(&mut self) -> ChunkStream<'_> {
         let path = self.path.clone();
         let base = self.x_path.clone();
         let n_obs = self.n_obs;
@@ -837,38 +817,16 @@ impl DatasetReader for H5AdReader {
         let dtype = self.dtype;
 
         match &self.indptr {
-            Some(indptr) => {
-                let indptr = indptr.clone();
-                Box::pin(stream::unfold(0usize, move |row_start| {
-                    let path = path.clone();
-                    let base = base.clone();
-                    let indptr = indptr.clone();
-                    async move {
-                        if row_start >= n_obs {
-                            return None;
-                        }
-                        let row_end = (row_start + chunk_size).min(n_obs);
-                        let chunk =
-                            ad_read_chunk(&path, &base, &indptr, row_start, row_end, n_vars, dtype);
-                        Some((chunk, row_end))
-                    }
-                }))
-            }
+            Some(indptr) => row_chunks(n_obs, chunk_size, move |rows| {
+                let (row_start, row_end) = (rows.start, rows.end);
+                ad_read_chunk(&path, &base, indptr, row_start, row_end, n_vars, dtype)
+            }),
             None => {
                 // Dense X: read rows slice-by-slice and convert to sparse CSR
-                Box::pin(stream::unfold(0usize, move |row_start| {
-                    let path = path.clone();
-                    let base = base.clone();
-                    async move {
-                        if row_start >= n_obs {
-                            return None;
-                        }
-                        let row_end = (row_start + chunk_size).min(n_obs);
-                        let chunk =
-                            ad_read_dense_chunk(&path, &base, row_start, row_end, n_vars, dtype);
-                        Some((chunk, row_end))
-                    }
-                }))
+                row_chunks(n_obs, chunk_size, move |rows| {
+                    let (row_start, row_end) = (rows.start, rows.end);
+                    ad_read_dense_chunk(&path, &base, row_start, row_end, n_vars, dtype)
+                })
             }
         }
     }

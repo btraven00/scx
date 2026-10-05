@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::pin::Pin;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::{self};
 
+use crate::sparse::csr_chunk;
+use crate::stream::{row_chunks, ChunkStream};
 use crate::{
     dtype::{DataType, TypedVec},
     error::Result,
     ir::{
-        Embeddings, Layers, MatrixChunk, ObsTable, Obsp, SingleCellDataset, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm, Varp,
+        Embeddings, Layers, ObsTable, Obsp, SingleCellDataset, SparseMatrixCSR, SparseMatrixMeta,
+        UnsTable, VarTable, Varm, Varp,
     },
     stream::DatasetReader,
 };
@@ -164,59 +164,32 @@ impl NpyIrReader {
 // DatasetReader for NpyIrReader
 // ---------------------------------------------------------------------------
 
-/// Stream a materialized `SparseMatrixCSR` from a `HashMap` as row-chunks.
-/// Used by `NpyIrReader::layer_stream` and `obsp_stream` where the data is
-/// already fully in memory.
-fn npy_sparse_stream<'a>(
+/// Rows of a matrix held in memory, as chunks. The npy reader materialises
+/// every matrix at open, so X, layers and obsp all stream this way.
+fn in_memory_rows<'a>(mat: &'a SparseMatrixCSR, chunk_size: usize) -> ChunkStream<'a> {
+    row_chunks(mat.shape.0, chunk_size, move |rows| {
+        let nnz = mat.indptr[rows.start] as usize..mat.indptr[rows.end] as usize;
+        let indices = mat.indices[nnz.clone()].to_vec();
+        let data = mat.data.slice(nnz);
+        Ok(csr_chunk(&mat.indptr, rows, mat.shape.1, indices, data))
+    })
+}
+
+/// A layer or obsp matrix by name; an unknown name is an error.
+fn named_rows<'a>(
     map: &'a std::collections::HashMap<String, SparseMatrixCSR>,
     meta: &'a SparseMatrixMeta,
     chunk_size: usize,
-) -> Pin<Box<dyn stream::Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-    let mat = match map.get(&meta.name) {
-        Some(m) => m,
-        None => return Box::pin(stream::empty()),
-    };
-    let n_rows = mat.shape.0;
-    let n_cols = mat.shape.1;
-    let indptr = Arc::new(mat.indptr.clone());
-    let indices = Arc::new(mat.indices.clone());
-    let data = Arc::new(mat.data.clone());
-
-    Box::pin(stream::unfold(0usize, move |row_start| {
-        let indptr = Arc::clone(&indptr);
-        let indices = Arc::clone(&indices);
-        let data = Arc::clone(&data);
-        async move {
-            if row_start >= n_rows {
-                return None;
-            }
-            let row_end = (row_start + chunk_size).min(n_rows);
-            let nnz_start = indptr[row_start] as usize;
-            let nnz_end = indptr[row_end] as usize;
-            let nrows = row_end - row_start;
-            let chunk_indptr: Vec<u64> = (row_start..=row_end)
-                .map(|i| indptr[i] - indptr[row_start])
-                .collect();
-            let chunk_indices = indices[nnz_start..nnz_end].to_vec();
-            let chunk_data = match data.as_ref() {
-                TypedVec::F32(v) => TypedVec::F32(v[nnz_start..nnz_end].to_vec()),
-                TypedVec::F64(v) => TypedVec::F64(v[nnz_start..nnz_end].to_vec()),
-                TypedVec::I32(v) => TypedVec::I32(v[nnz_start..nnz_end].to_vec()),
-                TypedVec::U32(v) => TypedVec::U32(v[nnz_start..nnz_end].to_vec()),
-            };
-            let chunk = Ok(MatrixChunk {
-                row_offset: row_start,
-                nrows,
-                data: SparseMatrixCSR {
-                    shape: (nrows, n_cols),
-                    indptr: chunk_indptr,
-                    indices: chunk_indices,
-                    data: chunk_data,
-                },
-            });
-            Some((chunk, row_end))
+) -> ChunkStream<'a> {
+    match map.get(&meta.name) {
+        Some(mat) => in_memory_rows(mat, chunk_size),
+        None => {
+            let msg = format!("no matrix named '{}'", meta.name);
+            Box::pin(stream::once(async move {
+                Err(crate::error::ScxError::InvalidFormat(msg))
+            }))
         }
-    }))
+    }
 }
 
 #[async_trait]
@@ -279,66 +252,16 @@ impl DatasetReader for NpyIrReader {
         &'a self,
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
-    ) -> Pin<Box<dyn stream::Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        npy_sparse_stream(&self.dataset.layers.map, meta, chunk_size)
+    ) -> ChunkStream<'a> {
+        named_rows(&self.dataset.layers.map, meta, chunk_size)
     }
 
-    fn obsp_stream<'a>(
-        &'a self,
-        meta: &'a SparseMatrixMeta,
-        chunk_size: usize,
-    ) -> Pin<Box<dyn stream::Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        npy_sparse_stream(&self.dataset.obsp.map, meta, chunk_size)
+    fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
+        named_rows(&self.dataset.obsp.map, meta, chunk_size)
     }
 
-    fn x_stream(&mut self) -> Pin<Box<dyn stream::Stream<Item = Result<MatrixChunk>> + Send + '_>> {
-        let n_obs = self.dataset.x.shape.0;
-        let n_vars = self.dataset.x.shape.1;
-        let chunk_size = self.chunk_size;
-        // Move X arrays into Arcs without cloning — avoids a full duplicate
-        // of the X data in memory while the stream is live.
-        let indptr = Arc::new(std::mem::take(&mut self.dataset.x.indptr));
-        let indices = Arc::new(std::mem::take(&mut self.dataset.x.indices));
-        let data = Arc::new(std::mem::replace(
-            &mut self.dataset.x.data,
-            TypedVec::F32(vec![]),
-        ));
-
-        Box::pin(stream::unfold(0usize, move |row_start| {
-            let indptr = Arc::clone(&indptr);
-            let indices = Arc::clone(&indices);
-            let data = Arc::clone(&data);
-            async move {
-                if row_start >= n_obs {
-                    return None;
-                }
-                let row_end = (row_start + chunk_size).min(n_obs);
-                let nnz_start = indptr[row_start] as usize;
-                let nnz_end = indptr[row_end] as usize;
-                let nrows = row_end - row_start;
-                let chunk_indptr: Vec<u64> = (row_start..=row_end)
-                    .map(|i| indptr[i] - indptr[row_start])
-                    .collect();
-                let chunk_indices = indices[nnz_start..nnz_end].to_vec();
-                let chunk_data = match data.as_ref() {
-                    TypedVec::F32(v) => TypedVec::F32(v[nnz_start..nnz_end].to_vec()),
-                    TypedVec::F64(v) => TypedVec::F64(v[nnz_start..nnz_end].to_vec()),
-                    TypedVec::I32(v) => TypedVec::I32(v[nnz_start..nnz_end].to_vec()),
-                    TypedVec::U32(v) => TypedVec::U32(v[nnz_start..nnz_end].to_vec()),
-                };
-                let chunk = MatrixChunk {
-                    row_offset: row_start,
-                    nrows,
-                    data: SparseMatrixCSR {
-                        shape: (nrows, n_vars),
-                        indptr: chunk_indptr,
-                        indices: chunk_indices,
-                        data: chunk_data,
-                    },
-                };
-                Some((Ok(chunk), row_end))
-            }
-        }))
+    fn x_stream(&mut self) -> ChunkStream<'_> {
+        in_memory_rows(&self.dataset.x, self.chunk_size)
     }
 }
 

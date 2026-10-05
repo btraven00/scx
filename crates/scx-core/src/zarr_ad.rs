@@ -17,16 +17,16 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
 use serde_json::{Map, Value};
 use zarrs::array::{data_type as zdt, Array, ElementOwned};
 use zarrs::filesystem::FilesystemStore;
 use zarrs::group::Group;
 
+use crate::stream::row_chunks;
+use crate::stream::ChunkStream;
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
@@ -631,21 +631,6 @@ fn array_to_json(arr: &ZArray) -> Result<Value> {
 // DatasetReader impl
 // ---------------------------------------------------------------------------
 
-fn row_chunks<'a, F>(
-    n_rows: usize,
-    chunk_size: usize,
-    read: F,
-) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>>
-where
-    F: Fn(Range<usize>) -> Result<MatrixChunk> + Send + 'a,
-{
-    Box::pin(stream::iter(
-        (0..n_rows)
-            .step_by(chunk_size.max(1))
-            .map(move |start| read(start..(start + chunk_size).min(n_rows))),
-    ))
-}
-
 #[async_trait]
 impl DatasetReader for ZarrAdReader {
     fn x_indptr(&self) -> &[u64] {
@@ -762,7 +747,7 @@ impl DatasetReader for ZarrAdReader {
         &'a self,
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    ) -> ChunkStream<'a> {
         let store = self.store.clone();
         let path = format!("layers/{}", meta.name);
         let (n_rows, n_cols) = meta.shape;
@@ -775,11 +760,7 @@ impl DatasetReader for ZarrAdReader {
         })
     }
 
-    fn obsp_stream<'a>(
-        &'a self,
-        meta: &'a SparseMatrixMeta,
-        chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
         let store = self.store.clone();
         let path = format!("obsp/{}", meta.name);
         let (n_rows, n_cols) = meta.shape;
@@ -788,11 +769,11 @@ impl DatasetReader for ZarrAdReader {
         })
     }
 
-    fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+    fn x_stream(&mut self) -> ChunkStream<'_> {
         let store = self.store.clone();
         let base = self.x_path.clone();
         let (n_obs, n_vars, dtype) = (self.n_obs, self.n_vars, self.dtype);
-        let indptr = self.indptr.clone();
+        let indptr = &self.indptr;
         row_chunks(n_obs, self.chunk_size, move |rows| match &indptr {
             Some(indptr) => read_csr_chunk(&store, &base, indptr, rows, n_vars, Some(dtype)),
             None => read_dense_chunk(&store, &base, rows, n_vars, Some(dtype)),
