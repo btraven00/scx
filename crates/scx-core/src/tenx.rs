@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
 use hdf5::types::{IntSize, TypeDescriptor};
 use hdf5::File;
 use ndarray::s;
@@ -10,10 +8,9 @@ use ndarray::s;
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::h5_str::read_strings;
-use crate::ir::{
-    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable,
-    Varm,
-};
+use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, VarTable};
+use crate::stream::row_chunks;
+use crate::stream::ChunkStream;
 use crate::stream::DatasetReader;
 
 /// Compact summary of 10x-specific metadata that doesn't fit cleanly into the
@@ -334,62 +331,18 @@ impl DatasetReader for TenxH5Reader {
         Ok(VarTable { index, columns })
     }
 
-    async fn obsm(&mut self) -> Result<Embeddings> {
-        Ok(Embeddings::default())
-    }
-
-    async fn uns(&mut self) -> Result<UnsTable> {
-        Ok(UnsTable::default())
-    }
-
-    async fn varm(&mut self) -> Result<Varm> {
-        Ok(Varm::default())
-    }
-
-    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-
-    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-
-    fn layer_stream<'a>(
-        &'a self,
-        _meta: &'a SparseMatrixMeta,
-        _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        Box::pin(stream::empty())
-    }
-
-    fn obsp_stream<'a>(
-        &'a self,
-        _meta: &'a SparseMatrixMeta,
-        _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        Box::pin(stream::empty())
-    }
-
-    fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+    fn x_stream(&mut self) -> ChunkStream<'_> {
         let path = self.path.clone();
-        let indptr = self.indptr.clone();
+        let indptr = &self.indptr;
         let n_obs = self.n_obs;
         let n_vars = self.n_vars;
         let chunk_size = self.chunk_size;
         let dtype = self.dtype;
 
-        Box::pin(stream::unfold(0usize, move |row_start| {
-            let path = path.clone();
-            let indptr = indptr.clone();
-            async move {
-                if row_start >= n_obs {
-                    return None;
-                }
-                let row_end = (row_start + chunk_size).min(n_obs);
-                let chunk = read_tenx_chunk(&path, &indptr, row_start, row_end, n_vars, dtype);
-                Some((chunk, row_end))
-            }
-        }))
+        row_chunks(n_obs, chunk_size, move |rows| {
+            let (row_start, row_end) = (rows.start, rows.end);
+            read_tenx_chunk(&path, indptr, row_start, row_end, n_vars, dtype)
+        })
     }
 }
 

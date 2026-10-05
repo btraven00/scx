@@ -445,8 +445,7 @@ impl BpcellsDirReader {
 // ─── BpcellsDatasetReader ─────────────────────────────────────────────────────
 
 use async_trait::async_trait;
-use futures::{stream, Stream};
-use std::pin::Pin;
+use futures::stream;
 use std::sync::Arc;
 
 use crate::dtype::{DataType, TypedVec};
@@ -454,6 +453,7 @@ use crate::error::Result;
 use crate::ir::{
     Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
 };
+use crate::stream::ChunkStream;
 use crate::stream::DatasetReader;
 
 /// BPCells directory matrix exposed as a streaming `DatasetReader`.
@@ -664,40 +664,7 @@ impl DatasetReader for BpcellsDatasetReader {
         })
     }
 
-    async fn obsm(&mut self) -> Result<Embeddings> {
-        Ok(Embeddings::default())
-    }
-    async fn uns(&mut self) -> Result<UnsTable> {
-        Ok(UnsTable::default())
-    }
-    async fn varm(&mut self) -> Result<Varm> {
-        Ok(Varm::default())
-    }
-
-    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-
-    fn layer_stream<'a>(
-        &'a self,
-        _meta: &'a SparseMatrixMeta,
-        _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        Box::pin(stream::empty())
-    }
-
-    fn obsp_stream<'a>(
-        &'a self,
-        _meta: &'a SparseMatrixMeta,
-        _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
-        Box::pin(stream::empty())
-    }
-
-    fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+    fn x_stream(&mut self) -> ChunkStream<'_> {
         if self.metadata_only {
             return Box::pin(stream::once(async {
                 Err(crate::error::ScxError::InvalidFormat(
@@ -705,43 +672,9 @@ impl DatasetReader for BpcellsDatasetReader {
                 ))
             }));
         }
-        let n_obs = self.n_obs;
-        let chunk_size = self.chunk_size;
-        let reader = Self {
-            n_obs: self.n_obs,
-            n_vars: self.n_vars,
-            chunk_size: self.chunk_size,
-            obs_names: self.obs_names.clone(),
-            var_names: self.var_names.clone(),
-            idxptr: Arc::clone(&self.idxptr),
-            index: Arc::clone(&self.index),
-            values: Arc::clone(&self.values),
-            dtype: self.dtype,
-            metadata_only: self.metadata_only,
-        };
-
-        Box::pin(stream::unfold(0usize, move |obs_start| {
-            let reader = Self {
-                n_obs: reader.n_obs,
-                n_vars: reader.n_vars,
-                chunk_size: reader.chunk_size,
-                obs_names: reader.obs_names.clone(),
-                var_names: reader.var_names.clone(),
-                idxptr: Arc::clone(&reader.idxptr),
-                index: Arc::clone(&reader.index),
-                values: Arc::clone(&reader.values),
-                dtype: reader.dtype,
-                metadata_only: reader.metadata_only,
-            };
-            async move {
-                if obs_start >= n_obs {
-                    return None;
-                }
-                let obs_end = (obs_start + chunk_size).min(n_obs);
-                let chunk = reader.read_chunk(obs_start, obs_end);
-                Some((chunk, obs_end))
-            }
-        }))
+        crate::stream::row_chunks(self.n_obs, self.chunk_size, move |rows| {
+            self.read_chunk(rows.start, rows.end)
+        })
     }
 }
 

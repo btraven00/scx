@@ -3,7 +3,6 @@
 //! The matrix encoding (per-cell lists, dense, …) is sniffed at [`open`](ParquetReader::open)
 //! into a [`ParquetLayout`] and dispatched per batch — see [`super::layout`].
 
-use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -12,7 +11,7 @@ use arrow::array::{
 use arrow::datatypes::DataType as ArrowType;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use futures::{pin_mut, Stream, StreamExt};
+use futures::{pin_mut, StreamExt};
 use object_store::path::Path as StorePath;
 use object_store::ObjectStore;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
@@ -22,10 +21,8 @@ use super::layout::ParquetLayout;
 use super::{net_err, GeneDict};
 use crate::dtype::DataType;
 use crate::error::Result;
-use crate::ir::{
-    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable,
-    Varm,
-};
+use crate::ir::{Column, ColumnData, ObsTable, SparseMatrixMeta, VarTable};
+use crate::stream::ChunkStream;
 use crate::stream::DatasetReader;
 
 /// Column whose values become the obs index, when present (Tahoe-100M barcode).
@@ -223,31 +220,11 @@ impl DatasetReader for ParquetReader {
         Ok(self.var.clone())
     }
 
-    async fn obsm(&mut self) -> Result<Embeddings> {
-        Ok(Embeddings::default())
-    }
-
-    async fn uns(&mut self) -> Result<UnsTable> {
-        Ok(UnsTable::default())
-    }
-
-    async fn varm(&mut self) -> Result<Varm> {
-        Ok(Varm::default())
-    }
-
-    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-
-    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        Ok(Vec::new())
-    }
-
     fn layer_stream<'a>(
         &'a self,
         _meta: &'a SparseMatrixMeta,
         _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    ) -> ChunkStream<'a> {
         Box::pin(futures::stream::empty())
     }
 
@@ -255,11 +232,11 @@ impl DatasetReader for ParquetReader {
         &'a self,
         _meta: &'a SparseMatrixMeta,
         _chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    ) -> ChunkStream<'a> {
         Box::pin(futures::stream::empty())
     }
 
-    fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+    fn x_stream(&mut self) -> ChunkStream<'_> {
         let n_vars = self.n_vars;
         // Clone the cheap handles + layout so the stream owns them — the async
         // footer read is deferred into the stream body (x_stream is sync-returns-stream).

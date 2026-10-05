@@ -105,6 +105,16 @@ impl TypedVec {
         }
     }
 
+    /// A copy of the values in `range`.
+    pub fn slice(&self, range: std::ops::Range<usize>) -> Self {
+        match self {
+            TypedVec::F32(v) => TypedVec::F32(v[range].to_vec()),
+            TypedVec::F64(v) => TypedVec::F64(v[range].to_vec()),
+            TypedVec::I32(v) => TypedVec::I32(v[range].to_vec()),
+            TypedVec::U32(v) => TypedVec::U32(v[range].to_vec()),
+        }
+    }
+
     pub fn dtype(&self) -> DataType {
         match self {
             TypedVec::F32(_) => DataType::F32,

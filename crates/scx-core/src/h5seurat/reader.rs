@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
+use futures::stream::{self};
 use hdf5::types::{TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 
 use crate::h5::{read_csr_rows, read_u64, value_dtype};
 use crate::h5_str::read_strings;
+use crate::stream::row_chunks;
+use crate::stream::ChunkStream;
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -675,7 +676,7 @@ impl DatasetReader for H5SeuratReader {
         &'a self,
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    ) -> ChunkStream<'a> {
         let path = self.path.clone();
         let grp_path = File::open(&path)
             .ok()
@@ -712,39 +713,19 @@ impl DatasetReader for H5SeuratReader {
                 }
             };
 
-            Box::pin(stream::unfold(0usize, move |row_start| {
-                let reader = bp_reader.clone();
-                async move {
-                    if row_start >= n_rows {
-                        return None;
-                    }
-                    let row_end = (row_start + chunk_size).min(n_rows);
-                    let chunk = reader.read_chunk(row_start, row_end);
-                    Some((chunk, row_end))
-                }
-            }))
+            row_chunks(n_rows, chunk_size, move |rows| {
+                let (row_start, row_end) = (rows.start, rows.end);
+                bp_reader.read_chunk(row_start, row_end)
+            })
         } else {
-            Box::pin(stream::unfold(0usize, move |row_start| {
-                let path = path.clone();
-                let grp_path = grp_path.clone();
-                async move {
-                    if row_start >= n_rows {
-                        return None;
-                    }
-                    let row_end = (row_start + chunk_size).min(n_rows);
-                    let chunk =
-                        seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
-                    Some((chunk, row_end))
-                }
-            }))
+            row_chunks(n_rows, chunk_size, move |rows| {
+                let (row_start, row_end) = (rows.start, rows.end);
+                seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
+            })
         }
     }
 
-    fn obsp_stream<'a>(
-        &'a self,
-        meta: &'a SparseMatrixMeta,
-        chunk_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>> {
+    fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
         let path = self.path.clone();
         let grp_path = format!("graphs/{}", meta.name);
         let n_rows = meta.shape.0;
@@ -774,35 +755,19 @@ impl DatasetReader for H5SeuratReader {
                 }
             };
 
-            Box::pin(stream::unfold(0usize, move |row_start| {
-                let reader = bp_reader.clone();
-                async move {
-                    if row_start >= n_rows {
-                        return None;
-                    }
-                    let row_end = (row_start + chunk_size).min(n_rows);
-                    let chunk = reader.read_chunk(row_start, row_end);
-                    Some((chunk, row_end))
-                }
-            }))
+            row_chunks(n_rows, chunk_size, move |rows| {
+                let (row_start, row_end) = (rows.start, rows.end);
+                bp_reader.read_chunk(row_start, row_end)
+            })
         } else {
-            Box::pin(stream::unfold(0usize, move |row_start| {
-                let path = path.clone();
-                let grp_path = grp_path.clone();
-                async move {
-                    if row_start >= n_rows {
-                        return None;
-                    }
-                    let row_end = (row_start + chunk_size).min(n_rows);
-                    let chunk =
-                        seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end);
-                    Some((chunk, row_end))
-                }
-            }))
+            row_chunks(n_rows, chunk_size, move |rows| {
+                let (row_start, row_end) = (rows.start, rows.end);
+                seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
+            })
         }
     }
 
-    fn x_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + '_>> {
+    fn x_stream(&mut self) -> ChunkStream<'_> {
         match &self.x_backend {
             XBackend::DgCMatrix { indptr, dtype } => {
                 let path = self.path.clone();
@@ -810,31 +775,14 @@ impl DatasetReader for H5SeuratReader {
                 let n_obs = self.n_obs;
                 let n_vars = self.n_vars;
                 let chunk_size = self.chunk_size;
-                let indptr = indptr.clone();
                 let dtype = *dtype;
 
-                Box::pin(stream::unfold(0usize, move |cell_start| {
-                    let path = path.clone();
-                    let x_path = x_path.clone();
-                    let indptr = indptr.clone();
-                    async move {
-                        if cell_start >= n_obs {
-                            return None;
-                        }
-                        let cell_end = (cell_start + chunk_size).min(n_obs);
-                        let chunk = File::open(&path).map_err(ScxError::from).and_then(|file| {
-                            read_csr_rows(
-                                &file,
-                                &x_path,
-                                &indptr,
-                                cell_start..cell_end,
-                                n_vars,
-                                dtype,
-                            )
-                        });
-                        Some((chunk, cell_end))
-                    }
-                }))
+                row_chunks(n_obs, chunk_size, move |rows| {
+                    let (cell_start, cell_end) = (rows.start, rows.end);
+                    File::open(&path).map_err(ScxError::from).and_then(|file| {
+                        read_csr_rows(&file, &x_path, indptr, cell_start..cell_end, n_vars, dtype)
+                    })
+                })
             }
             XBackend::BpCells => {
                 let path = self.path.clone();
@@ -854,17 +802,10 @@ impl DatasetReader for H5SeuratReader {
                     }
                 };
 
-                Box::pin(stream::unfold(0usize, move |cell_start| {
-                    let reader = bp_reader.clone();
-                    async move {
-                        if cell_start >= n_obs {
-                            return None;
-                        }
-                        let cell_end = (cell_start + chunk_size).min(n_obs);
-                        let chunk = reader.read_chunk(cell_start, cell_end);
-                        Some((chunk, cell_end))
-                    }
-                }))
+                row_chunks(n_obs, chunk_size, move |rows| {
+                    let (cell_start, cell_end) = (rows.start, rows.end);
+                    bp_reader.read_chunk(cell_start, cell_end)
+                })
             }
         }
     }
