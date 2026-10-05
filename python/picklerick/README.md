@@ -4,7 +4,7 @@ Python bindings for [SCX](https://github.com/btraven00/scx), a Rust engine
 that converts single-cell data between formats in bounded memory.
 
 ```bash
-pip install --pre scx-picklerick   # 0.1.0a1; drop --pre once 0.1.0 is out
+pip install scx-picklerick
 ```
 
 ```python
@@ -18,8 +18,8 @@ Requires Python 3.14 or newer. Wheels are built for Linux (x86_64, aarch64)
 and macOS (arm64) and include a statically linked HDF5. You don't need a
 system HDF5.
 
-> **Alpha.** The API below is the one meant to stay, but it may still
-> change before 0.1.0. Please report problems at
+> **Early release.** The API below is the one meant to stay, but it may
+> still change. Versions follow the scx engine. Please report problems at
 > <https://github.com/btraven00/scx/issues>.
 
 ## What it does
