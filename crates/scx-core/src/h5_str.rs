@@ -95,6 +95,84 @@ fn too_wide(kind: &str, n: usize) -> ScxError {
     ))
 }
 
+/// The 1-D string dataset at `path` under `grp` (a `File` works too).
+pub(crate) fn read_strings(grp: &hdf5::Group, path: &str) -> Result<Vec<String>> {
+    read_str_1d(&grp.dataset(path)?)
+}
+
+fn vlen(s: &str) -> Result<VarLenUnicode> {
+    s.parse::<VarLenUnicode>()
+        .map_err(|e| ScxError::InvalidFormat(format!("string {s:?} can't be stored in HDF5: {e}")))
+}
+
+/// Write `values` as the variable-length UTF-8 dataset `name`, replacing one
+/// of that name. A string HDF5 can't store (one with a NUL) is an error, not
+/// an empty string.
+pub(crate) fn write_strings(
+    grp: &hdf5::Group,
+    name: &str,
+    values: &[String],
+) -> Result<hdf5::Dataset> {
+    if grp.link_exists(name) {
+        grp.unlink(name)?;
+    }
+    let vals = values.iter().map(|s| vlen(s)).collect::<Result<Vec<_>>>()?;
+    Ok(grp.new_dataset_builder().with_data(&vals).create(name)?)
+}
+
+/// A string attribute: scalar or the first element of a 1-D array, UTF-8 or
+/// ASCII (BPCells writes scalars, some tools length-1 arrays).
+pub(crate) fn read_str_attr(loc: &hdf5::Location, name: &str) -> Result<String> {
+    let attr = loc.attr(name)?;
+    if let Ok(s) = attr.read_scalar::<VarLenUnicode>() {
+        return Ok(s.to_string());
+    }
+    if let Ok(s) = attr.read_scalar::<VarLenAscii>() {
+        return Ok(s.to_string());
+    }
+    if let Ok(a) = attr.read_1d::<VarLenUnicode>() {
+        if let Some(s) = a.first() {
+            return Ok(s.to_string());
+        }
+    }
+    if let Ok(a) = attr.read_1d::<VarLenAscii>() {
+        if let Some(s) = a.first() {
+            return Ok(s.to_string());
+        }
+    }
+    Err(ScxError::InvalidFormat(format!(
+        "attribute '{name}' is not a string"
+    )))
+}
+
+/// Set the scalar string attribute `name`, replacing an existing one.
+pub(crate) fn write_str_attr(loc: &hdf5::Location, name: &str, value: &str) -> Result<()> {
+    if loc.attr(name).is_ok() {
+        loc.delete_attr(name)?;
+    }
+    loc.new_attr::<VarLenUnicode>()
+        .create(name)?
+        .write_scalar(&vlen(value)?)?;
+    Ok(())
+}
+
+/// Set the 1-D string-array attribute `name`, replacing an existing one.
+pub(crate) fn write_str_array_attr(
+    loc: &hdf5::Location,
+    name: &str,
+    values: &[&str],
+) -> Result<()> {
+    if loc.attr(name).is_ok() {
+        loc.delete_attr(name)?;
+    }
+    let vals = values.iter().map(|s| vlen(s)).collect::<Result<Vec<_>>>()?;
+    loc.new_attr::<VarLenUnicode>()
+        .shape(vals.len())
+        .create(name)?
+        .write(&ndarray::Array1::from_vec(vals))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +280,25 @@ mod tests {
             matches!(err, ScxError::InvalidFormat(_)),
             "non-string dataset must error, got {err:?}"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn strings_and_attrs_roundtrip() {
+        let path = tmp("roundtrip");
+        let f = hdf5::File::create(&path).unwrap();
+        let v = vec!["a".to_string(), "β".to_string(), String::new()];
+        write_strings(&f, "s", &v).unwrap();
+        write_strings(&f, "s", &v[..1]).unwrap(); // replaces
+        assert_eq!(read_strings(&f, "s").unwrap(), ["a"]);
+        assert!(write_strings(&f, "bad", &["a\0b".to_string()]).is_err());
+
+        write_str_attr(&f, "version", "v1").unwrap();
+        write_str_attr(&f, "version", "v2").unwrap(); // replaces
+        assert_eq!(read_str_attr(&f, "version").unwrap(), "v2");
+        write_str_array_attr(&f, "cols", &["x", "y"]).unwrap();
+        assert_eq!(read_str_attr(&f, "cols").unwrap(), "x");
+        drop(f);
         let _ = std::fs::remove_file(&path);
     }
 }

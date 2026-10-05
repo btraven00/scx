@@ -6,6 +6,7 @@ use hdf5::types::VarLenUnicode;
 use hdf5::{File, Group, SimpleExtents};
 use ndarray::{s, Array1, Array2};
 
+use crate::h5_str::{write_str_array_attr, write_strings};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -200,57 +201,22 @@ fn seurat_init_resizable<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()>
     Ok(())
 }
 
-/// A string dataset, replacing one of the same name. Invalid strings are an
-/// error, not silently blanked.
-pub(crate) fn seurat_write_strings(grp: &Group, name: &str, strings: &[String]) -> Result<()> {
-    if grp.link_exists(name) {
-        grp.unlink(name)?;
-    }
-    let vals = strings
-        .iter()
-        .map(|s| {
-            VarLenUnicode::from_str(s).map_err(|e| {
-                ScxError::InvalidFormat(format!("H5Seurat: invalid string in '{name}': {e}"))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let ds = grp
-        .new_dataset::<VarLenUnicode>()
-        .shape(vals.len())
-        .create(name)?;
-    ds.write(&Array1::from_vec(vals))?;
-    Ok(())
-}
-
-fn str_attr(grp: &Group, name: &str, values: &[&str]) -> Result<()> {
-    let vals = values
-        .iter()
-        .map(|s| VarLenUnicode::from_str(s))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| ScxError::InvalidFormat(format!("H5Seurat: invalid attribute string: {e}")))?;
-    grp.new_attr::<VarLenUnicode>()
-        .shape(vals.len())
-        .create(name)?
-        .write(&Array1::from_vec(vals))?;
-    Ok(())
-}
-
 /// Write a SeuratDisk data.frame group (`meta.data`, `meta.features`): its
 /// columns plus the `colnames`, `logicals` and (for meta.data) `_class`
 /// attributes.
 pub(crate) fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<()> {
     let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
-    str_attr(grp, "colnames", &names)?;
+    write_str_array_attr(grp, "colnames", &names)?;
     let logicals: Vec<&str> = columns
         .iter()
         .filter(|c| matches!(c.data, ColumnData::Bool(_)))
         .map(|c| c.name.as_str())
         .collect();
     if !logicals.is_empty() {
-        str_attr(grp, "logicals", &logicals)?;
+        write_str_array_attr(grp, "logicals", &logicals)?;
     }
     if grp.name() == "/meta.data" {
-        str_attr(grp, "_class", &["data.frame"])?;
+        write_str_array_attr(grp, "_class", &["data.frame"])?;
     }
     for col in columns {
         seurat_write_col(grp, col)?;
@@ -307,7 +273,9 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
         }
         // ponytail: a missing string is written as "" (SeuratDisk has no NA for
         // plain character columns); write it as a factor if NA must survive.
-        ColumnData::String(v) => seurat_write_strings(grp, name, v)?,
+        ColumnData::String(v) => {
+            write_strings(grp, name, v)?;
+        }
         ColumnData::Categorical { codes, levels } => {
             let col_grp = grp.create_group(name)?;
             // 1-based codes, NA_integer_ for missing.
@@ -317,7 +285,7 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
                 .map(|(i, &c)| if na(i) { NA_INTEGER } else { c as i32 + 1 })
                 .collect();
             write_i32(&col_grp, "values", values)?;
-            seurat_write_strings(&col_grp, "levels", levels)?;
+            write_strings(&col_grp, "levels", levels)?;
         }
     }
     Ok(())
@@ -351,7 +319,7 @@ impl DatasetWriter for H5SeuratWriter {
     async fn write_obs(&mut self, obs: &ObsTable) -> Result<()> {
         // /cell.names — root-level cell barcode array
         let root = self.file.group("/")?;
-        seurat_write_strings(&root, "cell.names", &obs.index)?;
+        write_strings(&root, "cell.names", &obs.index)?;
 
         // /meta.data/ — always created even when obs.columns is empty
         let meta_grp = self.file.create_group("meta.data")?;
@@ -363,7 +331,7 @@ impl DatasetWriter for H5SeuratWriter {
     async fn write_var(&mut self, var: &VarTable) -> Result<()> {
         // /assays/{assay}/features
         let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
-        seurat_write_strings(&assay_grp, "features", &var.index)?;
+        write_strings(&assay_grp, "features", &var.index)?;
 
         // /assays/{assay}/meta.features/ — only when var has columns
         if !var.columns.is_empty() {

@@ -337,3 +337,29 @@ async fn h5seurat_reads_wide_and_unsigned_storage() {
     assert_eq!(r.dtype(), scx_core::dtype::DataType::U32);
     assert_eq!(dense_x(&mut *r).await, matrix(&expected()["counts"]));
 }
+
+#[tokio::test]
+async fn h5seurat_reads_fixed_length_strings() {
+    // rhdf5 writes fixed-length strings by default; the H5Seurat reader
+    // used to accept only variable-length ones.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixed.h5seurat");
+    std::fs::copy(tiny("tiny_v4.h5seurat"), &path).unwrap();
+    let names = strings(&expected()["obs_names"]);
+    {
+        let f = hdf5::File::open_rw(&path).unwrap();
+        f.unlink("cell.names").unwrap();
+        let fixed: Vec<hdf5::types::FixedAscii<8>> = names
+            .iter()
+            .map(|s| hdf5::types::FixedAscii::from_ascii(s.as_bytes()).unwrap())
+            .collect();
+        f.new_dataset_builder()
+            .with_data(&fixed)
+            .create("cell.names")
+            .unwrap();
+    }
+    let mut r = scx_core::open(path.to_str().unwrap(), &scx_core::OpenOptions::new(4))
+        .await
+        .unwrap();
+    assert_eq!(r.obs().await.unwrap().index, names);
+}

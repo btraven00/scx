@@ -9,6 +9,7 @@ use ndarray::s;
 
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
+use crate::h5_str::read_strings;
 use crate::ir::{
     Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable,
     Varm,
@@ -29,7 +30,7 @@ pub fn read_tenx_summary(path: &Path) -> Result<TenxSummary> {
     let file = File::open(path)?;
 
     let feature_types = if let Ok(ds) = file.dataset("matrix/features/feature_type") {
-        let strings = read_str_dataset_raw(&ds)?;
+        let strings = crate::h5_str::read_str_1d(&ds)?;
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for s in strings {
             *counts.entry(s).or_insert(0) += 1;
@@ -42,7 +43,7 @@ pub fn read_tenx_summary(path: &Path) -> Result<TenxSummary> {
     };
 
     let genomes = if let Ok(ds) = file.dataset("matrix/features/genome") {
-        let strings = read_str_dataset_raw(&ds)?;
+        let strings = crate::h5_str::read_str_1d(&ds)?;
         let mut seen: Vec<String> = Vec::new();
         for s in strings {
             if !seen.contains(&s) {
@@ -58,10 +59,6 @@ pub fn read_tenx_summary(path: &Path) -> Result<TenxSummary> {
         feature_types,
         genomes,
     })
-}
-
-fn read_str_dataset_raw(ds: &hdf5::Dataset) -> Result<Vec<String>> {
-    crate::h5_str::read_str_1d(ds)
 }
 
 /// Datasets that can carry feature ids, most canonical first.
@@ -278,11 +275,6 @@ impl TenxH5Reader {
     }
 }
 
-fn read_str_dataset(file: &File, path: &str) -> Result<Vec<String>> {
-    let ds = file.dataset(path)?;
-    read_str_dataset_raw(&ds)
-}
-
 /// Read `matrix/indices[a..b)` as `u32`.
 ///
 /// Prefers the parallel-inflate path in [`crate::h5_chunk`] — the same one
@@ -407,7 +399,7 @@ impl DatasetReader for TenxH5Reader {
 
     async fn obs(&mut self) -> Result<ObsTable> {
         let file = File::open(&self.path)?;
-        let index = read_str_dataset(&file, "matrix/barcodes")?;
+        let index = read_strings(&file, "matrix/barcodes")?;
         Ok(ObsTable {
             index,
             columns: Vec::new(),
@@ -416,7 +408,7 @@ impl DatasetReader for TenxH5Reader {
 
     async fn var(&mut self) -> Result<VarTable> {
         let file = File::open(&self.path)?;
-        let index = read_str_dataset(&file, feature_id_path(&file).ok_or_else(missing_features)?)?;
+        let index = read_strings(&file, feature_id_path(&file).ok_or_else(missing_features)?)?;
         let mut columns: Vec<Column> = Vec::new();
 
         // `matrix/gene_names` is the v2 spelling of `features/name`; the two are
@@ -432,7 +424,7 @@ impl DatasetReader for TenxH5Reader {
                 continue;
             }
             if let Ok(ds) = file.dataset(h5_name) {
-                match read_str_dataset_raw(&ds) {
+                match crate::h5_str::read_str_1d(&ds) {
                     Ok(v) if !v.is_empty() => {
                         columns.push(Column::new((*col_name).to_string(), ColumnData::String(v)))
                     }

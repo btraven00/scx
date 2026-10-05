@@ -7,6 +7,7 @@ use hdf5::{Dataset, File, Group, SimpleExtents};
 use ndarray::{s, Array1, Array2};
 
 use super::reader::ad_detect_dtype;
+use crate::h5_str::{write_str_attr, write_strings};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
@@ -98,13 +99,13 @@ impl H5AdWriter {
 
         // Root attrs
         let root = file.group("/")?;
-        write_str_attr_on_group(&root, "encoding-type", "anndata")?;
-        write_str_attr_on_group(&root, "encoding-version", "0.1.0")?;
+        write_str_attr(&root, "encoding-type", "anndata")?;
+        write_str_attr(&root, "encoding-version", "0.1.0")?;
 
         // /X group — encoding attrs; resizable datasets created here
         let x_grp = file.create_group("X")?;
-        write_str_attr_on_group(&x_grp, "encoding-type", "csr_matrix")?;
-        write_str_attr_on_group(&x_grp, "encoding-version", "0.1.0")?;
+        write_str_attr(&x_grp, "encoding-type", "csr_matrix")?;
+        write_str_attr(&x_grp, "encoding-version", "0.1.0")?;
         // shape attr written in finalize() once we know n_obs
 
         match dtype {
@@ -282,30 +283,14 @@ impl H5AdWriter {
 // Attribute helpers
 // ---------------------------------------------------------------------------
 
-fn write_str_attr_on_group(grp: &Group, name: &str, value: &str) -> Result<()> {
-    let v = VarLenUnicode::from_str(value)
-        .map_err(|_| ScxError::InvalidFormat(format!("invalid UTF-8: {value}")))?;
-    let attr = grp.new_attr::<VarLenUnicode>().create(name)?;
-    attr.write_scalar(&v)?;
-    Ok(())
-}
-
-fn write_str_attr_on_ds(ds: &Dataset, name: &str, value: &str) -> Result<()> {
-    let v = VarLenUnicode::from_str(value)
-        .map_err(|_| ScxError::InvalidFormat(format!("invalid UTF-8: {value}")))?;
-    let attr = ds.new_attr::<VarLenUnicode>().create(name)?;
-    attr.write_scalar(&v)?;
-    Ok(())
-}
-
 fn write_encoding_on_group(grp: &Group, enc_type: &str, enc_version: &str) -> Result<()> {
-    write_str_attr_on_group(grp, "encoding-type", enc_type)?;
-    write_str_attr_on_group(grp, "encoding-version", enc_version)
+    write_str_attr(grp, "encoding-type", enc_type)?;
+    write_str_attr(grp, "encoding-version", enc_version)
 }
 
 fn write_encoding_on_ds(ds: &Dataset, enc_type: &str, enc_version: &str) -> Result<()> {
-    write_str_attr_on_ds(ds, "encoding-type", enc_type)?;
-    write_str_attr_on_ds(ds, "encoding-version", enc_version)
+    write_str_attr(ds, "encoding-type", enc_type)?;
+    write_str_attr(ds, "encoding-version", enc_version)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,23 +353,6 @@ fn write_2d_f64(
     Ok(ds)
 }
 
-pub(super) fn write_vlen_str_dataset(
-    grp: &Group,
-    name: &str,
-    strings: &[String],
-) -> Result<Dataset> {
-    let vals: Vec<VarLenUnicode> = strings
-        .iter()
-        .map(|s| VarLenUnicode::from_str(s).unwrap_or_default())
-        .collect();
-    let ds = grp
-        .new_dataset::<VarLenUnicode>()
-        .shape(vals.len())
-        .create(name)?;
-    ds.write(&Array1::from_vec(vals))?;
-    Ok(ds)
-}
-
 // ---------------------------------------------------------------------------
 // Dataframe writer (obs / var)
 // ---------------------------------------------------------------------------
@@ -403,7 +371,7 @@ fn write_dataframe(
     // attr (so it round-trips), and hdf5r/rhdf5-based R readers that hardcode
     // the literal `obs/_index` / `var/_index` path (e.g. omnibenchmark modules)
     // only find it under this name. Writing "index" satisfies only the former.
-    write_str_attr_on_group(&grp, "_index", "_index")?;
+    write_str_attr(&grp, "_index", "_index")?;
 
     // A source column literally named "_index" collides with the reserved index
     // dataset we just declared (anndata stores the frame index at
@@ -438,7 +406,7 @@ fn write_dataframe(
     attr.write(&Array1::from_vec(col_names))?;
 
     // index dataset
-    let idx_ds = write_vlen_str_dataset(&grp, "_index", index)?;
+    let idx_ds = write_strings(&grp, "_index", index)?;
     write_encoding_on_ds(&idx_ds, "string-array", "0.2.0")?;
 
     // columns
@@ -513,7 +481,7 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
         (ColumnData::String(v), Some(m)) => {
             let g = grp.create_group(name)?;
             write_encoding_on_group(&g, "nullable-string-array", "0.1.0")?;
-            let ds = write_vlen_str_dataset(&g, "values", v)?;
+            let ds = write_strings(&g, "values", v)?;
             write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
             write_nullable_mask(&g, m, compression)?;
         }
@@ -532,7 +500,7 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
         }
         (ColumnData::String(v), None) => {
             // VarLen strings don't support HDF5 filters — written uncompressed.
-            let ds = write_vlen_str_dataset(grp, name, v)?;
+            let ds = write_strings(grp, name, v)?;
             write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
         }
         (ColumnData::Categorical { codes, levels }, _) => {
@@ -563,7 +531,7 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
             };
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
-            let cat_ds = write_vlen_str_dataset(&cat_grp, "categories", levels)?;
+            let cat_ds = write_strings(&cat_grp, "categories", levels)?;
             write_encoding_on_ds(&cat_ds, "string-array", "0.2.0")?;
         }
     }
