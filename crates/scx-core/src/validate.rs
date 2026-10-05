@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 
-use crate::{dtype::DataType, error::Result, stream::DatasetReader};
+use crate::{error::Result, stream::DatasetReader};
 
 // ---------------------------------------------------------------------------
 // Qualifier
@@ -196,7 +196,7 @@ pub async fn run_validation(
 
     // --- dtype ---
     if let Some(expected) = &schema.x_dtype {
-        let actual = dtype_str(dtype);
+        let actual = dtype.code();
         let ok = actual == expected.as_str();
         report.checks.push(check(
             "x_dtype",
@@ -361,15 +361,6 @@ fn check(name: &str, passed: bool, pass_detail: String, fail_detail: String) -> 
         name: name.to_string(),
         passed,
         detail: if passed { pass_detail } else { fail_detail },
-    }
-}
-
-fn dtype_str(dtype: DataType) -> &'static str {
-    match dtype {
-        DataType::F32 => "f32",
-        DataType::F64 => "f64",
-        DataType::I32 => "i32",
-        DataType::U32 => "u32",
     }
 }
 

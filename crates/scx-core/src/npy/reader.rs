@@ -33,7 +33,7 @@ impl NpyIrReader {
         let x_dtype = meta
             .x
             .as_ref()
-            .map(|m| parse_dtype(&m.dtype))
+            .map(|m| m.dtype.parse::<DataType>())
             .transpose()?
             .unwrap_or(DataType::F32);
 
@@ -41,7 +41,7 @@ impl NpyIrReader {
 
         // --- X ---
         let x = if let Some(ref xm) = meta.x {
-            let dtype = parse_dtype(&xm.dtype)?;
+            let dtype = xm.dtype.parse::<DataType>()?;
             read_sparse(&x_dir(dir), (n_obs, n_vars), dtype)?
         } else {
             SparseMatrixCSR {
@@ -93,7 +93,7 @@ impl NpyIrReader {
         // --- layers ---
         let mut layers_map = HashMap::new();
         for (key, lm) in &meta.layers {
-            let dtype = parse_dtype(&lm.dtype)?;
+            let dtype = lm.dtype.parse::<DataType>()?;
             let shape = (lm.shape[0], lm.shape[1]);
             layers_map.insert(
                 key.clone(),
@@ -104,7 +104,7 @@ impl NpyIrReader {
         // --- obsp ---
         let mut obsp_map = HashMap::new();
         for (key, sm) in &meta.obsp {
-            let dtype = parse_dtype(&sm.dtype)?;
+            let dtype = sm.dtype.parse::<DataType>()?;
             let shape = (sm.shape[0], sm.shape[1]);
             obsp_map.insert(
                 key.clone(),
@@ -115,7 +115,7 @@ impl NpyIrReader {
         // --- varp ---
         let mut varp_map = HashMap::new();
         for (key, sm) in &meta.varp {
-            let dtype = parse_dtype(&sm.dtype)?;
+            let dtype = sm.dtype.parse::<DataType>()?;
             let shape = (sm.shape[0], sm.shape[1]);
             varp_map.insert(
                 key.clone(),
