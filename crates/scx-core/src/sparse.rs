@@ -35,11 +35,7 @@ pub(crate) fn csr_chunk(
 
 /// Row-major dense values (`n_cols` per row) as CSR, dropping exact zeros.
 pub(crate) fn dense_to_csr(values: &[f64], n_cols: usize, dtype: DataType) -> SparseMatrixCSR {
-    let nrows = if n_cols == 0 {
-        0
-    } else {
-        values.len() / n_cols
-    };
+    let nrows = values.len().checked_div(n_cols).unwrap_or(0);
     let mut indptr = Vec::with_capacity(nrows + 1);
     let (mut indices, mut kept) = (Vec::new(), Vec::new());
     indptr.push(0u64);
