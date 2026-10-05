@@ -24,17 +24,10 @@ fn vlen(s: &str) -> Result<VarLenUnicode> {
         .map_err(|e| ScxError::InvalidFormat(format!("invalid string {s:?}: {e}")))
 }
 
-pub(crate) fn str_attr(loc: &Location, name: &str, value: &str) -> Result<()> {
-    loc.new_attr::<VarLenUnicode>()
-        .create(name)?
-        .write_scalar(&vlen(value)?)?;
-    Ok(())
-}
-
 fn encode(loc: &Location, enc: Encoding, kind: &str, version: &str) -> Result<()> {
     if enc == Encoding::AnnData {
-        str_attr(loc, "encoding-type", kind)?;
-        str_attr(loc, "encoding-version", version)?;
+        crate::h5_str::write_str_attr(loc, "encoding-type", kind)?;
+        crate::h5_str::write_str_attr(loc, "encoding-version", version)?;
     }
     Ok(())
 }

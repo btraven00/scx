@@ -5,9 +5,10 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use hdf5::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
-use hdf5::{Dataset, File, Group};
+use hdf5::File;
 use ndarray::{s, Array1, Array2};
 
+use crate::h5_str::{read_str_attr, read_strings};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
@@ -59,7 +60,7 @@ impl H5AdReader {
 
         // Optional root encoding check — tolerate files without it
         if let Ok(root) = file.group("/") {
-            if let Ok(enc) = read_str_attr_on_group(&root, "encoding-type") {
+            if let Ok(enc) = read_str_attr(&root, "encoding-type") {
                 if !enc.is_empty() && enc != "anndata" {
                     return Err(ScxError::InvalidFormat(format!(
                         "not an AnnData file: root encoding-type = '{enc}'"
@@ -89,7 +90,7 @@ impl H5AdReader {
         } else {
             let grp = file.group(&base)?;
 
-            if let Ok(enc) = read_str_attr_on_group(&grp, "encoding-type") {
+            if let Ok(enc) = read_str_attr(&grp, "encoding-type") {
                 if enc == "csc_matrix" {
                     return Err(ScxError::InvalidFormat(format!(
                         "{base} is stored as CSC. Convert to CSR first: \
@@ -189,16 +190,6 @@ fn resolve_matrix_path(file: &File, layer: Option<&str>) -> Result<String> {
 // Reader helpers
 // ---------------------------------------------------------------------------
 
-fn read_str_attr_on_group(grp: &Group, name: &str) -> Result<String> {
-    let attr = grp.attr(name)?;
-    Ok(attr.read_scalar::<VarLenUnicode>()?.to_string())
-}
-
-fn read_str_attr_on_dataset(ds: &Dataset, name: &str) -> Result<String> {
-    let attr = ds.attr(name)?;
-    Ok(attr.read_scalar::<VarLenUnicode>()?.to_string())
-}
-
 pub(super) fn ad_detect_dtype(file: &File, path: &str) -> Result<DataType> {
     crate::h5::value_dtype(&file.dataset(path)?)
 }
@@ -246,10 +237,6 @@ fn ad_read_dense_chunk_with_dtype(
         nrows: row_end - row_start,
         data: dense_to_csr(values.as_slice().unwrap_or_default(), n_vars, dtype),
     })
-}
-
-fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
-    crate::h5_str::read_str_1d(&file.dataset(path)?)
 }
 
 /// Read a chunk [row_start, row_end) from a CSR matrix stored at /X/.
@@ -350,7 +337,7 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
     let grp = file.group(group_path)?;
 
     // Index dataset name from _index attr; fall back to "index"
-    let index_name = read_str_attr_on_group(&grp, "_index").unwrap_or_else(|_| "index".into());
+    let index_name = read_str_attr(&grp, "_index").unwrap_or_else(|_| "index".into());
     let index = ad_read_index(file, &format!("{group_path}/{index_name}"))?;
 
     // Column order from attribute
@@ -402,11 +389,11 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
 /// and a masked entry is an empty label either way.
 fn ad_read_index(file: &File, path: &str) -> Result<Vec<String>> {
     if file.dataset(path).is_ok() {
-        return ad_read_strings(file, path);
+        return read_strings(file, path);
     }
     let values = format!("{path}/values");
     if file.dataset(&values).is_ok() {
-        return ad_read_strings(file, &values);
+        return read_strings(file, &values);
     }
     Err(ScxError::InvalidFormat(format!(
         "index at '{path}' is neither a string dataset nor a nullable-string-array group"
@@ -417,10 +404,10 @@ fn ad_read_index(file: &File, path: &str) -> Result<Vec<String>> {
 fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
     let ds = file.dataset(path)?;
     // Prefer encoding-type attr; fall back to HDF5 dtype inspection
-    let enc = read_str_attr_on_dataset(&ds, "encoding-type").unwrap_or_default();
+    let enc = read_str_attr(&ds, "encoding-type").unwrap_or_default();
 
     if enc == "string-array" {
-        return Ok(ColumnData::String(ad_read_strings(file, path)?));
+        return Ok(ColumnData::String(read_strings(file, path)?));
     }
 
     match ds.dtype()?.to_descriptor()? {
@@ -443,7 +430,7 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
         }
         TypeDescriptor::Integer(_) => Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec())),
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
-            Ok(ColumnData::String(ad_read_strings(file, path)?))
+            Ok(ColumnData::String(read_strings(file, path)?))
         }
         other => Err(ScxError::InvalidFormat(format!(
             "unsupported column dtype {:?} at '{path}'",
@@ -489,7 +476,7 @@ pub(super) fn ad_read_categorical(file: &File, grp_path: &str) -> Result<(Column
 fn ad_read_levels(file: &File, path: &str) -> Result<Vec<String>> {
     let ds = file.dataset(path)?;
     match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => ad_read_strings(file, path),
+        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => read_strings(file, path),
         TypeDescriptor::Integer(IntSize::U1) => {
             Ok(ds.read_1d::<i8>()?.iter().map(|v| v.to_string()).collect())
         }

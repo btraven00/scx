@@ -1,6 +1,6 @@
 use super::reader::ad_read_categorical;
-use super::writer::write_vlen_str_dataset;
 use super::*;
+use crate::h5_str::write_strings;
 use futures::StreamExt;
 use hdf5::types::VarLenUnicode;
 use hdf5::File;
@@ -818,7 +818,7 @@ fn test_categorical_string_levels_unchanged() {
         .unwrap()
         .write(&Array1::from_vec(vec![0i8, 1, 0]))
         .unwrap();
-    write_vlen_str_dataset(&grp, "categories", &["a".into(), "b".into()]).unwrap();
+    write_strings(&grp, "categories", &["a".into(), "b".into()]).unwrap();
     match ad_read_categorical(&file, "col").unwrap().0 {
         ColumnData::Categorical { codes, levels } => {
             assert_eq!(levels, vec!["a", "b"]);
@@ -1322,7 +1322,7 @@ fn write_nullable_string_h5ad(path: &std::path::Path) {
         let g = parent.create_group(name).unwrap();
         enc(&g, "nullable-string-array");
         let owned: Vec<String> = vals.iter().map(|s| s.to_string()).collect();
-        write_vlen_str_dataset(&g, "values", &owned).unwrap();
+        write_strings(&g, "values", &owned).unwrap();
         let m = g
             .new_dataset::<bool>()
             .shape(mask.len())

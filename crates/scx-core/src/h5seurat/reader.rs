@@ -8,6 +8,7 @@ use hdf5::types::{TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 
 use crate::h5::{read_csr_rows, read_u64, value_dtype};
+use crate::h5_str::read_strings;
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -223,24 +224,6 @@ fn list_layer_groups(file: &File, assay: &str) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-fn read_strings(file: &File, path: &str) -> Result<Vec<String>> {
-    let ds = file.dataset(path)?;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::VarLenUnicode => {
-            let raw: ndarray::Array1<VarLenUnicode> = ds.read_1d()?;
-            Ok(raw.into_iter().map(|s| s.to_string()).collect())
-        }
-        TypeDescriptor::VarLenAscii => {
-            let raw: ndarray::Array1<hdf5::types::VarLenAscii> = ds.read_1d()?;
-            Ok(raw.into_iter().map(|s| s.to_string()).collect())
-        }
-        other => Err(ScxError::InvalidFormat(format!(
-            "unsupported string type {:?} at '{path}'",
-            other
-        ))),
-    }
 }
 
 fn read_obs_sync(path: &Path) -> Result<ObsTable> {

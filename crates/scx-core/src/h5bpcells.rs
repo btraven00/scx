@@ -13,7 +13,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use hdf5::types::{VarLenAscii, VarLenUnicode};
+use hdf5::types::VarLenUnicode;
 use hdf5::{Dataset, File, Group, SimpleExtents};
 use ndarray::{s, Array1};
 
@@ -22,6 +22,7 @@ use crate::bpcells::{
 };
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
+use crate::h5_str::{read_str_attr, read_strings, write_str_attr, write_strings};
 use crate::ir::{Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
 use crate::stream::DatasetWriter;
 use ndarray::Array2;
@@ -72,36 +73,12 @@ fn read_f64s(grp: &Group, name: &str) -> Result<Vec<f64>> {
     Ok(arr.to_vec())
 }
 
-/// Read a 1-D string dataset (variable-length Unicode or ASCII).
-fn read_strings(grp: &Group, name: &str) -> Result<Vec<String>> {
-    let ds = grp.dataset(name).map_err(|e| {
-        ScxError::InvalidFormat(format!("BPCells HDF5: missing dataset '{name}': {e}"))
-    })?;
-    crate::h5_str::read_str_1d(&ds)
-        .map_err(|e| ScxError::InvalidFormat(format!("reading '{name}': {e}")))
-}
-
 /// Read the scalar `"version"` attribute from the group.
 ///
 /// BPCells R writes this as an H5S_SCALAR variable-length UTF-8 string.
 /// Other tools may write it as a 1-D array of length 1. Try both.
 pub fn read_version_attr(grp: &Group) -> Option<String> {
-    let attr = grp.attr("version").ok()?;
-    // Scalar (BPCells R / C++ native path)
-    if let Ok(s) = attr.read_scalar::<VarLenUnicode>() {
-        return Some(s.to_string());
-    }
-    if let Ok(s) = attr.read_scalar::<VarLenAscii>() {
-        return Some(s.to_string());
-    }
-    // 1-D array fallback
-    if let Ok(arr) = attr.read_1d::<VarLenUnicode>() {
-        return arr.into_iter().next().map(|s| s.to_string());
-    }
-    if let Ok(arr) = attr.read_1d::<VarLenAscii>() {
-        return arr.into_iter().next().map(|s| s.to_string());
-    }
-    None
+    read_str_attr(grp, "version").ok()
 }
 
 /// Write a 1-D uint32 dataset into an HDF5 group, replacing any existing one.
@@ -168,62 +145,6 @@ fn write_f64s(grp: &Group, name: &str, values: &[f64]) -> Result<()> {
     Ok(())
 }
 
-/// Write a 1-D UTF-8 string dataset into an HDF5 group, replacing any existing one.
-fn write_strings(grp: &Group, name: &str, values: &[String]) -> Result<()> {
-    if grp.link_exists(name) {
-        grp.unlink(name).map_err(|e| {
-            ScxError::InvalidFormat(format!(
-                "BPCells HDF5: removing existing dataset '{name}': {e}"
-            ))
-        })?;
-    }
-    let vals: Vec<VarLenUnicode> = values
-        .iter()
-        .map(|s| {
-            <VarLenUnicode as std::str::FromStr>::from_str(s).map_err(|e| {
-                ScxError::InvalidFormat(format!(
-                    "BPCells HDF5: invalid UTF-8 string for '{name}': {e}"
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    grp.new_dataset_builder()
-        .with_data(&vals)
-        .create(name)
-        .map_err(|e| ScxError::InvalidFormat(format!("BPCells HDF5: creating '{name}': {e}")))?;
-    Ok(())
-}
-
-/// Write the scalar `version` attribute on a BPCells HDF5 group.
-fn write_version_attr(grp: &Group, version: &str) -> Result<()> {
-    if grp.attr("version").is_ok() {
-        grp.attr("version")
-            .and_then(|a| {
-                a.write_scalar(
-                    &<VarLenUnicode as std::str::FromStr>::from_str(version).map_err(|e| {
-                        hdf5::Error::Internal(format!("invalid version string: {e}"))
-                    })?,
-                )
-            })
-            .map_err(|e| {
-                ScxError::InvalidFormat(format!("BPCells HDF5: writing 'version' attr: {e}"))
-            })?;
-        return Ok(());
-    }
-
-    let v = <VarLenUnicode as std::str::FromStr>::from_str(version).map_err(|e| {
-        ScxError::InvalidFormat(format!("BPCells HDF5: invalid version string: {e}"))
-    })?;
-    grp.new_attr::<VarLenUnicode>()
-        .shape(())
-        .create("version")
-        .and_then(|a| a.write_scalar(&v))
-        .map_err(|e| {
-            ScxError::InvalidFormat(format!("BPCells HDF5: creating 'version' attr: {e}"))
-        })?;
-    Ok(())
-}
-
 /// Write a packed BPCells matrix into an HDF5 group.
 ///
 /// Indices and values are each one flat stream of 128-value BP-128 chunks.
@@ -271,18 +192,18 @@ pub fn write_bpcells_h5(
 
     match values {
         ValStore::Uint32(v) => {
-            write_version_attr(&grp, "packed-uint-matrix-v2")?;
+            write_str_attr(&grp, "version", "packed-uint-matrix-v2")?;
             let (val_data, val_idx) = encode_for(v);
             write_u32s(&grp, "val_data", &val_data)?;
             write_u32s(&grp, "val_idx", &wrap_idx(&val_idx))?;
             write_u64s(&grp, "val_idx_offsets", &idx_offsets(&val_idx))?;
         }
         ValStore::Float32(v) => {
-            write_version_attr(&grp, "packed-float-matrix-v2")?;
+            write_str_attr(&grp, "version", "packed-float-matrix-v2")?;
             write_f32s(&grp, "val", v)?;
         }
         ValStore::Float64(v) => {
-            write_version_attr(&grp, "packed-double-matrix-v2")?;
+            write_str_attr(&grp, "version", "packed-double-matrix-v2")?;
             write_f64s(&grp, "val", v)?;
         }
     }
@@ -391,11 +312,11 @@ impl BpSink for H5Sink {
     }
 
     fn put_strings(&mut self, name: &str, values: &[String]) -> Result<()> {
-        write_strings(&self.grp, name, values)
+        write_strings(&self.grp, name, values).map(drop)
     }
 
     fn put_version(&mut self, version: &str) -> Result<()> {
-        write_version_attr(&self.grp, version)
+        write_str_attr(&self.grp, "version", version)
     }
 }
 
@@ -877,7 +798,7 @@ impl DatasetWriter for BpcellsH5Writer {
         })?;
 
         let root = self.file.group("/")?;
-        crate::h5seurat::seurat_write_strings(&root, "cell.names", &obs.index)?;
+        write_strings(&root, "cell.names", &obs.index)?;
         let meta_grp = match self.file.group("meta.data") {
             Ok(g) => g,
             Err(_) => self.file.create_group("meta.data")?,
@@ -885,7 +806,7 @@ impl DatasetWriter for BpcellsH5Writer {
         crate::h5seurat::seurat_write_meta_cols(&meta_grp, &obs.columns)?;
 
         let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
-        crate::h5seurat::seurat_write_strings(&assay_grp, "features", &var.index)?;
+        write_strings(&assay_grp, "features", &var.index)?;
         if !var.columns.is_empty() {
             let mf_grp = match assay_grp.group("meta.features") {
                 Ok(g) => g,
