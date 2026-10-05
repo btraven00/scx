@@ -8,6 +8,11 @@
     "crates/scx-cli": {
       "release-type": "rust",
       "package-name": "scx-cli"
+    },
+    "python/picklerick": {
+      "release-type": "rust",
+      "package-name": "picklerick-py-native",
+      "component": "picklerick"
     }
   },
   "plugins": [
@@ -15,7 +20,11 @@
     {
       "type": "linked-versions",
       "groupName": "scx",
-      "components": ["scx-core", "scx-cli"]
+      "components": [
+        "scx-core",
+        "scx-cli",
+        "picklerick"
+      ]
     }
   ]
 }

@@ -1,51 +1,34 @@
 # Releasing
 
-## scx-core and scx-cli
+## scx-core, scx-cli and scx-picklerick
 
-These two crates are released by release-please (`release-please-config.json`).
-Their versions are linked. After CI passes on `main`, release-please keeps a
-release PR up to date. Merging that PR creates the tag and the GitHub release,
-and builds the CLI binaries (`.github/workflows/release-please.yml`). Tags
-starting with `v` also publish the conda packages to prefix.dev
-(`.github/workflows/conda-package.yml`).
+The two crates and the Python package are released together by release-please
+(`release-please-config.json`), with linked versions: one number means one
+engine across the CLI, Python and (later) R. After CI passes on `main`,
+release-please keeps a release PR up to date; its changelog entries come from
+the conventional-commit subjects. Merging it bumps every version, creates the
+GitHub releases and tags (`scx-core-vX.Y.Z`, `scx-cli-vX.Y.Z`,
+`picklerick-vX.Y.Z`) and builds the CLI binaries
+(`.github/workflows/release-please.yml`). Tags starting with `v` also publish
+the conda packages to prefix.dev (`.github/workflows/conda-package.yml`).
 
-## Python package (`scx-picklerick` on PyPI)
+## Publishing scx-picklerick to PyPI
 
-The Python package is not managed by release-please. You release it by hand
-from a tag, using the wheels CI builds for that tag.
+The PyPI name is `scx-picklerick`; the import name is `picklerick`. Its
+version is `python/picklerick/Cargo.toml`, which release-please bumps
+(`pyproject.toml` declares `dynamic = ["version"]`). Upload is manual, from
+the wheels CI builds for the release tag.
 
-The PyPI name is `scx-picklerick`. The import name is still `picklerick`.
+### 1. Build the wheels for the tag
 
-### 1. Set the version
-
-Cargo is the only place the version is stored. `pyproject.toml` declares
-`dynamic = ["version"]`, and maturin converts the Cargo version to PEP 440:
-
-| `python/picklerick/Cargo.toml` | PyPI version |
-|---|---|
-| `0.1.0-alpha.1` | `0.1.0a1` |
-| `0.1.0-beta.2` | `0.1.0b2` |
-| `0.1.0-rc.1` | `0.1.0rc1` |
-| `0.1.0` | `0.1.0` |
+Tags that release-please creates with the default token don't trigger other
+workflows (GitHub prevents that), so start the wheel build by hand:
 
 ```sh
-$EDITOR python/picklerick/Cargo.toml        # version = "..."
-cargo check -p picklerick-py-native          # refreshes Cargo.lock
-git commit -am "picklerick: release 0.1.0a1"
+gh workflow run python.yml --ref picklerick-v0.4.0
 ```
 
-### 2. Tag and push
-
-```sh
-git tag picklerick-v0.1.0a1
-git push origin main picklerick-v0.1.0a1
-```
-
-The `picklerick-v*` prefix triggers `.github/workflows/python.yml`. It does not
-match the conda workflow's `v*` filter, so pushing this tag doesn't publish
-conda packages.
-
-The workflow builds these artifacts:
+`.github/workflows/python.yml` builds:
 
 - Linux x86_64 and aarch64 wheels (manylinux_2_28)
 - a macOS arm64 wheel
@@ -55,18 +38,18 @@ Each wheel is tested against anndata and h5py from PyPI. The wheels use the
 abi3 stable ABI, `cp314-abi3`, so one wheel per platform covers Python 3.14 and
 every later version.
 
-### 3. Download the artifacts
+### 2. Download the artifacts
 
 When the run is green, download the merged `dist` artifact:
 
 ```sh
-gh run list --workflow python.yml --branch picklerick-v0.1.0a1
+gh run list --workflow python.yml --branch picklerick-v0.4.0
 gh run download <run-id> -n dist -D dist/
 ls dist/            # expect 3 wheels + 1 sdist, all with the same version
 uvx twine check dist/*
 ```
 
-### 4. Publish
+### 3. Publish
 
 Use a PyPI API token scoped to the `scx-picklerick` project:
 
@@ -81,11 +64,11 @@ and token.
 uv publish --publish-url https://test.pypi.org/legacy/ --token pypi-... dist/*
 ```
 
-### 5. Verify
+### 4. Verify
 
 ```sh
 uv venv -p 3.14 /tmp/pk && . /tmp/pk/bin/activate
-uv pip install --pre scx-picklerick==0.1.0a1
+uv pip install scx-picklerick==0.4.0
 python -c "import picklerick as pk; print(pk.__version__)"
 ```
 
