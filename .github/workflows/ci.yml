@@ -65,6 +65,14 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         run: cargo test --all ${{ matrix.cargo_flags }}
 
+      # A workspace build unifies features across members, so a default feature
+      # of one crate can paper over a missing one in scx-core (zarrs used to
+      # switch on bytemuck's alloc feature for it). Downstream crates take
+      # scx-core alone with default-features = false; check exactly that.
+      - name: scx-core alone, no default features
+        if: matrix.hdf5 == 'system'
+        run: cargo check -p scx-core --no-default-features
+
   # Builds on the declared rust-version (Cargo.toml), so it can't drift.
   msrv:
     name: MSRV (1.91)
