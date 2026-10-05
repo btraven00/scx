@@ -3,6 +3,7 @@
 /output/
 # Local research exhaust / profiling output — never commit
 /scratch/
+tests/golden/*.h5
 tests/golden/*.h5seurat
 tests/golden/*.h5ad
 tests/golden/*.json

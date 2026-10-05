@@ -10,11 +10,9 @@ use tempfile::NamedTempFile;
 
 use crate::dtype::*;
 use crate::golden::golden;
-use crate::h5::ScxH5Reader;
 use crate::ir::*;
 use crate::stream::{DatasetReader, DatasetWriter};
 
-const GOLDEN: &str = "../../tests/golden/pbmc3k.h5";
 // Committed subset fixture (generate with scripts/prepare_norman_subset.py)
 const NORMAN_SUBSET: &str = "../../tests/fixtures/norman_subset.h5ad";
 
@@ -201,7 +199,10 @@ async fn test_h5ad_roundtrip() {
 /// Full round-trip: read PBMC 3k → write h5ad → verify structure
 #[tokio::test]
 async fn test_roundtrip_pbmc3k() {
-    let mut reader = ScxH5Reader::open(GOLDEN, 500).unwrap();
+    let Some(golden_file) = golden("pbmc3k_reference.h5ad") else {
+        return;
+    };
+    let mut reader = H5AdReader::open(&golden_file, 500).unwrap();
     let (n_obs, n_vars) = reader.shape();
 
     let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();

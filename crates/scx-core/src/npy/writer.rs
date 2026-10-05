@@ -169,7 +169,7 @@ impl NpyIrWriter {
     /// obs/var/obsm/varm/indptr buffers — independent of total nnz.
     ///
     /// Single-pass when the reader exposes a full `x_indptr` (h5ad, 10x HDF5,
-    /// SCX H5). Falls back to two-pass when it does not (BPCells, dense X):
+    /// H5Seurat). Falls back to two-pass when it does not (BPCells, dense X):
     /// pass 1 walks `x_stream` to build indptr, pass 2 writes data/indices.
     pub async fn stream(
         dir: &Path,
