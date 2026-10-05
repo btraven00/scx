@@ -379,3 +379,27 @@ async fn bpcells_rejects_negative_integers() {
     let err = w.write_x_chunk(&chunk).await.unwrap_err();
     assert!(err.to_string().contains("negative value (-1)"), "{err}");
 }
+
+/// anndata reads nullable groups whose `values`/`mask` lack `encoding-type`
+/// only with an OldFormatWarning; write them as anndata does.
+#[tokio::test]
+async fn h5ad_nullable_columns_carry_anndata_encodings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = out_path(dir.path(), Out::H5ad);
+    let mut reader = open(&tiny("tiny.h5ad"), "counts").await;
+    write(&mut *reader, Out::H5ad, &path).await;
+    let f = hdf5::File::open(&path).unwrap();
+    let enc = |p: &str| -> String {
+        f.dataset(p)
+            .unwrap()
+            .attr("encoding-type")
+            .unwrap()
+            .read_scalar::<hdf5::types::VarLenUnicode>()
+            .unwrap()
+            .to_string()
+    };
+    for col in ["batch", "flag"] {
+        assert_eq!(enc(&format!("obs/{col}/values")), "array", "{col}");
+        assert_eq!(enc(&format!("obs/{col}/mask")), "array", "{col}");
+    }
+}
