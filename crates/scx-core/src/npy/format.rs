@@ -166,11 +166,11 @@ pub(super) fn extract_header_shape(header: &str) -> Result<Vec<usize>> {
 // Byte-level helpers
 // ---------------------------------------------------------------------------
 
-pub(super) unsafe fn as_bytes<T>(v: &[T]) -> &[u8] {
-    std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v))
+pub(super) fn as_bytes<T: bytemuck::NoUninit>(v: &[T]) -> &[u8] {
+    bytemuck::cast_slice(v)
 }
 
-unsafe fn bytes_to_vec<T: Copy>(body: &[u8], n: usize) -> Result<Vec<T>> {
+fn bytes_to_vec<T: bytemuck::Pod>(body: &[u8], n: usize) -> Result<Vec<T>> {
     let elem = std::mem::size_of::<T>();
     if body.len() != n * elem {
         return Err(ScxError::InvalidFormat(format!(
@@ -179,76 +179,69 @@ unsafe fn bytes_to_vec<T: Copy>(body: &[u8], n: usize) -> Result<Vec<T>> {
             body.len()
         )));
     }
-    let mut v = vec![std::mem::zeroed::<T>(); n];
-    std::ptr::copy_nonoverlapping(body.as_ptr(), v.as_mut_ptr() as *mut u8, body.len());
-    Ok(v)
+    Ok(bytemuck::pod_collect_to_vec(body))
 }
 
 // ---------------------------------------------------------------------------
 // Low-level NPY write helpers
 // ---------------------------------------------------------------------------
 
-pub(super) fn npy_descr(tv: &TypedVec) -> &'static str {
-    match tv {
-        TypedVec::F32(_) => "<f4",
-        TypedVec::F64(_) => "<f8",
-        TypedVec::I32(_) => "<i4",
-        TypedVec::U32(_) => "<u4",
+pub(super) fn npy_descr(dtype: DataType) -> &'static str {
+    match dtype {
+        DataType::F32 => "<f4",
+        DataType::F64 => "<f8",
+        DataType::I32 => "<i4",
+        DataType::U32 => "<u4",
     }
 }
 
 pub(super) fn write_1d_typed(path: &Path, tv: &TypedVec) -> Result<()> {
     let n = tv.len();
     let mut w = BufWriter::new(File::create(path)?);
-    write_npy_header(&mut w, npy_descr(tv), &[n])?;
-    match tv {
-        TypedVec::F32(v) => w.write_all(unsafe { as_bytes(v.as_slice()) })?,
-        TypedVec::F64(v) => w.write_all(unsafe { as_bytes(v.as_slice()) })?,
-        TypedVec::I32(v) => w.write_all(unsafe { as_bytes(v.as_slice()) })?,
-        TypedVec::U32(v) => w.write_all(unsafe { as_bytes(v.as_slice()) })?,
-    }
+    write_npy_header(&mut w, npy_descr(tv.dtype()), &[n])?;
+    w.write_all(tv.as_le_bytes())?;
     Ok(())
 }
 
 pub(super) fn write_1d_u32(path: &Path, data: &[u32]) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     write_npy_header(&mut w, "<u4", &[data.len()])?;
-    w.write_all(unsafe { as_bytes(data) })?;
+    w.write_all(as_bytes(data))?;
     Ok(())
 }
 
 pub(super) fn write_1d_u64(path: &Path, data: &[u64]) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     write_npy_header(&mut w, "<u8", &[data.len()])?;
-    w.write_all(unsafe { as_bytes(data) })?;
+    w.write_all(as_bytes(data))?;
     Ok(())
 }
 
 pub(super) fn write_1d_i32(path: &Path, data: &[i32]) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     write_npy_header(&mut w, "<i4", &[data.len()])?;
-    w.write_all(unsafe { as_bytes(data) })?;
+    w.write_all(as_bytes(data))?;
     Ok(())
 }
 
 pub(super) fn write_1d_f64(path: &Path, data: &[f64]) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     write_npy_header(&mut w, "<f8", &[data.len()])?;
-    w.write_all(unsafe { as_bytes(data) })?;
+    w.write_all(as_bytes(data))?;
     Ok(())
 }
 
 pub(super) fn write_1d_bool(path: &Path, data: &[bool]) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     write_npy_header(&mut w, "|b1", &[data.len()])?;
-    w.write_all(unsafe { as_bytes(data) })?;
+    w.write_all(as_bytes(data))?;
     Ok(())
 }
 
 pub(super) fn write_2d_f64(path: &Path, data: &[f64], shape: (usize, usize)) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     write_npy_header(&mut w, "<f8", &[shape.0, shape.1])?;
-    w.write_all(unsafe { as_bytes(data) })?;
+    w.write_all(as_bytes(data))?;
     Ok(())
 }
 
@@ -285,19 +278,19 @@ pub(super) fn read_1d_typed(path: &Path, dtype: DataType) -> Result<TypedVec> {
     match dtype {
         DataType::F32 => {
             check_descr(&descr, "<f4", path)?;
-            Ok(TypedVec::F32(unsafe { bytes_to_vec::<f32>(body, n) }?))
+            Ok(TypedVec::F32(bytes_to_vec::<f32>(body, n)?))
         }
         DataType::F64 => {
             check_descr(&descr, "<f8", path)?;
-            Ok(TypedVec::F64(unsafe { bytes_to_vec::<f64>(body, n) }?))
+            Ok(TypedVec::F64(bytes_to_vec::<f64>(body, n)?))
         }
         DataType::I32 => {
             check_descr(&descr, "<i4", path)?;
-            Ok(TypedVec::I32(unsafe { bytes_to_vec::<i32>(body, n) }?))
+            Ok(TypedVec::I32(bytes_to_vec::<i32>(body, n)?))
         }
         DataType::U32 => {
             check_descr(&descr, "<u4", path)?;
-            Ok(TypedVec::U32(unsafe { bytes_to_vec::<u32>(body, n) }?))
+            Ok(TypedVec::U32(bytes_to_vec::<u32>(body, n)?))
         }
     }
 }
@@ -306,28 +299,28 @@ pub(super) fn read_1d_u32(path: &Path) -> Result<Vec<u32>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
     check_1d(&shape, path)?;
     check_descr(&descr, "<u4", path)?;
-    unsafe { bytes_to_vec::<u32>(&mmap[off..], shape[0]) }
+    bytes_to_vec::<u32>(&mmap[off..], shape[0])
 }
 
 pub(super) fn read_1d_u64(path: &Path) -> Result<Vec<u64>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
     check_1d(&shape, path)?;
     check_descr(&descr, "<u8", path)?;
-    unsafe { bytes_to_vec::<u64>(&mmap[off..], shape[0]) }
+    bytes_to_vec::<u64>(&mmap[off..], shape[0])
 }
 
 pub(super) fn read_1d_i32(path: &Path) -> Result<Vec<i32>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
     check_1d(&shape, path)?;
     check_descr(&descr, "<i4", path)?;
-    unsafe { bytes_to_vec::<i32>(&mmap[off..], shape[0]) }
+    bytes_to_vec::<i32>(&mmap[off..], shape[0])
 }
 
 pub(super) fn read_1d_f64(path: &Path) -> Result<Vec<f64>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
     check_1d(&shape, path)?;
     check_descr(&descr, "<f8", path)?;
-    unsafe { bytes_to_vec::<f64>(&mmap[off..], shape[0]) }
+    bytes_to_vec::<f64>(&mmap[off..], shape[0])
 }
 
 pub(super) fn read_1d_bool(path: &Path) -> Result<Vec<bool>> {
@@ -356,7 +349,7 @@ pub(super) fn read_2d_f64(path: &Path) -> Result<DenseMatrix> {
     }
     check_descr(&descr, "<f8", path)?;
     let (nrows, ncols) = (shape[0], shape[1]);
-    let data = unsafe { bytes_to_vec::<f64>(&mmap[off..], nrows * ncols) }?;
+    let data = bytes_to_vec::<f64>(&mmap[off..], nrows * ncols)?;
     Ok(DenseMatrix {
         shape: (nrows, ncols),
         data,
@@ -470,7 +463,7 @@ pub(super) fn sparse_meta(csr: &SparseMatrixCSR, dtype: DataType) -> SparseArray
     SparseArrayMeta {
         shape: [csr.shape.0, csr.shape.1],
         nnz: csr.indices.len(),
-        dtype: dtype_str(dtype).to_string(),
+        dtype: dtype.code().to_string(),
     }
 }
 

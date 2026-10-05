@@ -3,11 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    dtype::DataType,
-    error::{Result, ScxError},
-    ir::ColumnData,
-};
+use crate::ir::ColumnData;
 
 // ---------------------------------------------------------------------------
 // Slot filter
@@ -128,27 +124,6 @@ pub(super) struct Meta {
     pub(super) uns: Option<bool>,
 }
 
-pub(super) fn dtype_str(dt: DataType) -> &'static str {
-    match dt {
-        DataType::F32 => "f32",
-        DataType::F64 => "f64",
-        DataType::I32 => "i32",
-        DataType::U32 => "u32",
-    }
-}
-
-pub(super) fn parse_dtype(s: &str) -> Result<DataType> {
-    match s {
-        "f32" => Ok(DataType::F32),
-        "f64" => Ok(DataType::F64),
-        "i32" => Ok(DataType::I32),
-        "u32" => Ok(DataType::U32),
-        other => Err(ScxError::InvalidFormat(format!(
-            "unknown dtype in meta.json: {other}"
-        ))),
-    }
-}
-
 pub(super) fn col_kind(data: &ColumnData) -> &'static str {
     match data {
         ColumnData::Int(_) => "int",
@@ -191,14 +166,6 @@ pub(super) fn varp_key_dir(root: &Path, k: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dtype_str_roundtrips_through_parse_dtype() {
-        for dt in [DataType::F32, DataType::F64, DataType::I32, DataType::U32] {
-            assert_eq!(parse_dtype(dtype_str(dt)).unwrap(), dt);
-        }
-        assert!(parse_dtype("nope").is_err());
-    }
 
     #[test]
     fn col_kind_all_variants() {

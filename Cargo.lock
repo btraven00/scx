@@ -3644,6 +3644,7 @@ dependencies = [
  "arrow",
  "async-stream",
  "async-trait",
+ "bytemuck",
  "chrono",
  "criterion",
  "flate2",

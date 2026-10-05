@@ -539,7 +539,7 @@ async fn run() -> anyhow::Result<()> {
                 _ => SlotFilter::all(),
             };
 
-            let out_dtype = parse_dtype(&dtype)?;
+            let out_dtype = dtype.parse::<DataType>()?;
 
             let input_path = Path::new(&input);
             let output_path = Path::new(&output);
@@ -726,7 +726,7 @@ async fn run() -> anyhow::Result<()> {
                 index_unique,
                 merge: merge.parse()?,
                 chunk_size,
-                dtype: parse_dtype(&dtype)?,
+                dtype: dtype.parse::<DataType>()?,
                 compress,
             };
             let (n_obs, n_vars) =
@@ -763,16 +763,6 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn parse_dtype(s: &str) -> anyhow::Result<DataType> {
-    match s {
-        "f32" => Ok(DataType::F32),
-        "f64" => Ok(DataType::F64),
-        "i32" => Ok(DataType::I32),
-        "u32" => Ok(DataType::U32),
-        other => anyhow::bail!("unknown dtype '{other}': use f32, f64, i32, u32"),
-    }
 }
 
 /// Remove a file or directory if it exists.

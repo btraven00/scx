@@ -20,16 +20,6 @@ fn py_err<E: std::fmt::Display>(e: E) -> PyErr {
     PickleRickError::new_err(e.to_string())
 }
 
-fn parse_dtype(dtype: &str) -> anyhow::Result<DataType> {
-    match dtype {
-        "f32" => Ok(DataType::F32),
-        "f64" => Ok(DataType::F64),
-        "i32" => Ok(DataType::I32),
-        "u32" => Ok(DataType::U32),
-        other => anyhow::bail!("unknown dtype '{other}': use f32, f64, i32, or u32"),
-    }
-}
-
 fn open_reader(path: &str, opts: scx_core::OpenOptions) -> anyhow::Result<Box<dyn DatasetReader>> {
     Ok(block_on(scx_core::open(path, &opts))?)
 }
@@ -129,7 +119,7 @@ fn scx_convert(
     layer: &str,
 ) -> PyResult<()> {
     let run = || -> anyhow::Result<()> {
-        let dtype = parse_dtype(dtype)?;
+        let dtype = dtype.parse::<DataType>()?;
         let mut reader = open_reader(input, stream_opts(chunk_size, assay, layer))?;
         let (n_obs, n_vars) = reader.shape();
         let layer_metas = block_on(reader.layer_metas())?;

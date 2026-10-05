@@ -339,7 +339,7 @@ fn read_x_data(file: &File, base: &str, a: usize, b: usize, dtype: DataType) -> 
     if stored_bytes == want_bytes && stored_float == want_float {
         if let Some(plan) = h5_chunk::chunk_plan(&ds) {
             let raw = h5_chunk::read_range_parallel(&ds, a, b, want_bytes, plan)?;
-            return Ok(bytes_to_typed(&raw, dtype));
+            return TypedVec::from_le_bytes(dtype, &raw);
         }
     }
     Ok(match dtype {
@@ -348,40 +348,6 @@ fn read_x_data(file: &File, base: &str, a: usize, b: usize, dtype: DataType) -> 
         DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![a..b])?.to_vec()),
         DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![a..b])?.to_vec()),
     })
-}
-
-/// Reinterpret little-endian raw bytes as a `TypedVec` of the given dtype.
-fn bytes_to_typed(b: &[u8], dtype: DataType) -> TypedVec {
-    match dtype {
-        DataType::F32 => TypedVec::F32(
-            b.as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&c| f32::from_le_bytes(c))
-                .collect(),
-        ),
-        DataType::F64 => TypedVec::F64(
-            b.as_chunks::<8>()
-                .0
-                .iter()
-                .map(|&c| f64::from_le_bytes(c))
-                .collect(),
-        ),
-        DataType::I32 => TypedVec::I32(
-            b.as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&c| i32::from_le_bytes(c))
-                .collect(),
-        ),
-        DataType::U32 => TypedVec::U32(
-            b.as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&c| u32::from_le_bytes(c))
-                .collect(),
-        ),
-    }
 }
 
 fn ad_read_chunk(

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use futures::StreamExt;
 
 use crate::{
-    dtype::{DataType, TypedVec},
+    dtype::DataType,
     error::{Result, ScxError},
     ir::{ColumnData, SingleCellDataset, SparseMatrixMeta},
     stream::DatasetReader,
@@ -302,7 +302,7 @@ impl NpyIrWriter {
             meta.x = Some(SparseArrayMeta {
                 shape: [n_obs, n_vars],
                 nnz,
-                dtype: dtype_str(x_dtype).to_string(),
+                dtype: x_dtype.code().to_string(),
             });
         }
 
@@ -326,7 +326,7 @@ impl NpyIrWriter {
                 SparseArrayMeta {
                     shape: [lmeta.shape.0, lmeta.shape.1],
                     nnz,
-                    dtype: dtype_str(x_dtype).to_string(),
+                    dtype: x_dtype.code().to_string(),
                 },
             );
         }
@@ -350,7 +350,7 @@ impl NpyIrWriter {
                 SparseArrayMeta {
                     shape: [ometa.shape.0, ometa.shape.1],
                     nnz,
-                    dtype: dtype_str(x_dtype).to_string(),
+                    dtype: x_dtype.code().to_string(),
                 },
             );
         }
@@ -370,24 +370,6 @@ impl NpyIrWriter {
 // Streaming sparse-write helpers
 // ---------------------------------------------------------------------------
 
-fn dtype_npy_descr(d: DataType) -> &'static str {
-    match d {
-        DataType::F32 => "<f4",
-        DataType::F64 => "<f8",
-        DataType::I32 => "<i4",
-        DataType::U32 => "<u4",
-    }
-}
-
-fn write_typed_bytes<W: Write>(w: &mut W, tv: &TypedVec) -> io::Result<()> {
-    match tv {
-        TypedVec::F32(v) => w.write_all(unsafe { as_bytes(v.as_slice()) }),
-        TypedVec::F64(v) => w.write_all(unsafe { as_bytes(v.as_slice()) }),
-        TypedVec::I32(v) => w.write_all(unsafe { as_bytes(v.as_slice()) }),
-        TypedVec::U32(v) => w.write_all(unsafe { as_bytes(v.as_slice()) }),
-    }
-}
-
 /// Open data.npy + indices.npy with sized headers for a known nnz.
 /// Caller appends raw bytes per chunk, then drops the writers to flush.
 fn open_sparse_writers(
@@ -398,7 +380,7 @@ fn open_sparse_writers(
     fs::create_dir_all(dir)?;
     let mut data_w = BufWriter::new(File::create(dir.join("data.npy"))?);
     let mut idx_w = BufWriter::new(File::create(dir.join("indices.npy"))?);
-    write_npy_header(&mut data_w, dtype_npy_descr(x_dtype), &[nnz])?;
+    write_npy_header(&mut data_w, npy_descr(x_dtype), &[nnz])?;
     write_npy_header(&mut idx_w, "<u4", &[nnz])?;
     Ok((data_w, idx_w))
 }
@@ -449,8 +431,8 @@ async fn stream_csr_x(
     let mut written = 0usize;
     while let Some(chunk) = s.next().await {
         let chunk = chunk?;
-        idx_w.write_all(unsafe { as_bytes(chunk.data.indices.as_slice()) })?;
-        write_typed_bytes(&mut data_w, &chunk.data.data)?;
+        idx_w.write_all(as_bytes(&chunk.data.indices))?;
+        data_w.write_all(chunk.data.data.as_le_bytes())?;
         written += chunk.data.indices.len();
     }
     drop(s);
@@ -478,8 +460,8 @@ async fn stream_csr_layer(
     let mut s = reader.layer_stream(meta, chunk_size);
     while let Some(chunk) = s.next().await {
         let chunk = chunk?;
-        idx_w.write_all(unsafe { as_bytes(chunk.data.indices.as_slice()) })?;
-        write_typed_bytes(&mut data_w, &chunk.data.data)?;
+        idx_w.write_all(as_bytes(&chunk.data.indices))?;
+        data_w.write_all(chunk.data.data.as_le_bytes())?;
     }
     Ok(nnz)
 }
@@ -499,8 +481,8 @@ async fn stream_csr_obsp(
     let mut s = reader.obsp_stream(meta, chunk_size);
     while let Some(chunk) = s.next().await {
         let chunk = chunk?;
-        idx_w.write_all(unsafe { as_bytes(chunk.data.indices.as_slice()) })?;
-        write_typed_bytes(&mut data_w, &chunk.data.data)?;
+        idx_w.write_all(as_bytes(&chunk.data.indices))?;
+        data_w.write_all(chunk.data.data.as_le_bytes())?;
     }
     Ok(nnz)
 }

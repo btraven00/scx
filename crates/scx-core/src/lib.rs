@@ -1,3 +1,8 @@
+// The raw-byte paths (HDF5 chunk fast path, NPY) treat buffers as
+// little-endian values in place.
+#[cfg(target_endian = "big")]
+compile_error!("scx-core assumes a little-endian target");
+
 pub mod api;
 pub mod bpcells;
 pub mod concat;
