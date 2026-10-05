@@ -10,7 +10,6 @@ use std::path::Path;
 use crate::bpcells::BpcellsDatasetReader;
 use crate::detect::{self, Format};
 use crate::error::{Result, ScxError};
-use crate::h5::ScxH5Reader;
 use crate::h5ad::H5AdReader;
 use crate::h5seurat::open_h5seurat;
 use crate::npy::NpyIrReader;
@@ -73,7 +72,6 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
 
     let reader: Box<dyn DatasetReader + Send> = match fmt {
         Format::H5Ad => Box::new(H5AdReader::open(path, cs)?),
-        Format::ScxH5 => Box::new(ScxH5Reader::open(path, cs)?),
         Format::TenxH5 => Box::new(TenxH5Reader::open(path, cs)?),
         Format::Mtx => Box::new(crate::mtx::MtxReader::open(path, cs)?),
         Format::NpyDir => Box::new(NpyIrReader::open(path, cs)?),

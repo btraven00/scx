@@ -33,7 +33,7 @@ pixi run bench                 # cargo bench, all groups
 cargo bench -p scx-core --bench conversion -- stream_chunk_size   # one group
 ```
 
-- `conversion.rs` — ScxH5 read / roundtrip / npy / metadata throughput.
+- `conversion.rs` — h5ad read / roundtrip / npy / metadata throughput (PBMC 3k golden h5ad).
 - `h5_read.rs` — h5ad X decode throughput; guards the parallel-inflate path
   (`h5_chunk.rs`). A regression here means the deflate-only fast path broke or
   silently fell back to the single-threaded HDF5 read.

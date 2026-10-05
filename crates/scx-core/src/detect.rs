@@ -6,7 +6,6 @@
 //! |----------|-------------|
 //! | H5AD     | Root attr `encoding-type = "anndata"` |
 //! | H5Seurat | Root dataset `cell.names` + root attr `active.assay` |
-//! | ScxH5    | Root dataset `X/shape` (SCX internal golden fixture schema) |
 //! | TenxH5   | `/matrix` group with `/matrix/barcodes` + `/matrix/features` |
 //! | ZarrAd   | Directory with `.zgroup` (Zarr v2) or `zarr.json` (Zarr v3)      |
 //! | PlainH5  | Any valid HDF5 file not matching the above |
@@ -22,7 +21,6 @@ pub enum Format {
     H5Ad,
     H5Seurat,
     /// SCX internal HDF5 schema (golden test fixtures).
-    ScxH5,
     /// NPY snapshot directory (contains `meta.json`).
     NpyDir,
     /// BPCells directory-format matrix (contains `version` + `storage_order`).
@@ -44,7 +42,6 @@ impl Format {
         match self {
             Format::H5Ad => "H5AD",
             Format::H5Seurat => "H5Seurat",
-            Format::ScxH5 => "ScxH5",
             Format::NpyDir => "NpyDir",
             Format::BPCells => "BPCells",
             Format::TenxH5 => "10x HDF5",
@@ -57,7 +54,7 @@ impl Format {
 }
 
 /// Full format detection: directory markers first, then HDF5 content sniffing,
-/// then an extension-based fallback (defaulting to the internal ScxH5 schema).
+/// then the file extension; `None` when nothing matches.
 ///
 /// This is the chain every consumer (CLI subcommands, the Python/R bindings)
 /// used to inline; use it — or the higher-level [`crate::open`] factory — rather
@@ -70,7 +67,7 @@ pub fn detect(path: &Path) -> Option<Format> {
             Some("h5seurat") => Some(Format::H5Seurat),
             Some("h5ad") => Some(Format::H5Ad),
             Some("parquet") => Some(Format::Parquet),
-            _ => Some(Format::ScxH5),
+            _ => None,
         })
 }
 
@@ -181,13 +178,6 @@ pub fn sniff(path: &Path) -> Option<Format> {
         return Some(Format::H5Seurat);
     }
 
-    // --- SCX internal ---
-    // Our golden fixture schema stores /X/shape as a dataset (distinct from
-    // H5AD which stores shape as an *attribute* on the /X group).
-    if file.dataset("X/shape").is_ok() {
-        return Some(Format::ScxH5);
-    }
-
     // --- 10x Genomics HDF5 ---
     // Cell Ranger writes a /matrix group containing /matrix/barcodes plus feature
     // names. v3+ uses a /matrix/features *group*; v2 used a flat /matrix/genes
@@ -209,8 +199,6 @@ mod tests {
 
     use crate::golden::golden;
 
-    const SCX_H5: &str = "../../tests/golden/pbmc3k.h5";
-
     #[test]
     fn test_sniff_h5seurat() {
         let Some(golden_file) = golden("pbmc3k.h5seurat") else {
@@ -220,17 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sniff_scx_h5() {
-        assert_eq!(sniff(Path::new(SCX_H5)), Some(Format::ScxH5));
-    }
-
-    #[test]
     fn detect_extension_fallback() {
         // Nonexistent paths: sniff_dir/sniff fail, so the extension decides.
         assert_eq!(detect(Path::new("x.h5ad")), Some(Format::H5Ad));
         assert_eq!(detect(Path::new("x.h5seurat")), Some(Format::H5Seurat));
         assert_eq!(detect(Path::new("x.parquet")), Some(Format::Parquet));
-        assert_eq!(detect(Path::new("x.unknown")), Some(Format::ScxH5));
+        assert_eq!(detect(Path::new("x.unknown")), None);
     }
 
     #[test]

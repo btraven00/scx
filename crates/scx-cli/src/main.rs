@@ -11,7 +11,6 @@ use scx_core::{
     detect,
     detect::Format,
     dtype::DataType,
-    h5::ScxH5Reader,
     h5ad::{H5AdReader, H5AdWriter},
     h5bpcells::BpcellsH5Writer,
     h5seurat::{open_h5seurat, H5SeuratWriter},
@@ -472,10 +471,7 @@ async fn run() -> anyhow::Result<()> {
                     }
                     inspect(&mut r, &input, "H5AD").await?;
                 }
-                Some(Format::ScxH5) | None => {
-                    let mut r = ScxH5Reader::open(input_path, chunk)?;
-                    inspect(&mut r, &input, "SCX H5").await?;
-                }
+                None => anyhow::bail!("could not detect the format of '{input}'"),
                 Some(Format::TenxH5) => {
                     let mut r = TenxH5Reader::open(input_path, chunk)?;
                     inspect(&mut r, &input, "10x HDF5").await?;

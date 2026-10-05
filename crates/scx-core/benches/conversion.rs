@@ -5,14 +5,14 @@ use tokio::runtime::Builder;
 
 use scx_core::{
     dtype::{DataType, TypedVec},
-    h5::ScxH5Reader,
-    h5ad::H5AdWriter,
+    h5ad::{H5AdReader, H5AdWriter},
     ir::{SingleCellDataset, SparseMatrixCSR},
     npy::{NpyIrReader, NpyIrWriter, SlotFilter},
     stream::{DatasetReader, DatasetWriter},
 };
 
-const GOLDEN: &str = "../../tests/golden/pbmc3k.h5";
+// PBMC 3k as h5ad; gitignored, built by `pixi run -e test fixtures`.
+const GOLDEN: &str = "../../tests/golden/pbmc3k_reference.h5ad";
 
 fn golden_exists() -> bool {
     std::path::Path::new(GOLDEN).exists()
@@ -30,7 +30,7 @@ fn bench_stream_chunk_sizes(c: &mut Criterion) {
 
     // Probe n_obs and total nnz once for throughput annotation
     let (n_obs, total_nnz) = rt.block_on(async {
-        let mut r = ScxH5Reader::open(GOLDEN, 1000).unwrap();
+        let mut r = H5AdReader::open(GOLDEN, 1000).unwrap();
         let (n_obs, _) = r.shape();
         let mut nnz = 0usize;
         let mut s = r.x_stream();
@@ -49,7 +49,7 @@ fn bench_stream_chunk_sizes(c: &mut Criterion) {
             &chunk_size,
             |b, &chunk_size| {
                 b.to_async(&rt).iter(|| async move {
-                    let mut reader = ScxH5Reader::open(GOLDEN, chunk_size).unwrap();
+                    let mut reader = H5AdReader::open(GOLDEN, chunk_size).unwrap();
                     let mut stream = reader.x_stream();
                     let mut n = 0usize;
                     while let Some(chunk) = stream.next().await {
@@ -73,7 +73,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 
     let rt = Builder::new_multi_thread().enable_all().build().unwrap();
     let (n_obs, n_vars) = rt.block_on(async {
-        let r = ScxH5Reader::open(GOLDEN, 1000).unwrap();
+        let r = H5AdReader::open(GOLDEN, 1000).unwrap();
         r.shape()
     });
 
@@ -90,7 +90,7 @@ fn bench_roundtrip(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async move {
                     let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
 
-                    let mut reader = ScxH5Reader::open(GOLDEN, chunk_size).unwrap();
+                    let mut reader = H5AdReader::open(GOLDEN, chunk_size).unwrap();
                     let obs = reader.obs().await.unwrap();
                     let var = reader.var().await.unwrap();
                     let obsm = reader.obsm().await.unwrap();
@@ -150,7 +150,7 @@ fn bench_metadata_read(c: &mut Criterion) {
 
     c.bench_function("metadata_read", |b| {
         b.to_async(&rt).iter(|| async {
-            let mut reader = ScxH5Reader::open(GOLDEN, 1000).unwrap();
+            let mut reader = H5AdReader::open(GOLDEN, 1000).unwrap();
             let _ = reader.obs().await.unwrap();
             let _ = reader.var().await.unwrap();
             let _ = reader.obsm().await.unwrap();
@@ -162,10 +162,10 @@ fn bench_metadata_read(c: &mut Criterion) {
 // NPY snapshot benchmarks
 // ---------------------------------------------------------------------------
 
-/// Materialise the golden ScxH5 fixture into a SingleCellDataset.
+/// Materialise the PBMC 3k golden h5ad into a SingleCellDataset.
 /// Called once per benchmark function (outside the timing loop).
 async fn materialise_golden() -> (SingleCellDataset, usize) {
-    let mut reader = ScxH5Reader::open(GOLDEN, 5000).unwrap();
+    let mut reader = H5AdReader::open(GOLDEN, 5000).unwrap();
     let (n_obs, n_vars) = reader.shape();
     let x_dtype = reader.dtype();
     let obs = reader.obs().await.unwrap();
@@ -173,7 +173,7 @@ async fn materialise_golden() -> (SingleCellDataset, usize) {
     let obsm = reader.obsm().await.unwrap();
     let uns = reader.uns().await.unwrap();
     let varm = reader.varm().await.unwrap();
-    // ScxH5 has no layers/obsp; default to empty.
+    // Layers and obsp aren't part of these benchmarks.
     let layers = scx_core::ir::Layers::default();
     let obsp = scx_core::ir::Obsp::default();
     let varp = scx_core::ir::Varp::default();

@@ -7,7 +7,8 @@
 # Uses hdf5r which writes variable-length UTF-8 strings — compatible with
 # the hdf5 Rust crate's VarLenUnicode type.
 #
-# Output:
+# Output (an intermediate: prepare_h5seurat_test.R builds pbmc3k.h5seurat
+# from it; scx itself no longer reads this layout):
 #   tests/golden/pbmc3k.h5
 #   tests/golden/pbmc3k_meta.json
 #
