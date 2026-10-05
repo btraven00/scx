@@ -461,10 +461,17 @@ fn write_nullable<T: hdf5::H5Type>(
 ) -> Result<Group> {
     let g = grp.create_group(name)?;
     write_encoding_on_group(&g, encoding, "0.1.0")?;
-    write_1d(&g, "values", values, compression)?;
-    let missing: Vec<bool> = mask.iter().map(|&present| !present).collect();
-    write_1d(&g, "mask", Array1::from_vec(missing), compression)?;
+    let ds = write_1d(&g, "values", values, compression)?;
+    write_encoding_on_ds(&ds, "array", "0.2.0")?;
+    write_nullable_mask(&g, mask, compression)?;
     Ok(g)
+}
+
+/// The `mask` of a nullable group: true = NA, the inverse of `Column::mask`.
+fn write_nullable_mask(g: &Group, mask: &[bool], compression: Option<u8>) -> Result<()> {
+    let missing: Vec<bool> = mask.iter().map(|&present| !present).collect();
+    let ds = write_1d(g, "mask", Array1::from_vec(missing), compression)?;
+    write_encoding_on_ds(&ds, "array", "0.2.0")
 }
 
 fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()> {
@@ -506,9 +513,9 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
         (ColumnData::String(v), Some(m)) => {
             let g = grp.create_group(name)?;
             write_encoding_on_group(&g, "nullable-string-array", "0.1.0")?;
-            write_vlen_str_dataset(&g, "values", v)?;
-            let missing: Vec<bool> = m.iter().map(|&present| !present).collect();
-            write_1d(&g, "mask", Array1::from_vec(missing), compression)?;
+            let ds = write_vlen_str_dataset(&g, "values", v)?;
+            write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
+            write_nullable_mask(&g, m, compression)?;
         }
         (ColumnData::Int(v), None) => {
             let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
