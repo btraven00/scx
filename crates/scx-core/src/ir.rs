@@ -12,16 +12,6 @@ pub struct SparseMatrixCSR {
     pub data: TypedVec,
 }
 
-/// Sparse matrix in CSC (Compressed Sparse Column) format.
-/// Column-major — used by H5Seurat (dgCMatrix storage).
-#[derive(Debug, Clone)]
-pub struct SparseMatrixCSC {
-    pub shape: (usize, usize),
-    pub indptr: Vec<u64>,
-    pub indices: Vec<u32>,
-    pub data: TypedVec,
-}
-
 /// A chunk of rows from a streaming matrix read.
 #[derive(Debug, Clone)]
 pub struct MatrixChunk {

@@ -10,8 +10,8 @@ use ndarray::s;
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::ir::{
-    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta,
-    UnsTable, VarTable, Varm,
+    Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable,
+    Varm,
 };
 use crate::stream::DatasetReader;
 
@@ -410,28 +410,19 @@ fn read_tenx_chunk(
     dtype: DataType,
 ) -> Result<MatrixChunk> {
     let file = File::open(path)?;
-    let nrows = row_end - row_start;
     let nnz_start = indptr[row_start] as usize;
     let nnz_end = indptr[row_end] as usize;
 
     let indices = read_indices(&file, nnz_start, nnz_end)?;
     let data = read_data(&file, dtype, nnz_start, nnz_end)?;
 
-    let chunk_indptr: Vec<u64> = indptr[row_start..=row_end]
-        .iter()
-        .map(|&p| p - indptr[row_start])
-        .collect();
-
-    Ok(MatrixChunk {
-        row_offset: row_start,
-        nrows,
-        data: SparseMatrixCSR {
-            shape: (nrows, n_vars),
-            indptr: chunk_indptr,
-            indices,
-            data,
-        },
-    })
+    Ok(crate::sparse::csr_chunk(
+        indptr,
+        row_start..row_end,
+        n_vars,
+        indices,
+        data,
+    ))
 }
 
 #[async_trait]

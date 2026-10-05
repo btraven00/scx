@@ -31,10 +31,10 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
+        UnsTable, VarTable, Varm,
     },
-    sparse::sort_csr_indices,
+    sparse::{csr_chunk, dense_to_csr},
     stream::DatasetReader,
 };
 
@@ -381,27 +381,9 @@ fn read_csr_chunk(
             .collect();
         (indices, read_typed(&data_arr, a..b, dtype)?)
     } else {
-        (Vec::new(), TypedVec::F32(Vec::new()))
+        (Vec::new(), TypedVec::empty(dtype))
     };
-    let chunk_indptr = indptr[rows.start..=rows.end]
-        .iter()
-        .map(|&p| p - indptr[rows.start])
-        .collect();
-    let nrows = rows.end - rows.start;
-    // Unsorted column indices within a row are valid CSR; consumers
-    // (dgCMatrix, CSC writers) need them sorted, as from H5AdReader.
-    let mut csr = SparseMatrixCSR {
-        shape: (nrows, n_cols),
-        indptr: chunk_indptr,
-        indices,
-        data,
-    };
-    sort_csr_indices(&mut csr);
-    Ok(MatrixChunk {
-        row_offset: rows.start,
-        nrows,
-        data: csr,
-    })
+    Ok(csr_chunk(indptr, rows, n_cols, indices, data))
 }
 
 /// Read rows of a dense 2-D array and convert them to a CSR chunk, skipping
@@ -417,34 +399,10 @@ fn read_dense_chunk(
     let dtype = dtype.unwrap_or_else(|| detect_dtype(&arr));
     let sub = vec![rows.start as u64..rows.end as u64, 0..n_cols as u64];
     let vals: Vec<f64> = read_f64_subset(&arr, sub)?;
-    let nrows = rows.end - rows.start;
-    let mut indptr = Vec::with_capacity(nrows + 1);
-    let (mut indices, mut data) = (Vec::new(), Vec::new());
-    indptr.push(0u64);
-    for row in vals.chunks(n_cols.max(1)) {
-        for (j, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                indices.push(j as u32);
-                data.push(v);
-            }
-        }
-        indptr.push(indices.len() as u64);
-    }
-    let data = match dtype {
-        DataType::F32 => TypedVec::F32(data.iter().map(|&x| x as f32).collect()),
-        DataType::F64 => TypedVec::F64(data),
-        DataType::I32 => TypedVec::I32(data.iter().map(|&x| x as i32).collect()),
-        DataType::U32 => TypedVec::U32(data.iter().map(|&x| x as u32).collect()),
-    };
     Ok(MatrixChunk {
         row_offset: rows.start,
-        nrows,
-        data: SparseMatrixCSR {
-            shape: (nrows, n_cols),
-            indptr,
-            indices,
-            data,
-        },
+        nrows: rows.len(),
+        data: dense_to_csr(&vals, n_cols, dtype),
     })
 }
 

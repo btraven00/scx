@@ -12,8 +12,8 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
+        UnsTable, VarTable, Varm,
     },
     stream::DatasetReader,
 };
@@ -162,6 +162,30 @@ pub(crate) fn value_dtype(ds: &hdf5::Dataset) -> Result<DataType> {
     })
 }
 
+/// Rows `rows` of a compressed-sparse group (`{group}/indices`, `data`),
+/// given its full `indptr`, as a chunk with `n_cols` columns.
+pub(crate) fn read_csr_rows(
+    file: &File,
+    group: &str,
+    indptr: &[u64],
+    rows: std::ops::Range<usize>,
+    n_cols: usize,
+    dtype: DataType,
+) -> Result<MatrixChunk> {
+    let nnz = indptr[rows.start] as usize..indptr[rows.end] as usize;
+    let (indices, data) = if nnz.is_empty() {
+        (Vec::new(), TypedVec::empty(dtype))
+    } else {
+        (
+            read_u32_range(&file.dataset(&format!("{group}/indices"))?, nnz.clone())?,
+            read_values(&file.dataset(&format!("{group}/data"))?, dtype, nnz)?,
+        )
+    };
+    Ok(crate::sparse::csr_chunk(
+        indptr, rows, n_cols, indices, data,
+    ))
+}
+
 /// Read `range` of a values dataset as `dtype`.
 pub(crate) fn read_values(
     ds: &hdf5::Dataset,
@@ -197,9 +221,8 @@ fn detect_x_dtype(file: &File) -> Result<DataType> {
     value_dtype(&ds)
 }
 
-/// Read a cell-chunk [cell_start, cell_end) from a CSC matrix and return it
-/// as a CSR MatrixChunk. The conversion is a zero-copy reinterpretation:
-/// CSC columns = cells ↔ CSR rows = cells.
+/// Cells [cell_start, cell_end) of the CSC `/X` group as a CSR chunk (the
+/// same arrays: cells are the compressed axis).
 fn read_chunk_sync(
     path: &Path,
     indptr: &[u64],
@@ -208,42 +231,14 @@ fn read_chunk_sync(
     n_vars: usize,
     dtype: DataType,
 ) -> Result<MatrixChunk> {
-    let file = File::open(path)?;
-    let chunk_cells = cell_end - cell_start;
-    let nnz_start = indptr[cell_start] as usize;
-    let nnz_end = indptr[cell_end] as usize;
-    let nnz = nnz_end - nnz_start;
-
-    let gene_indices: Vec<u32> = if nnz > 0 {
-        let ds = file.dataset("X/indices")?;
-        read_u32_range(&ds, nnz_start..nnz_end)?
-    } else {
-        Vec::new()
-    };
-
-    let data: TypedVec = if nnz > 0 {
-        read_values(&file.dataset("X/data")?, dtype, nnz_start..nnz_end)?
-    } else {
-        TypedVec::empty(dtype)
-    };
-
-    // CSC column pointers for [cell_start..=cell_end] become CSR row pointers.
-    // Column indices in CSC (gene indices) become column indices in CSR — same data.
-    let csr_indptr: Vec<u64> = indptr[cell_start..=cell_end]
-        .iter()
-        .map(|&p| p - indptr[cell_start])
-        .collect();
-
-    Ok(MatrixChunk {
-        row_offset: cell_start,
-        nrows: chunk_cells,
-        data: SparseMatrixCSR {
-            shape: (chunk_cells, n_vars),
-            indptr: csr_indptr,
-            indices: gene_indices,
-            data,
-        },
-    })
+    read_csr_rows(
+        &File::open(path)?,
+        "X",
+        indptr,
+        cell_start..cell_end,
+        n_vars,
+        dtype,
+    )
 }
 
 fn read_strings_sync(file: &File, path: &str) -> Result<Vec<String>> {
