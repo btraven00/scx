@@ -7,13 +7,13 @@ use futures::stream::{self, Stream};
 use hdf5::types::{TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 
-use crate::h5::{read_u32_range, read_u64, read_values, value_dtype};
+use crate::h5::{read_csr_rows, read_u64, value_dtype};
 use crate::{
-    dtype::{DataType, TypedVec},
+    dtype::DataType,
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
+        UnsTable, VarTable, Varm,
     },
     stream::DatasetReader,
 };
@@ -241,58 +241,6 @@ fn read_strings(file: &File, path: &str) -> Result<Vec<String>> {
             other
         ))),
     }
-}
-
-fn read_chunk_sync(
-    path: &Path,
-    base: &str,
-    indptr: &[u64],
-    cell_start: usize,
-    cell_end: usize,
-    n_vars: usize,
-    dtype: DataType,
-) -> Result<MatrixChunk> {
-    let file = File::open(path)?;
-    let chunk_cells = cell_end - cell_start;
-    let nnz_start = indptr[cell_start] as usize;
-    let nnz_end = indptr[cell_end] as usize;
-    let nnz = nnz_end - nnz_start;
-
-    let gene_indices: Vec<u32> = if nnz > 0 {
-        read_u32_range(
-            &file.dataset(&format!("{base}/indices"))?,
-            nnz_start..nnz_end,
-        )?
-    } else {
-        Vec::new()
-    };
-
-    let data: TypedVec = if nnz > 0 {
-        read_values(
-            &file.dataset(&format!("{base}/data"))?,
-            dtype,
-            nnz_start..nnz_end,
-        )?
-    } else {
-        TypedVec::empty(dtype)
-    };
-
-    // CSC column pointers → CSR row pointers (same data, zero-copy reinterpretation).
-    let csr_indptr: Vec<u64> = indptr[cell_start..=cell_end]
-        .iter()
-        .map(|&p| p - indptr[cell_start])
-        .collect();
-
-    Ok(MatrixChunk {
-        row_offset: cell_start,
-        nrows: chunk_cells,
-        data: SparseMatrixCSR {
-            shape: (chunk_cells, n_vars),
-            indptr: csr_indptr,
-            indices: gene_indices,
-            data,
-        },
-    })
 }
 
 fn read_obs_sync(path: &Path) -> Result<ObsTable> {
@@ -557,7 +505,8 @@ fn seurat_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<
     })
 }
 
-/// Read a row-slice of an H5Seurat CSC sparse group as a CSR `MatrixChunk`.
+/// Rows [row_start, row_end) of an H5Seurat CSC group (a layer or graph)
+/// as a CSR chunk.
 fn seurat_read_sparse_chunk(
     path: &Path,
     group_path: &str,
@@ -566,46 +515,15 @@ fn seurat_read_sparse_chunk(
     row_end: usize,
 ) -> Result<MatrixChunk> {
     let file = File::open(path)?;
-    let (_nrows, ncols) = meta.shape;
-    let chunk_rows = row_end - row_start;
-
-    let nnz_start = meta.indptr[row_start] as usize;
-    let nnz_end = meta.indptr[row_end] as usize;
-    let nnz = nnz_end - nnz_start;
-
-    let indices: Vec<u32> = if nnz > 0 {
-        read_u32_range(
-            &file.dataset(&format!("{group_path}/indices"))?,
-            nnz_start..nnz_end,
-        )?
-    } else {
-        Vec::new()
-    };
-
-    let data_ds = file.dataset(&format!("{group_path}/data"))?;
-    let dtype = value_dtype(&data_ds)?;
-    let data: TypedVec = if nnz > 0 {
-        read_values(&data_ds, dtype, nnz_start..nnz_end)?
-    } else {
-        TypedVec::empty(dtype)
-    };
-
-    // CSC column pointers → CSR row pointers (zero-based within chunk).
-    let csr_indptr: Vec<u64> = meta.indptr[row_start..=row_end]
-        .iter()
-        .map(|&p| p - meta.indptr[row_start])
-        .collect();
-
-    Ok(MatrixChunk {
-        row_offset: row_start,
-        nrows: chunk_rows,
-        data: SparseMatrixCSR {
-            shape: (chunk_rows, ncols),
-            indptr: csr_indptr,
-            indices,
-            data,
-        },
-    })
+    let dtype = value_dtype(&file.dataset(&format!("{group_path}/data"))?)?;
+    read_csr_rows(
+        &file,
+        group_path,
+        &meta.indptr,
+        row_start..row_end,
+        meta.shape.1,
+        dtype,
+    )
 }
 
 fn read_layer_metas_sync(path: &Path, assay: &str, x_path: &str) -> Result<Vec<SparseMatrixMeta>> {
@@ -921,9 +839,16 @@ impl DatasetReader for H5SeuratReader {
                             return None;
                         }
                         let cell_end = (cell_start + chunk_size).min(n_obs);
-                        let chunk = read_chunk_sync(
-                            &path, &x_path, &indptr, cell_start, cell_end, n_vars, dtype,
-                        );
+                        let chunk = File::open(&path).map_err(ScxError::from).and_then(|file| {
+                            read_csr_rows(
+                                &file,
+                                &x_path,
+                                &indptr,
+                                cell_start..cell_end,
+                                n_vars,
+                                dtype,
+                            )
+                        });
                         Some((chunk, cell_end))
                     }
                 }))

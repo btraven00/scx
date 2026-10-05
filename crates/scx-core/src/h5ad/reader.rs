@@ -13,10 +13,10 @@ use crate::{
     error::{Result, ScxError},
     h5_chunk,
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
+        UnsTable, VarTable, Varm,
     },
-    sparse::sort_csr_indices,
+    sparse::{csr_chunk, dense_to_csr},
     stream::DatasetReader,
 };
 
@@ -239,48 +239,13 @@ fn ad_read_dense_chunk_with_dtype(
     dtype: DataType,
 ) -> Result<MatrixChunk> {
     let ds = file.dataset(ds_path)?;
-    let nrows = row_end - row_start;
-    let slice = ds.read_slice::<f64, _, _>(s![row_start..row_end, ..])?;
-    let csr = dense_array2_to_csr(slice.view(), nrows, n_vars, dtype);
+    let slice = ds.read_slice::<f64, _, ndarray::Ix2>(s![row_start..row_end, ..])?;
+    let values = slice.as_standard_layout();
     Ok(MatrixChunk {
         row_offset: row_start,
-        nrows,
-        data: csr,
+        nrows: row_end - row_start,
+        data: dense_to_csr(values.as_slice().unwrap_or_default(), n_vars, dtype),
     })
-}
-
-/// Convert a dense 2-D array view to a CSR sparse matrix, skipping exact zeros.
-fn dense_array2_to_csr(
-    arr: ndarray::ArrayView2<f64>,
-    nrows: usize,
-    ncols: usize,
-    dtype: DataType,
-) -> SparseMatrixCSR {
-    let mut indices: Vec<u32> = Vec::new();
-    let mut data_f64: Vec<f64> = Vec::new();
-    let mut indptr: Vec<u64> = Vec::with_capacity(nrows + 1);
-    indptr.push(0);
-    for row in arr.rows() {
-        for (j, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                indices.push(j as u32);
-                data_f64.push(v);
-            }
-        }
-        indptr.push(indices.len() as u64);
-    }
-    let data = match dtype {
-        DataType::F32 => TypedVec::F32(data_f64.iter().map(|&x| x as f32).collect()),
-        DataType::F64 => TypedVec::F64(data_f64),
-        DataType::I32 => TypedVec::I32(data_f64.iter().map(|&x| x as i32).collect()),
-        DataType::U32 => TypedVec::U32(data_f64.iter().map(|&x| x as u32).collect()),
-    };
-    SparseMatrixCSR {
-        shape: (nrows, ncols),
-        indptr,
-        indices,
-        data,
-    }
 }
 
 fn ad_read_strings(file: &File, path: &str) -> Result<Vec<String>> {
@@ -360,7 +325,6 @@ fn ad_read_chunk(
     dtype: DataType,
 ) -> Result<MatrixChunk> {
     let file = File::open(path)?;
-    let nrows = row_end - row_start;
     let nnz_start = indptr[row_start] as usize;
     let nnz_end = indptr[row_end] as usize;
     let nnz = nnz_end - nnz_start;
@@ -377,24 +341,7 @@ fn ad_read_chunk(
         TypedVec::empty(dtype)
     };
 
-    // Normalise indptr to start from 0 for this chunk
-    let chunk_indptr: Vec<u64> = indptr[row_start..=row_end]
-        .iter()
-        .map(|&p| p - indptr[row_start])
-        .collect();
-
-    let mut csr = SparseMatrixCSR {
-        shape: (nrows, n_vars),
-        indptr: chunk_indptr,
-        indices,
-        data,
-    };
-    sort_csr_indices(&mut csr);
-    Ok(MatrixChunk {
-        row_offset: row_start,
-        nrows,
-        data: csr,
-    })
+    Ok(csr_chunk(indptr, row_start..row_end, n_vars, indices, data))
 }
 
 /// Read a dataframe group at `group_path` (e.g. "obs" or "var").
@@ -692,56 +639,15 @@ fn ad_read_sparse_chunk(
     row_end: usize,
 ) -> Result<MatrixChunk> {
     let file = File::open(path)?;
-    let (_, ncols) = meta.shape;
-    let chunk_rows = row_end - row_start;
-
-    let nnz_start = meta.indptr[row_start] as usize;
-    let nnz_end = meta.indptr[row_end] as usize;
-    let nnz = nnz_end - nnz_start;
-
-    let indices: Vec<u32> = if nnz > 0 {
-        let ds = file.dataset(&format!("{group_path}/indices"))?;
-        match ds.dtype()?.to_descriptor()? {
-            TypeDescriptor::Integer(_) => ds
-                .read_slice_1d::<i32, _>(s![nnz_start..nnz_end])?
-                .iter()
-                .map(|&x| x as u32)
-                .collect(),
-            other => {
-                return Err(ScxError::InvalidFormat(format!(
-                    "unexpected indices dtype {other:?} at {group_path}/indices"
-                )))
-            }
-        }
-    } else {
-        Vec::new()
-    };
-
-    let data_ds = file.dataset(&format!("{group_path}/data"))?;
-    let dtype = crate::h5::value_dtype(&data_ds)?;
-    let data: TypedVec = if nnz > 0 {
-        crate::h5::read_values(&data_ds, dtype, nnz_start..nnz_end)?
-    } else {
-        TypedVec::empty(dtype)
-    };
-
-    let csr_indptr: Vec<u64> = meta.indptr[row_start..=row_end]
-        .iter()
-        .map(|&p| p - meta.indptr[row_start])
-        .collect();
-
-    let mut csr = SparseMatrixCSR {
-        shape: (chunk_rows, ncols),
-        indptr: csr_indptr,
-        indices,
-        data,
-    };
-    sort_csr_indices(&mut csr);
-    Ok(MatrixChunk {
-        row_offset: row_start,
-        nrows: chunk_rows,
-        data: csr,
-    })
+    let dtype = crate::h5::value_dtype(&file.dataset(&format!("{group_path}/data"))?)?;
+    crate::h5::read_csr_rows(
+        &file,
+        group_path,
+        &meta.indptr,
+        row_start..row_end,
+        meta.shape.1,
+        dtype,
+    )
 }
 
 // ---------------------------------------------------------------------------
