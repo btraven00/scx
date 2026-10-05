@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.0](https://github.com/btraven00/scx/compare/scx-cli-v0.3.0...scx-cli-v0.4.0) (2026-10-05)
+
+
+### Features
+
+* **concat:** obs-axis concatenation with anndata.concat() semantics ([913e908](https://github.com/btraven00/scx/commit/913e9086bfac86c862dd4ac97a51c3ea9af18f2b))
+* **convert:** --only/--exclude slot filter for h5ad output ([bd29ecc](https://github.com/btraven00/scx/commit/bd29eccd8fdb6889de3e4625419f04b924ca532e))
+* **zarr:** read AnnData Zarr stores (v2 and v3) ([34c986f](https://github.com/btraven00/scx/commit/34c986f80c41600421b7134ab449d851975a0f64))
+
+
+### Bug Fixes
+
+* **cli:** don't leave a partial output when convert fails ([d2ee056](https://github.com/btraven00/scx/commit/d2ee05640af18b9d72728838b3da6f15e97ab1bf))
+* **core:** carry missing values through readers, writers, concat, merge and export ([33d096b](https://github.com/btraven00/scx/commit/33d096b2162b66b376f30bbac95fac86266ce657))
+* **core:** open merge patch sources through the reader factory ([2c5aa03](https://github.com/btraven00/scx/commit/2c5aa030763b08a01233fc5b0fa1d2459f052aa7))
+* fallback for no-X in file ([7fe856e](https://github.com/btraven00/scx/commit/7fe856ee76a964be6e6295ef09b3974db979f36c))
+* **h5ad:** read anndata 0.13 nullable-string-array; survive NaN in inspect ([b55378c](https://github.com/btraven00/scx/commit/b55378c9b6f90400e57f78a43819bcc70c16813f))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.3.0 to 0.4.0
+
 ## [0.3.0](https://github.com/btraven00/scx/compare/scx-cli-v0.2.0...scx-cli-v0.3.0) (2026-07-02)
 
 
