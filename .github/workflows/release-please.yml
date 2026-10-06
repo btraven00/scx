@@ -19,6 +19,7 @@ jobs:
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       tag_name: ${{ steps.release.outputs['crates/scx-cli--tag_name'] }}
+      py_tag_name: ${{ steps.release.outputs['python/picklerick--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -26,6 +27,24 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # Tags created with GITHUB_TOKEN don't trigger other workflows, but a
+  # workflow_dispatch from it does: start the conda release build (to
+  # almost-conductor) and the PyPI wheel build for the new tags.
+  start-package-builds:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Conda packages (almost-conductor)
+        run: gh workflow run conda-package.yml --repo "$GITHUB_REPOSITORY" -f tag="${{ needs.release-please.outputs.tag_name }}"
+      - name: PyPI wheels
+        if: ${{ needs.release-please.outputs.py_tag_name != '' }}
+        run: gh workflow run python.yml --repo "$GITHUB_REPOSITORY" --ref "${{ needs.release-please.outputs.py_tag_name }}"
 
   build-binaries:
     needs: release-please
