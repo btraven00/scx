@@ -181,13 +181,16 @@ H5Sselect_elements`). The `conda.recipe/r-picklerick` recipe therefore must
 a C++ compiler for the from-source HDF5 build. (CLI/Python packages *can* use
 system HDF5 via `--no-default-features`; the R staticlib cannot.)
 
-### scx-core is a pinned git dependency for the R package
-`r/picklerick` depends on `scx-core` via a git dependency pinned to a rev on
-`btraven00/scx` — not a path dep and not an in-tree copy. There is no vendored
-`r/picklerick/src/rust/scx-core` and no `sync-scx-core.sh`; do not reintroduce
-them. The committed `r/picklerick/src/rust/Cargo.lock` is required (keep
-`hdf5-metno` pinned to a single-ndarray combination, currently `0.12.4`, or a
-fresh resolve pulls ndarray 0.17 → `Selection`/`SliceInfo` skew). Bump the
-pinned rev/tag when the R bindings need new scx-core changes.
+### scx-core comes from crates.io for the R package
+`r/picklerick` depends on the published `scx-core` (`scx-core = "X.Y.Z" #
+x-release-please-version`). It does not use a path dep, a git rev or an
+in-tree copy, and there is no `sync-scx-core.sh`; do not reintroduce them.
+release-please bumps the version in the release PR. r.yml and the conda
+recipe patch it to `crates/scx-core` through `[patch.crates-io]` in cargo's
+config, so CI always builds R against the checkout. The committed
+`r/picklerick/src/rust/Cargo.lock` is required. The R crate must not add its
+own `ndarray` dependency: a second ndarray version makes hdf5-metno resolve
+against it and breaks scx-core with `Selection`/`SliceInfo` errors. Keep
+hdf5-metno and ndarray matching the workspace lock.
 
 That bias is usually the correct one for SCX.

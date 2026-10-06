@@ -21,6 +21,16 @@ push to `main` also publishes conda packages to `edge`, versioned
 gh workflow run conda-package.yml -f tag=scx-cli-v0.4.1
 ```
 
+The R package's Rust crate depends on scx-core from crates.io, and the release
+PR bumps that requirement too. CI and the conda build use the in-tree crate
+(see `docs/packaging.md`). Builds outside the repo, such as R-universe or a
+Bioconductor tarball, use crates.io. So after `cargo publish`, refresh the R
+lockfile and commit it as `chore(r): ...`:
+
+```sh
+cargo update -p scx-core --manifest-path r/picklerick/src/rust/Cargo.toml
+```
+
 ## Publishing scx-picklerick to PyPI
 
 The PyPI name is `scx-picklerick`; the import name is `picklerick`. Its

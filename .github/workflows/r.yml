@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "r/picklerick/**"
+      - "crates/scx-core/**"
       - "tests/fixtures/**"
       - ".github/workflows/r.yml"
   push:
@@ -21,6 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Build the R crate against the in-tree scx-core rather than the
+      # crates.io release it names, so core changes are tested here before a tag.
+      - name: Patch scx-core to the checkout
+        run: |
+          printf '[patch.crates-io]\nscx-core = { path = "%s/crates/scx-core" }\n' "$GITHUB_WORKSPACE" >> ~/.cargo/config.toml
+          cargo tree --manifest-path r/picklerick/src/rust/Cargo.toml -p scx-core --depth 0 | grep -F "($GITHUB_WORKSPACE/crates/scx-core)"
       - uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true

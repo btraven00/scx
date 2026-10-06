@@ -372,10 +372,8 @@ fn list_to_columns(list: &List) -> Result<Vec<Column>> {
     let mut out = Vec::with_capacity(list.len());
     for (name, obj) in list.iter() {
         let data = robj_to_column_data(name, &obj)?;
-        out.push(Column {
-            name: name.to_string(),
-            data,
-        });
+        // ponytail: R NAs are not mapped to the mask yet; Phase 4 rebuilds this on core convert().
+        out.push(Column::new(name, data));
     }
     Ok(out)
 }

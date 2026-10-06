@@ -1,4 +1,4 @@
-# Packaging — HDF5 linking and the scx-core git dependency
+# Packaging — HDF5 linking and the scx-core dependency
 
 ## Two HDF5 link modes
 
@@ -58,21 +58,28 @@ Therefore the `conda.recipe/r-picklerick` recipe **must**:
 This also isolates picklerick's HDF5 from R's `rhdf5` / `hdf5r` (avoiding the
 ABI conflicts that motivated static vendoring in the first place).
 
-## scx-core is a git dependency, not vendored
+## scx-core comes from crates.io
 
-`r/picklerick/src/rust/Cargo.toml` depends on `scx-core` via a **pinned git
-dependency** on `btraven00/scx` (not a path dep, not an in-tree copy). The R
-package builds outside the cargo workspace and R-universe ships only the package
-directory, so a path dep to `crates/scx-core` would not resolve there; cargo
-fetches the pinned rev at build time instead (build environments have network).
+`r/picklerick/src/rust/Cargo.toml` depends on the published `scx-core`
+(`scx-core = "X.Y.Z"`), not a path dep, a git rev or an in-tree copy. The R
+package builds outside the cargo workspace, and R-universe and Bioconductor ship
+only the package directory, so a path dep to `crates/scx-core` would not resolve
+there.
 
-Consequences:
+- **The version moves with the release.** The line carries an
+  `x-release-please-version` marker, so the release PR bumps it with the rest of
+  the linked scx group.
+- **CI and conda build against the in-tree crate.** `r.yml` and the
+  `r-picklerick` conda recipe add `[patch.crates-io] scx-core = { path = ... }`
+  to cargo's config. So `main` is tested against `main`, and a release's conda
+  package doesn't wait for `cargo publish`. r.yml fails if the patch isn't
+  applied, which happens when the in-tree version stops matching the requirement.
+- **The committed `Cargo.lock` is required.** The R crate must not depend on
+  `ndarray` itself. hdf5-metno accepts several ndarray versions, so a second
+  one in the graph resolves hdf5-metno against it, and scx-core then fails to
+  compile with `Selection`/`SliceInfo` trait errors. Keep hdf5-metno and
+  ndarray at the versions in the workspace `Cargo.lock`.
 - There is **no** vendored `r/picklerick/src/rust/scx-core` copy and **no**
-  `sync-scx-core.sh` — both were removed. Don't reintroduce them.
-- A committed `r/picklerick/src/rust/Cargo.lock` is **required**: a fresh
-  resolve can pull `hdf5-metno 0.12.5` → `ndarray 0.17` alongside scx-core's
-  `0.16`, causing a `Selection`/`SliceInfo` trait skew. Keep `hdf5-metno` pinned
-  to a single-ndarray combination (currently `0.12.4`).
-- **Bump the pinned rev (or use a release tag) when scx-core changes** that the
-  R bindings need — local edits to `crates/scx-core` are not seen until pushed
-  and the pin is updated.
+  `sync-scx-core.sh`. Don't reintroduce them.
+- To build locally against an unreleased scx-core, add the same patch for one
+  command: `cargo --config 'patch.crates-io.scx-core.path="/path/to/scx/crates/scx-core"' ...`.

@@ -18,9 +18,16 @@ build:
   # bundle *static* native deps, and Makevars passes no -lhdf5 — so a dynamic
   # system HDF5 would leave symbols like H5Sselect_elements undefined at load).
   # The from-source build needs cmake (see build requirements).
+  # The R crate depends on scx-core from crates.io; build it against the
+  # in-tree crate instead, so the package matches the tagged engine and does not
+  # wait for `cargo publish`. The config goes in the work dir, where cargo finds
+  # it from r/picklerick/src, and the tree check fails the build if unpatched.
   script:
     - if: unix
       then:
+        - mkdir -p .cargo
+        - printf '[patch.crates-io]\nscx-core = { path = "%s/crates/scx-core" }\n' "$SRC_DIR" > .cargo/config.toml
+        - cargo tree --manifest-path r/picklerick/src/rust/Cargo.toml -p scx-core --depth 0 | grep -F "($SRC_DIR/crates/scx-core)"
         - cd r/picklerick
         - R CMD INSTALL --build .
     - if: win
