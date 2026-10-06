@@ -3,7 +3,13 @@
   "packages": {
     "crates/scx-core": {
       "release-type": "rust",
-      "package-name": "scx-core"
+      "package-name": "scx-core",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "/r/picklerick/src/rust/Cargo.toml"
+        }
+      ]
     },
     "crates/scx-cli": {
       "release-type": "rust",
