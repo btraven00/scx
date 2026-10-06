@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/btraven00/scx/compare/scx-core-v0.4.0...scx-core-v0.4.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **core:** enable bytemuck's alloc feature, build without default features ([403b2ce](https://github.com/btraven00/scx/commit/403b2cea9d847bc3931965c3663bb02e089f646d))
+
 ## [0.4.0](https://github.com/btraven00/scx/compare/scx-core-v0.3.0...scx-core-v0.4.0) (2026-10-05)
 
 
