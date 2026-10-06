@@ -1,6 +1,6 @@
 [package]
 name = "scx-cli"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 # zarrs needs 1.91; checked by the msrv job in ci.yml.
 rust-version = "1.91"
@@ -23,7 +23,7 @@ zarr = ["scx-core/zarr"]
 net = ["scx-core/net", "dep:tokio"]
 
 [dependencies]
-scx-core = { path = "../scx-core", version = "0.4.0", default-features = false }
+scx-core = { path = "../scx-core", version = "0.4.1", default-features = false }
 # Runtime constructed in main() only under the `net` feature.
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 anyhow = "1"
