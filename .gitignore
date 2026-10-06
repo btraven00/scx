@@ -21,3 +21,4 @@ r/picklerick/src/rust/target/
 # coverage runs
 .coverage
 *.profraw
+r/picklerick/.cargo/

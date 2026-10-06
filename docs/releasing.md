@@ -1,14 +1,22 @@
 # Releasing
 
-## scx-core, scx-cli and scx-picklerick
+## Checklist
 
-The two crates and the Python package are released together by release-please
-(`release-please-config.json`), with linked versions: one number means one
-engine across the CLI, Python and (later) R. After CI passes on `main`,
-release-please keeps a release PR up to date; its changelog entries come from
-the conventional-commit subjects. Merging it bumps every version, creates the
-GitHub releases and tags (`scx-core-vX.Y.Z`, `scx-cli-vX.Y.Z`,
-`picklerick-vX.Y.Z`) and builds the CLI binaries
+1. Merge the release PR (below). This tags the release and starts the conda
+   and wheel builds.
+2. Publish the crates: `scx-core`, then `scx-cli`.
+3. Refresh the R package's lockfile, and commit it.
+4. Upload the wheels to PyPI.
+
+## scx-core, scx-cli, scx-picklerick and picklerick (R)
+
+The crates, the Python package and the R package's Rust crate are released
+together by release-please (`release-please-config.json`), with linked
+versions: one number means one engine across the CLI, Python and R. After CI
+passes on `main`, release-please keeps a release PR up to date; its changelog
+entries come from the conventional-commit subjects. Merging it bumps every
+version, creates the GitHub releases and tags (`scx-core-vX.Y.Z`,
+`scx-cli-vX.Y.Z`, `picklerick-vX.Y.Z`) and builds the CLI binaries
 (`.github/workflows/release-please.yml`).
 
 It then starts two builds for the new tags: the conda packages (`scx`,
@@ -18,17 +26,67 @@ push to `main` also publishes conda packages to `edge`, versioned
 `X.Y.Z.postN` after the latest release. To redo a release's conda packages:
 
 ```sh
-gh workflow run conda-package.yml -f tag=scx-cli-v0.4.1
+gh workflow run conda-package.yml -f tag=scx-cli-vX.Y.Z
 ```
 
-The R package's Rust crate depends on scx-core from crates.io, and the release
-PR bumps that requirement too. CI and the conda build use the in-tree crate
-(see `docs/packaging.md`). Builds outside the repo, such as R-universe or a
-Bioconductor tarball, use crates.io. So after `cargo publish`, refresh the R
-lockfile and commit it as `chore(r): ...`:
+## Publishing the crates
+
+From a checkout of the release tag, with a crates.io token
+(`cargo login`). Publish `scx-core` first, because `scx-cli` depends on it by
+version:
+
+```sh
+git checkout --detach scx-cli-vX.Y.Z
+cargo publish -p scx-core
+cargo publish -p scx-cli
+```
+
+crates.io never accepts the same version twice. A broken release gets
+`cargo yank` and a new version.
+
+## The R package and scx-core
+
+`r/picklerick/src/rust` is its own crate, outside the cargo workspace. It
+depends on scx-core from crates.io:
+
+```toml
+scx-core    = "X.Y.Z" # x-release-please-version
+```
+
+The marker comment lets the release PR bump this requirement with the other
+versions; don't edit it by hand. Which scx-core a build uses depends on where
+it runs:
+
+| Build | scx-core |
+|---|---|
+| `r.yml` (PRs and `main`) | the checkout's `crates/scx-core`, patched in |
+| conda `r-picklerick` (edge and releases) | the tagged tree's `crates/scx-core`, patched in |
+| R-universe, Bioconductor, `R CMD INSTALL` outside CI | crates.io, at the version in `Cargo.lock` |
+
+CI and conda add `[patch.crates-io] scx-core = { path = ... }` to cargo's
+config, so R is tested against `main`, and r.yml runs on every change to
+`crates/scx-core`. Neither needs the release on crates.io. r.yml fails if the
+patch isn't applied. That happens when the in-tree scx-core version no longer
+matches the requirement, for example after a manual edit to either version.
+
+Builds outside the repo use the committed `Cargo.lock`. It still names the
+previous scx-core after a release PR bumps the requirement, so refresh it once
+the crate is on crates.io (checklist step 3):
 
 ```sh
 cargo update -p scx-core --manifest-path r/picklerick/src/rust/Cargo.toml
+git commit -m "chore(r): lock scx-core X.Y.Z" r/picklerick/src/rust/Cargo.lock
+```
+
+To build the R package locally against unreleased scx-core changes, put the
+same patch where cargo finds it when Makevars runs (`r/picklerick/.cargo/` is
+gitignored and kept out of the R build):
+
+```sh
+mkdir -p r/picklerick/.cargo
+printf '[patch.crates-io]\nscx-core = { path = "%s/crates/scx-core" }\n' "$PWD" \
+  > r/picklerick/.cargo/config.toml
+R CMD INSTALL r/picklerick
 ```
 
 ## Publishing scx-picklerick to PyPI
@@ -45,7 +103,7 @@ tag. To start it by hand (tags that release-please creates with the default
 token don't trigger workflows themselves):
 
 ```sh
-gh workflow run python.yml --ref picklerick-v0.4.1
+gh workflow run python.yml --ref picklerick-vX.Y.Z
 ```
 
 `.github/workflows/python.yml` builds:
@@ -63,7 +121,7 @@ every later version.
 When the run is green, download the merged `dist` artifact:
 
 ```sh
-gh run list --workflow python.yml --branch picklerick-v0.4.1
+gh run list --workflow python.yml --branch picklerick-vX.Y.Z
 gh run download <run-id> -n dist -D dist/
 ls dist/            # expect 3 wheels + 1 sdist, all with the same version
 uvx twine check dist/*
@@ -88,7 +146,7 @@ uv publish --publish-url https://test.pypi.org/legacy/ --token pypi-... dist/*
 
 ```sh
 uv venv -p 3.14 /tmp/pk && . /tmp/pk/bin/activate
-uv pip install scx-picklerick==0.4.1
+uv pip install scx-picklerick==X.Y.Z
 python -c "import picklerick as pk; print(pk.__version__)"
 ```
 
