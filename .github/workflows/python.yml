@@ -18,6 +18,12 @@ on:
     tags: ["picklerick-v*"]
   workflow_dispatch:
 
+env:
+  # apt has hung on a stalled mirror connection for over an hour (twice on
+  # 2026-10-07). Drop a stalled connection after 30 s and retry, and cap each
+  # install step at 10 minutes.
+  APT_OPTS: -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3
+
 jobs:
   wheel:
     name: wheel (${{ matrix.os }})
@@ -69,7 +75,8 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install system HDF5
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+        timeout-minutes: 10
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libhdf5-dev
       - name: Build instrumented extension and run pytest
         run: |
           python -m venv .venv && . .venv/bin/activate

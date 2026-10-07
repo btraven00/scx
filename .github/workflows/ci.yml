@@ -6,6 +6,12 @@ on:
     branches:
       - main
 
+env:
+  # apt has hung on a stalled mirror connection for over an hour (twice on
+  # 2026-10-07). Drop a stalled connection after 30 s and retry, and cap each
+  # install step at 10 minutes.
+  APT_OPTS: -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3
+
 jobs:
   test:
     name: Test & Lint (${{ matrix.os }}, ${{ matrix.hdf5 }})
@@ -41,7 +47,8 @@ jobs:
 
       - name: Install system HDF5
         if: matrix.apt_packages != ''
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_packages }}
+        timeout-minutes: 10
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y ${{ matrix.apt_packages }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -81,7 +88,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.91
       - name: Install system HDF5
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+        timeout-minutes: 10
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libhdf5-dev
       - run: cargo check --workspace --all-targets --no-default-features --features scx-cli/net
 
   # Rust coverage → Codecov. Runs against system HDF5 (fast: skips the
@@ -96,7 +104,8 @@ jobs:
         with:
           components: llvm-tools-preview
       - name: Install system HDF5
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+        timeout-minutes: 10
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libhdf5-dev
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate Rust coverage (lcov)
         env:
