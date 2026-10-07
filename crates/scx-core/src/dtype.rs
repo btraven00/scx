@@ -59,7 +59,7 @@ impl fmt::Display for DataType {
 }
 
 /// A vector of matrix values, of one `DataType`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypedVec {
     F32(Vec<f32>),
     F64(Vec<f64>),

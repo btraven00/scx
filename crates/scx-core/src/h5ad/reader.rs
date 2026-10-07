@@ -1,23 +1,23 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use hdf5::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
-use hdf5::File;
-use ndarray::{s, Array1, Array2};
+use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
+use hdf5::{File, Group};
+use ndarray::s;
 
-use crate::h5_str::{read_str_attr, read_strings};
-use crate::stream::row_chunks;
-use crate::stream::ChunkStream;
+use crate::h5::{read_csr_rows, read_u64, value_dtype};
+use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
+use crate::stream::{row_chunks, ChunkStream};
 use crate::{
-    dtype::{DataType, TypedVec},
+    dtype::DataType,
     error::{Result, ScxError},
-    h5_chunk,
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
         UnsTable, VarTable, Varm,
     },
-    sparse::{csr_chunk, dense_to_csr},
+    sparse::dense_to_csr,
     stream::DatasetReader,
 };
 
@@ -80,49 +80,11 @@ impl H5AdReader {
             if sh.len() != 2 {
                 return Err(ScxError::InvalidFormat(format!("dense {base} must be 2-D")));
             }
-            let dtype = match ds.dtype()?.to_descriptor()? {
-                TypeDescriptor::Float(FloatSize::U4) => DataType::F32,
-                TypeDescriptor::Float(_) => DataType::F64,
-                TypeDescriptor::Integer(_) => DataType::I32,
-                _ => DataType::F32,
-            };
-            (sh[0], sh[1], None, dtype)
+            (sh[0], sh[1], None, value_dtype(&ds)?)
         } else {
-            let grp = file.group(&base)?;
-
-            if let Ok(enc) = read_str_attr(&grp, "encoding-type") {
-                if enc == "csc_matrix" {
-                    return Err(ScxError::InvalidFormat(format!(
-                        "{base} is stored as CSC. Convert to CSR first: \
-                         adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
-                    )));
-                }
-            }
-
-            let shape_attr = grp
-                .attr("shape")
-                .map_err(|_| ScxError::InvalidFormat(format!("missing {base}/shape attribute")))?;
-            let (n_obs, n_vars) = match shape_attr.dtype()?.to_descriptor()? {
-                TypeDescriptor::Integer(IntSize::U8) => {
-                    let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
-                    (s[0] as usize, s[1] as usize)
-                }
-                _ => {
-                    let s: Vec<i32> = shape_attr.read_1d::<i32>()?.to_vec();
-                    (s[0] as usize, s[1] as usize)
-                }
-            };
-
-            let indptr = crate::h5::read_u64(&file.dataset(&format!("{base}/indptr"))?)?;
-            if indptr.len() != n_obs + 1 {
-                return Err(ScxError::InvalidFormat(format!(
-                    "{base}/indptr length {} != n_obs+1 {}",
-                    indptr.len(),
-                    n_obs + 1
-                )));
-            }
-            let dtype = ad_detect_dtype(&file, &format!("{base}/data"))?;
-            (n_obs, n_vars, Some(indptr), dtype)
+            let meta = ad_read_sparse_meta(&file, &base, &base)?;
+            let dtype = value_dtype(&file.dataset(&format!("{base}/data"))?)?;
+            (meta.shape.0, meta.shape.1, Some(meta.indptr), dtype)
         };
 
         Ok(Self {
@@ -190,145 +152,47 @@ fn resolve_matrix_path(file: &File, layer: Option<&str>) -> Result<String> {
 // Reader helpers
 // ---------------------------------------------------------------------------
 
-pub(super) fn ad_detect_dtype(file: &File, path: &str) -> Result<DataType> {
-    crate::h5::value_dtype(&file.dataset(path)?)
-}
-
-/// Read a row slice of a dense 2-D dataset and convert to a sparse CSR chunk.
-fn ad_read_dense_chunk(
+/// Rows `rows` of the `n_cols`-column matrix at `matrix` in the file at
+/// `path`: a CSR group, or a dense 2-D dataset when `indptr` is empty (dense
+/// rows become CSR, dropping zeros).
+fn read_rows(
     path: &Path,
-    base: &str,
-    row_start: usize,
-    row_end: usize,
-    n_vars: usize,
-    dtype: DataType,
-) -> Result<MatrixChunk> {
-    let file = File::open(path)?;
-    ad_read_dense_chunk_with_dtype(&file, base, row_start, row_end, n_vars, dtype)
-}
-
-/// Read a row slice of an arbitrary dense 2-D dataset path and convert to a sparse CSR chunk.
-/// The stored dtype is detected from the dataset itself.
-fn ad_read_dense_chunk_at(
-    path: &Path,
-    ds_path: &str,
-    row_start: usize,
-    row_end: usize,
-    n_vars: usize,
-) -> Result<MatrixChunk> {
-    let file = File::open(path)?;
-    let dtype = ad_detect_dtype(&file, ds_path)?;
-    ad_read_dense_chunk_with_dtype(&file, ds_path, row_start, row_end, n_vars, dtype)
-}
-
-fn ad_read_dense_chunk_with_dtype(
-    file: &File,
-    ds_path: &str,
-    row_start: usize,
-    row_end: usize,
-    n_vars: usize,
-    dtype: DataType,
-) -> Result<MatrixChunk> {
-    let ds = file.dataset(ds_path)?;
-    let slice = ds.read_slice::<f64, _, ndarray::Ix2>(s![row_start..row_end, ..])?;
-    let values = slice.as_standard_layout();
-    Ok(MatrixChunk {
-        row_offset: row_start,
-        nrows: row_end - row_start,
-        data: dense_to_csr(values.as_slice().unwrap_or_default(), n_vars, dtype),
-    })
-}
-
-/// Read a chunk [row_start, row_end) from a CSR matrix stored at /X/.
-/// H5AD natively stores X as CSR, so this is a direct slice — no transpose.
-/// Read `X/indices[a..b]` as `u32`. Uses the parallel-inflate fast path for
-/// 4-byte, deflate-only-chunked datasets (the common case); otherwise the
-/// normal HDF5 read. Column indices are non-negative, so a 4-byte little-endian
-/// reinterpret is correct whether stored signed or unsigned.
-fn read_x_indices(file: &File, base: &str, a: usize, b: usize) -> Result<Vec<u32>> {
-    let ds = file.dataset(&format!("{base}/indices"))?;
-    let stored_bytes = ds.dtype()?.size();
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {}
-        other => {
-            return Err(ScxError::InvalidFormat(format!(
-                "unexpected {base}/indices dtype {:?}",
-                other
-            )))
-        }
-    }
-    if stored_bytes == 4 {
-        if let Some(plan) = h5_chunk::chunk_plan(&ds) {
-            let bytes = h5_chunk::read_range_parallel(&ds, a, b, 4, plan)?;
-            return Ok(bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&c| u32::from_le_bytes(c))
-                .collect());
-        }
-    }
-    Ok(ds
-        .read_slice_1d::<i32, _>(s![a..b])?
-        .iter()
-        .map(|&x| x as u32)
-        .collect())
-}
-
-/// Read `X/data[a..b]` as the requested `dtype`. Uses the parallel-inflate fast
-/// path when the stored element layout matches the requested dtype and the
-/// dataset is deflate-only-chunked; otherwise the normal HDF5 read (which also
-/// handles any stored→requested type conversion).
-fn read_x_data(file: &File, base: &str, a: usize, b: usize, dtype: DataType) -> Result<TypedVec> {
-    let ds = file.dataset(&format!("{base}/data"))?;
-    let (want_bytes, want_float) = match dtype {
-        DataType::F32 => (4usize, true),
-        DataType::F64 => (8, true),
-        DataType::I32 | DataType::U32 => (4, false),
-    };
-    let stored_bytes = ds.dtype()?.size();
-    let stored_float = matches!(ds.dtype()?.to_descriptor()?, TypeDescriptor::Float(_));
-    if stored_bytes == want_bytes && stored_float == want_float {
-        if let Some(plan) = h5_chunk::chunk_plan(&ds) {
-            let raw = h5_chunk::read_range_parallel(&ds, a, b, want_bytes, plan)?;
-            return TypedVec::from_le_bytes(dtype, &raw);
-        }
-    }
-    Ok(match dtype {
-        DataType::F32 => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![a..b])?.to_vec()),
-        DataType::F64 => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![a..b])?.to_vec()),
-        DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![a..b])?.to_vec()),
-        DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![a..b])?.to_vec()),
-    })
-}
-
-fn ad_read_chunk(
-    path: &Path,
-    base: &str,
+    matrix: &str,
     indptr: &[u64],
-    row_start: usize,
-    row_end: usize,
-    n_vars: usize,
-    dtype: DataType,
+    rows: Range<usize>,
+    n_cols: usize,
 ) -> Result<MatrixChunk> {
     let file = File::open(path)?;
-    let nnz_start = indptr[row_start] as usize;
-    let nnz_end = indptr[row_end] as usize;
-    let nnz = nnz_end - nnz_start;
+    if !indptr.is_empty() {
+        let dtype = value_dtype(&file.dataset(&format!("{matrix}/data"))?)?;
+        return read_csr_rows(&file, matrix, indptr, rows, n_cols, dtype);
+    }
+    let ds = file.dataset(matrix)?;
+    let dtype = value_dtype(&ds)?;
+    let values: Vec<f64> = ds
+        .read_slice::<f64, _, ndarray::Ix2>(s![rows.clone(), ..])?
+        .iter()
+        .copied()
+        .collect();
+    Ok(MatrixChunk {
+        row_offset: rows.start,
+        nrows: rows.len(),
+        data: dense_to_csr(&values, n_cols, dtype),
+    })
+}
 
-    let indices: Vec<u32> = if nnz > 0 {
-        read_x_indices(&file, base, nnz_start, nnz_end)?
-    } else {
-        Vec::new()
+/// The `[rows, cols]` `shape` attribute of a sparse matrix group.
+pub(super) fn read_shape(grp: &Group) -> Result<(usize, usize)> {
+    let bad = |what: String| ScxError::InvalidFormat(format!("{}/shape {what}", grp.name()));
+    let attr = grp
+        .attr("shape")
+        .map_err(|_| bad("attribute missing".into()))?;
+    let shape = attr.read_raw::<i64>()?;
+    let [rows, cols] = shape[..] else {
+        return Err(bad(format!("has {} entries, expected 2", shape.len())));
     };
-
-    let data: TypedVec = if nnz > 0 {
-        read_x_data(&file, base, nnz_start, nnz_end, dtype)?
-    } else {
-        TypedVec::empty(dtype)
-    };
-
-    Ok(csr_chunk(indptr, row_start..row_end, n_vars, indices, data))
+    let dim = |d: i64| usize::try_from(d).map_err(|_| bad(format!("has negative entry {d}")));
+    Ok((dim(rows)?, dim(cols)?))
 }
 
 /// Read a dataframe group at `group_path` (e.g. "obs" or "var").
@@ -340,13 +204,10 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
     let index_name = read_str_attr(&grp, "_index").unwrap_or_else(|_| "index".into());
     let index = ad_read_index(file, &format!("{group_path}/{index_name}"))?;
 
-    // Column order from attribute
-    let col_names: Vec<String> = match grp.attr("column-order") {
-        Err(_) => Vec::new(),
-        Ok(attr) => {
-            let raw: Array1<VarLenUnicode> = attr.read_1d().unwrap_or_default();
-            raw.into_iter().map(|s| s.to_string()).collect()
-        }
+    let col_names = if grp.attr("column-order").is_ok() {
+        read_str_array_attr(&grp, "column-order")?
+    } else {
+        Vec::new()
     };
 
     let mut columns = Vec::new();
@@ -369,10 +230,8 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
         } else {
             ad_read_column(file, &col_path).map(|cd| (cd, Vec::new()))
         };
-        match read {
-            Ok((data, missing)) => columns.push(Column::with_missing(col_name, data, missing)),
-            Err(e) => tracing::warn!("skipping column '{col_name}': {e}"),
-        }
+        let (data, missing) = read?;
+        columns.push(Column::with_missing(col_name, data, missing));
     }
 
     Ok((index, columns))
@@ -556,85 +415,64 @@ fn ad_read_nullable(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool
     Ok((data, missing))
 }
 
-/// Read the obsm group as named dense matrices.
-fn ad_read_obsm(path: &Path, n_obs: usize) -> Result<Embeddings> {
-    let file = File::open(path)?;
-    let grp = match file.group("obsm") {
-        Ok(g) => g,
-        Err(_) => return Ok(Embeddings::default()),
+/// The dense 2-D entries of the dict group `group` (obsm, varm). Entries
+/// stored as groups (dataframes, sparse matrices) have no dense form and are
+/// skipped with a warning. With `n_rows`, an entry stored transposed
+/// (k × n_rows, as some writers do) is turned back to n_rows × k.
+fn ad_read_dense_dict(
+    file: &File,
+    group: &str,
+    n_rows: Option<usize>,
+) -> Result<HashMap<String, DenseMatrix>> {
+    let Ok(grp) = file.group(group) else {
+        return Ok(HashMap::new());
     };
     let mut map = HashMap::new();
-    for name in grp.member_names().unwrap_or_default() {
-        let ds_path = format!("obsm/{name}");
-        let ds = match file.dataset(&ds_path) {
-            Ok(d) => d,
-            Err(_) => continue,
+    for name in grp.member_names()? {
+        let Ok(ds) = grp.dataset(&name) else {
+            let entry = grp.group(&name)?;
+            let enc = read_str_attr(&entry, "encoding-type").unwrap_or_default();
+            tracing::warn!("skipping {group}['{name}']: {enc} entries are not supported");
+            continue;
         };
-        let arr: Array2<f64> = match ds.read::<f64, ndarray::Ix2>() {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!("skipping obsm['{name}']: {e}");
-                continue;
-            }
-        };
-        // Guard against transposed storage (some writers store (k, n_obs))
-        let arr = if arr.shape()[0] != n_obs && arr.shape()[1] == n_obs {
-            arr.t().to_owned()
-        } else {
-            arr
+        let arr = ds
+            .read::<f64, ndarray::Ix2>()
+            .map_err(|e| ScxError::InvalidFormat(format!("{group}['{name}']: {e}")))?;
+        let arr = match n_rows {
+            Some(n) if arr.shape()[0] != n && arr.shape()[1] == n => arr.t().to_owned(),
+            _ => arr,
         };
         let shape = (arr.shape()[0], arr.shape()[1]);
-        map.insert(
-            name,
-            DenseMatrix {
-                shape,
-                data: arr.into_raw_vec_and_offset().0,
-            },
-        );
+        let data = arr.as_standard_layout().iter().copied().collect();
+        map.insert(name, DenseMatrix { shape, data });
     }
-    Ok(Embeddings { map })
+    Ok(map)
 }
 
-/// Read the shape and indptr for an H5AD CSR sparse group — used to create a `SparseMatrixMeta`.
+/// The shape and indptr of the CSR matrix group at `group_path`. CSC is an
+/// error: reading it as CSR would silently transpose the matrix.
 fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
-    let shape_attr = grp.attr("shape")?;
-    let (nrows, ncols) = match shape_attr.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(IntSize::U8) => {
-            let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
-            (s[0] as usize, s[1] as usize)
-        }
-        _ => {
-            let s: Vec<i32> = shape_attr.read_1d::<i32>()?.to_vec();
-            (s[0] as usize, s[1] as usize)
-        }
-    };
-    let indptr = crate::h5::read_u64(&file.dataset(&format!("{group_path}/indptr"))?)?;
+    if read_str_attr(&grp, "encoding-type").is_ok_and(|enc| enc == "csc_matrix") {
+        return Err(ScxError::InvalidFormat(format!(
+            "{group_path} is stored as CSC. Convert to CSR first, e.g. \
+             adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
+        )));
+    }
+    let shape = read_shape(&grp)?;
+    let indptr = read_u64(&file.dataset(&format!("{group_path}/indptr"))?)?;
+    if indptr.len() != shape.0 + 1 {
+        return Err(ScxError::InvalidFormat(format!(
+            "{group_path}/indptr has {} entries, expected n_rows + 1 = {}",
+            indptr.len(),
+            shape.0 + 1
+        )));
+    }
     Ok(SparseMatrixMeta {
         name: name.to_string(),
-        shape: (nrows, ncols),
+        shape,
         indptr,
     })
-}
-
-/// Read a row-slice of an H5AD CSR sparse group as a `MatrixChunk`.
-fn ad_read_sparse_chunk(
-    path: &Path,
-    group_path: &str,
-    meta: &SparseMatrixMeta,
-    row_start: usize,
-    row_end: usize,
-) -> Result<MatrixChunk> {
-    let file = File::open(path)?;
-    let dtype = crate::h5::value_dtype(&file.dataset(&format!("{group_path}/data"))?)?;
-    crate::h5::read_csr_rows(
-        &file,
-        group_path,
-        &meta.indptr,
-        row_start..row_end,
-        meta.shape.1,
-        dtype,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +506,9 @@ impl DatasetReader for H5AdReader {
     }
 
     async fn obsm(&mut self) -> Result<Embeddings> {
-        ad_read_obsm(&self.path, self.n_obs)
+        let file = File::open(&self.path)?;
+        let map = ad_read_dense_dict(&file, "obsm", Some(self.n_obs))?;
+        Ok(Embeddings { map })
     }
 
     async fn uns(&mut self) -> Result<UnsTable> {
@@ -694,40 +534,32 @@ impl DatasetReader for H5AdReader {
 
     async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
         let file = File::open(&self.path)?;
-        let grp = match file.group("layers") {
-            Err(_) => return Ok(Vec::new()),
-            Ok(g) => g,
+        let Ok(grp) = file.group("layers") else {
+            return Ok(Vec::new());
         };
         let mut metas = Vec::new();
-        for name in grp.member_names().unwrap_or_default() {
+        for name in grp.member_names()? {
             let grp_path = format!("layers/{name}");
             // The layer already serving as X (no /X, or open_layer) is not
             // also a layer: every consumer would carry the matrix twice.
             if grp_path == self.x_path {
                 continue;
             }
-            // Dense layer: read shape from dataset dimensions, indptr unused for inspect.
-            if let Ok(ds) = file.dataset(&grp_path) {
-                if file.group(&grp_path).is_err() {
-                    let shape = ds.shape();
-                    if shape.len() == 2 {
-                        metas.push(SparseMatrixMeta {
-                            name: name.clone(),
-                            shape: (shape[0], shape[1]),
-                            indptr: Vec::new(),
-                        });
-                    } else {
-                        tracing::warn!(
-                            "skipping dense layer '{name}': unexpected rank {}",
-                            shape.len()
-                        );
+            match grp.dataset(&name) {
+                // Dense: an empty indptr marks it for read_rows.
+                Ok(ds) => match ds.shape()[..] {
+                    [rows, cols] => metas.push(SparseMatrixMeta {
+                        name,
+                        shape: (rows, cols),
+                        indptr: Vec::new(),
+                    }),
+                    ref other => {
+                        return Err(ScxError::InvalidFormat(format!(
+                            "dense {grp_path} must be 2-D, has shape {other:?}"
+                        )))
                     }
-                    continue;
-                }
-            }
-            match ad_read_sparse_meta(&file, &name, &grp_path) {
-                Ok(m) => metas.push(m),
-                Err(e) => tracing::warn!("skipping layers['{name}']: {e}"),
+                },
+                Err(_) => metas.push(ad_read_sparse_meta(&file, &name, &grp_path)?),
             }
         }
         Ok(metas)
@@ -735,18 +567,16 @@ impl DatasetReader for H5AdReader {
 
     async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
         let file = File::open(&self.path)?;
-        let grp = match file.group("obsp") {
-            Err(_) => return Ok(Vec::new()),
-            Ok(g) => g,
+        let Ok(grp) = file.group("obsp") else {
+            return Ok(Vec::new());
         };
-        let mut metas = Vec::new();
-        for name in grp.member_names().unwrap_or_default() {
-            match ad_read_sparse_meta(&file, &name, &format!("obsp/{name}")) {
-                Ok(m) => metas.push(m),
-                Err(e) => tracing::warn!("skipping obsp['{name}']: {e}"),
-            }
-        }
-        Ok(metas)
+        grp.member_names()?
+            .into_iter()
+            .map(|name| {
+                let grp_path = format!("obsp/{name}");
+                ad_read_sparse_meta(&file, &name, &grp_path)
+            })
+            .collect()
     }
 
     fn layer_stream<'a>(
@@ -754,84 +584,30 @@ impl DatasetReader for H5AdReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> ChunkStream<'a> {
-        let path = self.path.clone();
-        let grp_path = format!("layers/{}", meta.name);
-        let n_rows = meta.shape.0;
-        let n_cols = meta.shape.1;
-        let is_dense = meta.indptr.is_empty();
-        row_chunks(n_rows, chunk_size, move |rows| {
-            let (row_start, row_end) = (rows.start, rows.end);
-            if is_dense {
-                ad_read_dense_chunk_at(&path, &grp_path, row_start, row_end, n_cols)
-            } else {
-                ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
-            }
+        let matrix = format!("layers/{}", meta.name);
+        row_chunks(meta.shape.0, chunk_size, move |rows| {
+            read_rows(&self.path, &matrix, &meta.indptr, rows, meta.shape.1)
         })
     }
 
     fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
-        let path = self.path.clone();
-        let grp_path = format!("obsp/{}", meta.name);
-        let n_rows = meta.shape.0;
-        row_chunks(n_rows, chunk_size, move |rows| {
-            let (row_start, row_end) = (rows.start, rows.end);
-            ad_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
+        let matrix = format!("obsp/{}", meta.name);
+        row_chunks(meta.shape.0, chunk_size, move |rows| {
+            read_rows(&self.path, &matrix, &meta.indptr, rows, meta.shape.1)
         })
     }
 
     async fn varm(&mut self) -> Result<Varm> {
         let file = File::open(&self.path)?;
-        let grp = match file.group("varm") {
-            Err(_) => return Ok(Varm::default()),
-            Ok(g) => g,
-        };
-        let mut map = HashMap::new();
-        for name in grp.member_names().unwrap_or_default() {
-            let ds = match file.dataset(&format!("varm/{name}")) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            match ds.read::<f64, ndarray::Ix2>() {
-                Ok(arr) => {
-                    let shape = (arr.shape()[0], arr.shape()[1]);
-                    map.insert(
-                        name,
-                        DenseMatrix {
-                            shape,
-                            data: arr.into_raw_vec_and_offset().0,
-                        },
-                    );
-                }
-                Err(e) => tracing::warn!("skipping varm['{name}']: {e}"),
-            }
-        }
+        let map = ad_read_dense_dict(&file, "varm", None)?;
         Ok(Varm { map })
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
-        let path = self.path.clone();
-        let base = self.x_path.clone();
-        let n_obs = self.n_obs;
-        let n_vars = self.n_vars;
-        let chunk_size = self.chunk_size;
-        let dtype = self.dtype;
-
-        match &self.indptr {
-            Some(indptr) => row_chunks(n_obs, chunk_size, move |rows| {
-                let (row_start, row_end) = (rows.start, rows.end);
-                ad_read_chunk(&path, &base, indptr, row_start, row_end, n_vars, dtype)
-            }),
-            None => {
-                // Dense X: read rows slice-by-slice and convert to sparse CSR
-                row_chunks(n_obs, chunk_size, move |rows| {
-                    let (row_start, row_end) = (rows.start, rows.end);
-                    ad_read_dense_chunk(&path, &base, row_start, row_end, n_vars, dtype)
-                })
-            }
-        }
+        let this = &*self;
+        let indptr = this.indptr.as_deref().unwrap_or(&[]);
+        row_chunks(this.n_obs, this.chunk_size, move |rows| {
+            read_rows(&this.path, &this.x_path, indptr, rows, this.n_vars)
+        })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------

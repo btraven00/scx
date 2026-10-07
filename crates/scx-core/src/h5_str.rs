@@ -145,6 +145,24 @@ pub(crate) fn read_str_attr(loc: &hdf5::Location, name: &str) -> Result<String> 
     )))
 }
 
+/// A 1-D string-array attribute, UTF-8 or ASCII. An empty attribute of any
+/// type is an empty list: h5py writes an empty `column-order` as float64.
+pub(crate) fn read_str_array_attr(loc: &hdf5::Location, name: &str) -> Result<Vec<String>> {
+    let attr = loc.attr(name)?;
+    if attr.size() == 0 {
+        return Ok(Vec::new());
+    }
+    if let Ok(a) = attr.read_raw::<VarLenUnicode>() {
+        return Ok(a.iter().map(|s| s.to_string()).collect());
+    }
+    if let Ok(a) = attr.read_raw::<VarLenAscii>() {
+        return Ok(a.iter().map(|s| s.to_string()).collect());
+    }
+    Err(ScxError::InvalidFormat(format!(
+        "attribute '{name}' is not a string array"
+    )))
+}
+
 /// Set the scalar string attribute `name`, replacing an existing one.
 pub(crate) fn write_str_attr(loc: &hdf5::Location, name: &str, value: &str) -> Result<()> {
     if loc.attr(name).is_ok() {
