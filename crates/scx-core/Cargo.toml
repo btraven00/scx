@@ -1,6 +1,6 @@
 [package]
 name = "scx-core"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 # zarrs needs 1.91; checked by the msrv job in ci.yml.
 rust-version = "1.91"
