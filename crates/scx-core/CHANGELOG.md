@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/btraven00/scx/compare/scx-core-v0.4.1...scx-core-v0.5.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** ScxError (core and api) is #[non_exhaustive]; match it with a wildcard arm. api::ScxError's Hdf5(String), NotImplemented and Other variants are gone; ScxError::Net(String) and ScxError::Zarr(String) are now Net { source, .. } and Zarr { path, source, .. }. H5AdOptions and BpcellsOptions can no longer be built with a struct literal outside scx-core:
+
+### Bug Fixes
+
+* **core:** h5ad keeps layer dtypes, rejects CSC slots, errors instead of skipping ([700d147](https://github.com/btraven00/scx/commit/700d1470e86ac19ed1ad0995d9be83da0232ecb7))
+
+
+### Code Refactoring
+
+* **core:** one error type; the three api builders share one core ([d4dc9ca](https://github.com/btraven00/scx/commit/d4dc9cad28ecb97a8d75ecef376e73ecb2eede3f))
+
 ## [0.4.1](https://github.com/btraven00/scx/compare/scx-core-v0.4.0...scx-core-v0.4.1) (2026-10-06)
 
 

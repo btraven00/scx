@@ -1,5 +1,5 @@
 {
-  "crates/scx-core": "0.4.1",
-  "crates/scx-cli": "0.4.1",
-  "python/picklerick": "0.4.1"
+  "crates/scx-core": "0.5.0",
+  "crates/scx-cli": "0.5.0",
+  "python/picklerick": "0.5.0"
 }

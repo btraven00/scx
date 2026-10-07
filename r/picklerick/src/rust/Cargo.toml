@@ -19,7 +19,7 @@ extendr-api = "0.7"
 # the system libhdf5 (e.g. H5Literate removed in 1.14+). release-please bumps
 # the version with the rest of the scx group; CI and the conda recipe patch it
 # to the in-tree crate, so main is tested against main (docs/releasing.md).
-scx-core    = "0.4.1" # x-release-please-version
+scx-core    = "0.5.0" # x-release-please-version
 tokio       = { version = "1", features = ["rt"] }
 futures     = "0.3"
 anyhow      = "1"
