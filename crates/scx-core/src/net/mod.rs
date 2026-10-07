@@ -22,7 +22,7 @@ use object_store::path::Path as StorePath;
 use object_store::{parse_url_opts, ObjectStore};
 use url::Url;
 
-use crate::error::{Result, ScxError};
+use crate::error::Result;
 
 /// Schemes we route through the object-store transport. A string that parses as
 /// a URL with one of these schemes is treated as network/object-store input;
@@ -55,25 +55,27 @@ pub fn resolve_store(location: &str) -> Result<(Arc<dyn ObjectStore>, StorePath)
         // which becomes `refs/convert/parquet` and 404s ("Invalid rev id"). Fail
         // early with guidance rather than emit a confusing not-found.
         if location.to_ascii_lowercase().contains("%2f") {
-            return Err(ScxError::Net(format!(
+            return Err(crate::parquet::net_err(format!(
                 "URL '{location}' contains a percent-encoded slash (%2F), which object_store \
                  decodes to '/' and corrupts the ref. Use a ref without a slash — e.g. the \
                  dataset's main branch: .../resolve/main/<path>"
             )));
         }
         let url = Url::parse(location)
-            .map_err(|e| ScxError::Net(format!("invalid URL '{location}': {e}")))?;
+            .map_err(|e| crate::parquet::net_err(format!("invalid URL '{location}': {e}")))?;
         // TODO creds: thread AWS_*/GOOGLE_* env (or explicit config) into the
         // options iterator for private buckets. Empty == anonymous/public.
         let (store, path) = parse_url_opts(&url, std::iter::empty::<(&str, &str)>())
-            .map_err(|e| ScxError::Net(format!("cannot open '{location}': {e}")))?;
+            .map_err(|e| crate::parquet::net_err(format!("cannot open '{location}': {e}")))?;
         Ok((Arc::from(store), path))
     } else {
         // Bare local path: an absolute filesystem key over a root LocalFileSystem.
-        let abs = std::fs::canonicalize(location)
-            .map_err(|e| ScxError::Net(format!("cannot resolve local path '{location}': {e}")))?;
-        let path = StorePath::from_filesystem_path(&abs)
-            .map_err(|e| ScxError::Net(format!("invalid local path '{location}': {e}")))?;
+        let abs = std::fs::canonicalize(location).map_err(|e| {
+            crate::parquet::net_err(format!("cannot resolve local path '{location}': {e}"))
+        })?;
+        let path = StorePath::from_filesystem_path(&abs).map_err(|e| {
+            crate::parquet::net_err(format!("invalid local path '{location}': {e}"))
+        })?;
         let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
         Ok((store, path))
     }
@@ -82,6 +84,7 @@ pub fn resolve_store(location: &str) -> Result<(Arc<dyn ObjectStore>, StorePath)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ScxError;
 
     #[test]
     fn classifies_network_vs_local() {
@@ -114,8 +117,12 @@ mod tests {
             "https://huggingface.co/datasets/x/y/resolve/refs%2Fconvert%2Fparquet/a/0.parquet",
         )
         .unwrap_err();
+        let err_msg = err.to_string();
         match err {
-            ScxError::Net(msg) => assert!(msg.contains("%2F"), "message should mention %2F: {msg}"),
+            ScxError::Net { .. } => assert!(
+                err_msg.contains("%2F"),
+                "message should mention %2F: {err_msg}"
+            ),
             other => panic!("expected ScxError::Net, got {other:?}"),
         }
     }
@@ -125,6 +132,16 @@ mod tests {
         // ftp:// isn't a net scheme, so it falls to the local-path branch and
         // fails to canonicalize → ScxError::Net (not a panic).
         let err = resolve_store("ftp://host/x").unwrap_err();
-        assert!(matches!(err, ScxError::Net(_)));
+        assert!(matches!(err, ScxError::Net { .. }));
+    }
+
+    #[test]
+    fn net_error_keeps_its_source() {
+        use std::error::Error;
+        let io = std::io::Error::new(std::io::ErrorKind::TimedOut, "slow bucket");
+        let err = crate::parquet::net_err(io);
+        assert_eq!(err.to_string(), "network reader error: slow bucket");
+        let source = err.source().expect("source dropped");
+        assert!(source.downcast_ref::<std::io::Error>().is_some());
     }
 }

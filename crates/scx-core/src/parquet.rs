@@ -38,9 +38,11 @@ mod tests;
 pub use genes::GeneDict;
 pub use reader::ParquetReader;
 
-/// Convert a network-stack error (object_store / parquet / arrow) into
-/// [`ScxError::Net`](crate::error::ScxError::Net), keeping the variant free of
-/// the `net`-only crate types. Shared by the reader and the layout converters.
-pub(crate) fn net_err<E: std::fmt::Display>(e: E) -> crate::error::ScxError {
-    crate::error::ScxError::Net(e.to_string())
+/// A network-stack error (object_store / parquet / arrow) or a message as
+/// [`ScxError::Net`](crate::error::ScxError::Net). Shared by the reader and
+/// the layout converters.
+pub(crate) fn net_err(
+    e: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> crate::error::ScxError {
+    crate::error::ScxError::Net { source: e.into() }
 }

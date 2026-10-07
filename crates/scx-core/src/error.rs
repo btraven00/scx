@@ -1,6 +1,9 @@
 use thiserror::Error;
 
+/// Every scx-core error. New variants and fields may be added in minor
+/// releases, so match with a wildcard arm.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ScxError {
     #[error("HDF5 error: {0}")]
     Hdf5(#[from] hdf5::Error),
@@ -20,15 +23,33 @@ pub enum ScxError {
     #[error("missing field: {0}")]
     MissingField(String),
 
-    /// Network-backed reader failure (object_store / parquet / arrow). Carries a
-    /// stringified cause so the variant stays free of the `net`-only crate types.
-    #[error("network reader error: {0}")]
-    Net(String),
+    /// A matrix whose shape disagrees with the declared `(n_obs, n_vars)`.
+    #[error("shape mismatch: expected {expected:?}, got {got:?}")]
+    WrongShape {
+        expected: (usize, usize),
+        got: (usize, usize),
+    },
 
-    /// Zarr store failure. Stringified so the variant stays free of zarrs types
-    /// (the crate is behind the `zarr` feature).
-    #[error("zarr error: {0}")]
-    Zarr(String),
+    /// A CSC matrix where CSR (cells × genes) is required.
+    #[error("expected CSR (cells × genes); got CSC. Call .to_csr() first.")]
+    WrongOrientation,
+
+    /// Network-backed reader failure (object_store / parquet / arrow). The
+    /// source is boxed so the variant stays free of the `net`-only crate types.
+    #[error("network reader error: {source}")]
+    #[non_exhaustive]
+    Net {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Zarr store failure at `path`. The source is boxed so the variant stays
+    /// free of zarrs types (the crate is behind the `zarr` feature).
+    #[error("zarr error: {path}: {source}")]
+    #[non_exhaustive]
+    Zarr {
+        path: String,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, ScxError>;

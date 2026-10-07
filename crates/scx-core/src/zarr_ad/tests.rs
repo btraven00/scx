@@ -178,3 +178,14 @@ async fn unsorted_indices_are_sorted_like_h5ad() {
         }
     }
 }
+
+#[test]
+fn store_errors_keep_their_source() {
+    use std::error::Error;
+
+    let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no chunk");
+    let err = super::zerr("X/data", io);
+    assert_eq!(err.to_string(), "zarr error: X/data: no chunk");
+    let source = err.source().expect("source dropped");
+    assert!(source.downcast_ref::<std::io::Error>().is_some());
+}
