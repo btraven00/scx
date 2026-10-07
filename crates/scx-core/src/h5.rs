@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
+    h5_chunk,
     ir::MatrixChunk,
 };
 
@@ -43,13 +44,26 @@ pub(crate) fn read_u64(ds: &hdf5::Dataset) -> Result<Vec<u64>> {
     }
 }
 
-/// Read `range` of an integer index dataset (indices) as u32.
+/// Read `range` of an integer index dataset (indices) as u32. A 4-byte,
+/// deflate-only chunked dataset (the common case) is inflated in parallel;
+/// column indices are non-negative, so reading signed storage as u32 is exact.
 pub(crate) fn read_u32_range(
     ds: &hdf5::Dataset,
     range: std::ops::Range<usize>,
 ) -> Result<Vec<u32>> {
     match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
+            if ds.dtype()?.size() == 4 {
+                if let Some(plan) = h5_chunk::chunk_plan(ds) {
+                    let bytes = h5_chunk::read_range_parallel(ds, range.start, range.end, 4, plan)?;
+                    return Ok(bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|&b| u32::from_le_bytes(b))
+                        .collect());
+                }
+            }
             Ok(ds.read_slice_1d::<u32, _>(s![range])?.to_vec())
         }
         other => Err(ScxError::InvalidFormat(format!(
@@ -100,12 +114,21 @@ pub(crate) fn read_csr_rows(
     ))
 }
 
-/// Read `range` of a values dataset as `dtype`.
+/// Read `range` of a values dataset as `dtype`. When that is the stored type
+/// and the dataset is deflate-only chunked, chunks are inflated in parallel;
+/// otherwise HDF5 reads and converts.
 pub(crate) fn read_values(
     ds: &hdf5::Dataset,
     dtype: DataType,
     range: std::ops::Range<usize>,
 ) -> Result<TypedVec> {
+    if value_dtype(ds)? == dtype && ds.dtype()?.size() == dtype.size() {
+        if let Some(plan) = h5_chunk::chunk_plan(ds) {
+            let raw =
+                h5_chunk::read_range_parallel(ds, range.start, range.end, dtype.size(), plan)?;
+            return TypedVec::from_le_bytes(dtype, &raw);
+        }
+    }
     Ok(match dtype {
         DataType::F32 => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![range])?.to_vec()),
         DataType::F64 => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![range])?.to_vec()),

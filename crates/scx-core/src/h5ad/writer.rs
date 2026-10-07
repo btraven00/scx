@@ -1,19 +1,20 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use hdf5::types::{IntSize, TypeDescriptor, VarLenUnicode};
+use hdf5::types::VarLenUnicode;
 use hdf5::{Dataset, File, Group, SimpleExtents};
 use ndarray::{s, Array1, Array2};
 
-use super::reader::ad_detect_dtype;
-use crate::h5_str::{write_str_attr, write_strings};
+use super::reader::read_shape;
+use crate::h5_str::{read_str_array_attr, write_str_array_attr, write_str_attr, write_strings};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
-        UnsTable, VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+        SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
     stream::DatasetWriter,
 };
@@ -38,6 +39,8 @@ struct SparseWriteState {
     indptr: Vec<u64>,
     /// Matrix shape (nrows, ncols) — written as the AnnData "shape" attribute on finalize.
     shape: (usize, usize),
+    /// The stored value type: the first chunk's, so `data` is created then.
+    dtype: Option<DataType>,
 }
 
 /// Streaming writer for the AnnData `.h5ad` format.
@@ -108,14 +111,9 @@ impl H5AdWriter {
         write_str_attr(&x_grp, "encoding-version", "0.1.0")?;
         // shape attr written in finalize() once we know n_obs
 
-        match dtype {
-            DataType::F32 => init_resizable_1d::<f32>(&file, "X/data", compression)?,
-            DataType::F64 => init_resizable_1d::<f64>(&file, "X/data", compression)?,
-            DataType::I32 => init_resizable_1d::<i32>(&file, "X/data", compression)?,
-            DataType::U32 => init_resizable_1d::<u32>(&file, "X/data", compression)?,
-        }
+        init_values(&x_grp, dtype, compression)?;
         // AnnData spec requires indices as i32
-        init_resizable_1d::<i32>(&file, "X/indices", compression)?;
+        init_resizable_1d::<i32>(&x_grp, "indices", compression)?;
 
         Ok(Self {
             file,
@@ -140,20 +138,8 @@ impl H5AdWriter {
         let x_grp = file
             .group("X")
             .map_err(|_| ScxError::InvalidFormat("missing /X — not a valid H5AD file".into()))?;
-        let shape_attr = x_grp
-            .attr("shape")
-            .map_err(|_| ScxError::InvalidFormat("missing X/shape attribute".into()))?;
-        let (n_obs, n_vars) = match shape_attr.dtype()?.to_descriptor()? {
-            TypeDescriptor::Integer(IntSize::U8) => {
-                let s: Vec<i64> = shape_attr.read_1d::<i64>()?.to_vec();
-                (s[0] as usize, s[1] as usize)
-            }
-            _ => {
-                let s: Vec<i32> = shape_attr.read_1d::<i32>()?.to_vec();
-                (s[0] as usize, s[1] as usize)
-            }
-        };
-        let dtype = ad_detect_dtype(&file, "X/data")?;
+        let (n_obs, n_vars) = read_shape(&x_grp)?;
+        let dtype = crate::h5::value_dtype(&file.dataset("X/data")?)?;
 
         Ok(Self {
             file,
@@ -229,14 +215,7 @@ impl H5AdWriter {
     /// limitations as [`crate::h5_json::write_json`]). Creates `/uns` if absent and
     /// replaces any existing entry of the same name.
     pub fn add_uns_entry(&self, name: &str, value: &serde_json::Value) -> Result<()> {
-        let uns_grp = match self.file.group("uns") {
-            Ok(g) => g,
-            Err(_) => {
-                let g = self.file.create_group("uns")?;
-                write_encoding_on_group(&g, "dict", "0.1.0")?;
-                g
-            }
-        };
+        let uns_grp = dict_group(&self.file, "uns")?;
         if uns_grp.group(name).is_ok() || uns_grp.dataset(name).is_ok() {
             uns_grp.unlink(name)?;
         }
@@ -253,14 +232,7 @@ impl H5AdWriter {
     /// Creates `/uns` if it does not exist. Idempotent: deletes any existing
     /// `scx_provenance` entry (string or group) before writing the new one.
     pub fn upsert_uns_provenance(&self, prov: &serde_json::Value) -> Result<()> {
-        let uns_grp = match self.file.group("uns") {
-            Ok(g) => g,
-            Err(_) => {
-                let g = self.file.create_group("uns")?;
-                write_encoding_on_group(&g, "dict", "0.1.0")?;
-                g
-            }
-        };
+        let uns_grp = dict_group(&self.file, "uns")?;
         // Remove any pre-existing entry (may be a group or a dataset).
         if uns_grp.group("scx_provenance").is_ok() || uns_grp.dataset("scx_provenance").is_ok() {
             uns_grp.unlink("scx_provenance")?;
@@ -298,19 +270,105 @@ fn write_encoding_on_ds(ds: &Dataset, enc_type: &str, enc_version: &str) -> Resu
 // ---------------------------------------------------------------------------
 
 fn init_resizable_1d<T: hdf5::H5Type>(
-    file: &File,
-    path: &str,
+    grp: &Group,
+    name: &str,
     compression: Option<u8>,
-) -> Result<()> {
+) -> Result<Dataset> {
     // Resizable datasets are always chunked, so deflate applies directly.
-    let mut builder = file.new_dataset::<T>().chunk(CHUNK_ELEMS);
+    let mut builder = grp.new_dataset::<T>().chunk(CHUNK_ELEMS);
     if let Some(level) = compression {
         builder = builder.deflate(level);
     }
-    builder
+    Ok(builder
         .shape(SimpleExtents::resizable([0usize]))
-        .create(path)?;
+        .create(name)?)
+}
+
+/// An empty, growable `data` dataset of `dtype` in the matrix group `grp`.
+fn init_values(grp: &Group, dtype: DataType, compression: Option<u8>) -> Result<Dataset> {
+    match dtype {
+        DataType::F32 => init_resizable_1d::<f32>(grp, "data", compression),
+        DataType::F64 => init_resizable_1d::<f64>(grp, "data", compression),
+        DataType::I32 => init_resizable_1d::<i32>(grp, "data", compression),
+        DataType::U32 => init_resizable_1d::<u32>(grp, "data", compression),
+    }
+}
+
+/// The dict group `name` (uns, obsm, layers, ...), created if absent.
+fn dict_group(file: &File, name: &str) -> Result<Group> {
+    if let Ok(g) = file.group(name) {
+        return Ok(g);
+    }
+    let g = file.create_group(name)?;
+    write_encoding_on_group(&g, "dict", "0.1.0")?;
+    Ok(g)
+}
+
+/// Chunks at least this large are converted in parallel. The conversion runs
+/// before HDF5 is called, so it doesn't contend for HDF5's global lock.
+const PAR_THRESHOLD: usize = 100_000;
+
+/// `v` converted to `T` through `f`.
+fn cast_slice<S: Copy + Into<f64> + Sync, T: Send>(
+    v: &[S],
+    f: impl Fn(f64) -> T + Sync + Send,
+) -> Vec<T> {
+    use rayon::prelude::*;
+    if v.len() >= PAR_THRESHOLD {
+        v.par_iter().map(|&x| f(x.into())).collect()
+    } else {
+        v.iter().map(|&x| f(x.into())).collect()
+    }
+}
+
+/// `v` converted to `T` through `f`.
+fn cast<T: Send>(v: &TypedVec, f: impl Fn(f64) -> T + Sync + Send) -> Vec<T> {
+    match v {
+        TypedVec::F32(v) => cast_slice(v, f),
+        TypedVec::F64(v) => cast_slice(v, f),
+        TypedVec::I32(v) => cast_slice(v, f),
+        TypedVec::U32(v) => cast_slice(v, f),
+    }
+}
+
+/// Append a chunk's values and column indices to the growable `data` (stored
+/// as `dtype`) and `indices` datasets of the matrix group `grp`.
+fn append_csr(grp: &Group, csr: &SparseMatrixCSR, dtype: DataType) -> Result<()> {
+    let nnz = csr.indices.len();
+    if nnz == 0 {
+        return Ok(());
+    }
+    let data_ds = grp.dataset("data")?;
+    let range = data_ds.shape()[0]..data_ds.shape()[0] + nnz;
+    data_ds.resize(range.end)?;
+    let dst = s![range.clone()];
+    match (&csr.data, dtype) {
+        // Same type: write straight from the chunk, no copy.
+        (TypedVec::F32(v), DataType::F32) => data_ds.write_slice(v.as_slice(), dst)?,
+        (TypedVec::F64(v), DataType::F64) => data_ds.write_slice(v.as_slice(), dst)?,
+        (TypedVec::I32(v), DataType::I32) => data_ds.write_slice(v.as_slice(), dst)?,
+        (TypedVec::U32(v), DataType::U32) => data_ds.write_slice(v.as_slice(), dst)?,
+        (v, DataType::F32) => data_ds.write_slice(&cast(v, |x| x as f32), dst)?,
+        (v, DataType::F64) => data_ds.write_slice(&cast(v, |x| x), dst)?,
+        (v, DataType::I32) => data_ds.write_slice(&cast(v, |x| x as i32), dst)?,
+        (v, DataType::U32) => data_ds.write_slice(&cast(v, |x| x as u32), dst)?,
+    }
+    let idx_ds = grp.dataset("indices")?;
+    idx_ds.resize(range.end)?;
+    let indices = cast_slice(&csr.indices, |x| x as i32);
+    idx_ds.write_slice(&indices, s![range])?;
     Ok(())
+}
+
+/// Write `indptr` into `grp` as i32, or as i64 when it doesn't fit.
+fn write_indptr(grp: &Group, indptr: &[u64], compression: Option<u8>) -> Result<Dataset> {
+    if indptr.last().is_some_and(|&n| n > i32::MAX as u64) {
+        let v: Vec<i64> = indptr.iter().map(|&x| x as i64).collect();
+        write_1d(grp, "indptr", Array1::from_vec(v), compression)
+    } else {
+        let v: Vec<i32> = indptr.iter().map(|&x| x as i32).collect();
+        write_1d(grp, "indptr", Array1::from_vec(v), compression)
+    }
 }
 
 fn write_1d<T: hdf5::H5Type>(
@@ -394,16 +452,8 @@ fn write_dataframe(
         })
         .collect();
 
-    // column-order: array of strings listing the non-index columns in order
-    let col_names: Vec<VarLenUnicode> = columns
-        .iter()
-        .map(|c| VarLenUnicode::from_str(&c.name).unwrap_or_default())
-        .collect();
-    let attr = grp
-        .new_attr::<VarLenUnicode>()
-        .shape(col_names.len())
-        .create("column-order")?;
-    attr.write(&Array1::from_vec(col_names))?;
+    let col_names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    write_str_array_attr(&grp, "column-order", &col_names)?;
 
     // index dataset
     let idx_ds = write_strings(&grp, "_index", index)?;
@@ -565,21 +615,7 @@ impl DatasetWriter for H5AdWriter {
     }
 
     async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
-        let grp = self.file.create_group("obsm")?;
-        write_encoding_on_group(&grp, "dict", "0.1.0")?;
-
-        let mut keys: Vec<&String> = obsm.map.keys().collect();
-        keys.sort();
-        for name in keys {
-            let mat = &obsm.map[name];
-            let (nrows, ncols) = mat.shape;
-            let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
-                .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-            let ds = write_2d_f64(&grp, name.as_str(), &arr, self.compression)?;
-            write_encoding_on_ds(&ds, "array", "0.2.0")?;
-        }
-
-        Ok(())
+        write_dense_dict(&self.file, "obsm", &obsm.map, self.compression)
     }
 
     async fn write_uns(&mut self, uns: &UnsTable) -> Result<()> {
@@ -599,37 +635,17 @@ impl DatasetWriter for H5AdWriter {
         name: &str,
         meta: &SparseMatrixMeta,
     ) -> Result<()> {
-        // Ensure the top-level dict group exists (created once on first call).
-        let top = match self.file.group(group_prefix) {
-            Ok(g) => g,
-            Err(_) => {
-                let g = self.file.create_group(group_prefix)?;
-                write_encoding_on_group(&g, "dict", "0.1.0")?;
-                g
-            }
-        };
-
-        let group_path = format!("{group_prefix}/{name}");
-        let mat_grp = top.create_group(name)?;
+        let mat_grp = dict_group(&self.file, group_prefix)?.create_group(name)?;
         write_encoding_on_group(&mat_grp, "csr_matrix", "0.1.0")?;
-
-        // Pre-create resizable data/indices datasets.
-        init_resizable_1d::<f32>(&self.file, &format!("{group_path}/data"), self.compression)?;
-        let ds = self.file.dataset(&format!("{group_path}/data"))?;
-        write_encoding_on_ds(&ds, "array", "0.2.0")?;
-
-        init_resizable_1d::<i32>(
-            &self.file,
-            &format!("{group_path}/indices"),
-            self.compression,
-        )?;
-        let ds = self.file.dataset(&format!("{group_path}/indices"))?;
+        // `data` waits for the first chunk, which fixes its type.
+        let ds = init_resizable_1d::<i32>(&mat_grp, "indices", self.compression)?;
         write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
         self.sparse_state = Some(SparseWriteState {
-            group_path,
+            group_path: format!("{group_prefix}/{name}"),
             indptr: vec![0u64],
             shape: meta.shape,
+            dtype: None,
         });
         Ok(())
     }
@@ -638,30 +654,21 @@ impl DatasetWriter for H5AdWriter {
         let state = self.sparse_state.as_mut().ok_or_else(|| {
             ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into())
         })?;
-
-        let csr = &chunk.data;
-        let nnz = csr.indices.len();
-
-        if nnz > 0 {
-            let data_ds = self.file.dataset(&format!("{}/data", state.group_path))?;
-            let old_len = data_ds.shape()[0];
-            let new_len = old_len + nnz;
-            data_ds.resize(new_len)?;
-            let vals: Vec<f32> = csr.data.to_f64().into_iter().map(|x| x as f32).collect();
-            data_ds.write_slice(&Array1::from_vec(vals), s![old_len..new_len])?;
-
-            let idx_ds = self
-                .file
-                .dataset(&format!("{}/indices", state.group_path))?;
-            idx_ds.resize(new_len)?;
-            let cols_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
-            idx_ds.write_slice(&Array1::from_vec(cols_i32), s![old_len..new_len])?;
-        }
-
+        let grp = self.file.group(&state.group_path)?;
+        let dtype = match state.dtype {
+            Some(dtype) => dtype,
+            None => {
+                let dtype = chunk.data.data.dtype();
+                let ds = init_values(&grp, dtype, self.compression)?;
+                write_encoding_on_ds(&ds, "array", "0.2.0")?;
+                *state.dtype.insert(dtype)
+            }
+        };
+        append_csr(&grp, &chunk.data, dtype)?;
         let base = *state.indptr.last().unwrap();
-        for i in 1..=chunk.nrows {
-            state.indptr.push(base + csr.indptr[i]);
-        }
+        state
+            .indptr
+            .extend(chunk.data.indptr[1..=chunk.nrows].iter().map(|&p| base + p));
         Ok(())
     }
 
@@ -669,42 +676,19 @@ impl DatasetWriter for H5AdWriter {
         let state = self.sparse_state.take().ok_or_else(|| {
             ScxError::InvalidFormat("end_sparse called without begin_sparse".into())
         })?;
-
         let grp = self.file.group(&state.group_path)?;
-
-        // shape attribute
-        let shape_vals = vec![state.shape.0 as i64, state.shape.1 as i64];
-        let attr = grp.new_attr::<i64>().shape(2).create("shape")?;
-        attr.write(&Array1::from_vec(shape_vals))?;
-
-        // indptr
-        let max_val = state.indptr.iter().copied().max().unwrap_or(0);
-        if max_val > i32::MAX as u64 {
-            let v: Vec<i64> = state.indptr.iter().map(|&x| x as i64).collect();
-            let ds = write_1d(&grp, "indptr", Array1::from_vec(v), self.compression)?;
-            write_encoding_on_ds(&ds, "array", "0.2.0")?;
-        } else {
-            let v: Vec<i32> = state.indptr.iter().map(|&x| x as i32).collect();
-            let ds = write_1d(&grp, "indptr", Array1::from_vec(v), self.compression)?;
+        if state.dtype.is_none() {
+            // No chunks: an empty matrix still needs its data dataset.
+            let ds = init_values(&grp, DataType::F32, self.compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }
-        Ok(())
+        write_shape(&grp, state.shape)?;
+        let ds = write_indptr(&grp, &state.indptr, self.compression)?;
+        write_encoding_on_ds(&ds, "array", "0.2.0")
     }
 
     async fn write_varm(&mut self, varm: &Varm) -> Result<()> {
-        let grp = self.file.create_group("varm")?;
-        write_encoding_on_group(&grp, "dict", "0.1.0")?;
-        let mut keys: Vec<&String> = varm.map.keys().collect();
-        keys.sort();
-        for name in keys {
-            let mat = &varm.map[name];
-            let (nrows, ncols) = mat.shape;
-            let arr = Array2::from_shape_vec((nrows, ncols), mat.data.clone())
-                .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-            let ds = write_2d_f64(&grp, name.as_str(), &arr, self.compression)?;
-            write_encoding_on_ds(&ds, "array", "0.2.0")?;
-        }
-        Ok(())
+        write_dense_dict(&self.file, "varm", &varm.map, self.compression)
     }
 
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
@@ -713,116 +697,10 @@ impl DatasetWriter for H5AdWriter {
                 "write_x_chunk must not be called on an append-mode H5AdWriter".into(),
             ));
         }
-        let csr = &chunk.data;
-        let nnz = csr.indices.len();
-
-        if nnz > 0 {
-            // Type conversion happens before the HDF5 lock is held, so
-            // parallelising it with Rayon is safe and doesn't conflict with
-            // the global HDF5 mutex.  LLVM additionally auto-vectorises the
-            // cast loops to AVX2/SSE4 within each Rayon thread.
-            const PAR_THRESHOLD: usize = 100_000;
-            use rayon::prelude::*;
-
-            // --- Append data ---
-            let data_ds = self.file.dataset("X/data")?;
-            let old_len = data_ds.shape()[0];
-            let new_len = old_len + nnz;
-            data_ds.resize(new_len)?;
-
-            match (&csr.data, self.dtype) {
-                // Same-type: write straight from the chunk, no copy.
-                (TypedVec::F32(v), DataType::F32) => {
-                    data_ds.write_slice(v.as_slice(), s![old_len..new_len])?;
-                }
-                (TypedVec::F64(v), DataType::F64) => {
-                    data_ds.write_slice(v.as_slice(), s![old_len..new_len])?;
-                }
-                // Cross-type direct paths — parallelize when large.
-                (TypedVec::F64(v), DataType::F32) => {
-                    let w: Vec<f32> = if nnz >= PAR_THRESHOLD {
-                        v.par_iter().map(|&x| x as f32).collect()
-                    } else {
-                        v.iter().map(|&x| x as f32).collect()
-                    };
-                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
-                }
-                (TypedVec::F32(v), DataType::F64) => {
-                    let w: Vec<f64> = if nnz >= PAR_THRESHOLD {
-                        v.par_iter().map(|&x| x as f64).collect()
-                    } else {
-                        v.iter().map(|&x| x as f64).collect()
-                    };
-                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
-                }
-                // Integer sources — go through f64 then cast.
-                (_, DataType::F32) => {
-                    let f = if nnz >= PAR_THRESHOLD {
-                        csr.data.to_f64_par()
-                    } else {
-                        csr.data.to_f64()
-                    };
-                    let w: Vec<f32> = if nnz >= PAR_THRESHOLD {
-                        f.into_par_iter().map(|x| x as f32).collect()
-                    } else {
-                        f.into_iter().map(|x| x as f32).collect()
-                    };
-                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
-                }
-                (_, DataType::F64) => {
-                    let f = if nnz >= PAR_THRESHOLD {
-                        csr.data.to_f64_par()
-                    } else {
-                        csr.data.to_f64()
-                    };
-                    data_ds.write_slice(&Array1::from_vec(f), s![old_len..new_len])?;
-                }
-                (_, DataType::I32) => {
-                    let f = if nnz >= PAR_THRESHOLD {
-                        csr.data.to_f64_par()
-                    } else {
-                        csr.data.to_f64()
-                    };
-                    let w: Vec<i32> = if nnz >= PAR_THRESHOLD {
-                        f.into_par_iter().map(|x| x as i32).collect()
-                    } else {
-                        f.into_iter().map(|x| x as i32).collect()
-                    };
-                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
-                }
-                (_, DataType::U32) => {
-                    let f = if nnz >= PAR_THRESHOLD {
-                        csr.data.to_f64_par()
-                    } else {
-                        csr.data.to_f64()
-                    };
-                    let w: Vec<u32> = if nnz >= PAR_THRESHOLD {
-                        f.into_par_iter().map(|x| x as u32).collect()
-                    } else {
-                        f.into_iter().map(|x| x as u32).collect()
-                    };
-                    data_ds.write_slice(&Array1::from_vec(w), s![old_len..new_len])?;
-                }
-            }
-
-            // --- Append indices (gene indices as i32) ---
-            let idx_ds = self.file.dataset("X/indices")?;
-            let old_idx_len = idx_ds.shape()[0];
-            idx_ds.resize(new_len)?;
-            let gene_i32: Vec<i32> = if nnz >= PAR_THRESHOLD {
-                csr.indices.par_iter().map(|&x| x as i32).collect()
-            } else {
-                csr.indices.iter().map(|&x| x as i32).collect()
-            };
-            idx_ds.write_slice(&Array1::from_vec(gene_i32), s![old_idx_len..new_len])?;
-        }
-
-        // --- Accumulate indptr ---
+        append_csr(&self.file.group("X")?, &chunk.data, self.dtype)?;
         let base = *self.x_indptr.last().unwrap();
-        for i in 1..=chunk.nrows {
-            self.x_indptr.push(base + csr.indptr[i]);
-        }
-
+        self.x_indptr
+            .extend(chunk.data.indptr[1..=chunk.nrows].iter().map(|&p| base + p));
         Ok(())
     }
 
@@ -833,29 +711,14 @@ impl DatasetWriter for H5AdWriter {
             ));
         }
         let x_grp = self.file.group("X")?;
-
-        // Write X/indptr — use i32 if small enough, i64 otherwise
-        let max_val = self.x_indptr.iter().copied().max().unwrap_or(0);
-        if max_val > i32::MAX as u64 {
-            let v: Vec<i64> = self.x_indptr.iter().map(|&x| x as i64).collect();
-            write_1d(&x_grp, "indptr", Array1::from_vec(v), self.compression)?;
-        } else {
-            let v: Vec<i32> = self.x_indptr.iter().map(|&x| x as i32).collect();
-            write_1d(&x_grp, "indptr", Array1::from_vec(v), self.compression)?;
-        }
-
-        // Write X/shape attribute: [n_obs, n_vars] (required by AnnData spec)
-        let shape_vals = vec![self.n_obs as i64, self.n_vars as i64];
-        let attr = x_grp.new_attr::<i64>().shape(2).create("shape")?;
-        attr.write(&Array1::from_vec(shape_vals))?;
-
+        write_indptr(&x_grp, &self.x_indptr, self.compression)?;
+        write_shape(&x_grp, (self.n_obs, self.n_vars))?;
         tracing::info!(
             n_obs = self.n_obs,
             n_vars = self.n_vars,
             nnz = self.x_indptr.last().copied().unwrap_or(0),
             "h5ad finalized"
         );
-
         Ok(())
     }
 }
@@ -875,32 +738,17 @@ fn add_dataframe_column(
     let col_name = col.name.as_str();
     let grp = file.group(group_name)?;
 
-    // Read existing column-order (tolerate missing attr for older files).
-    let (existing, attr_existed) = match grp.attr("column-order") {
-        Ok(attr) => {
-            let raw: ndarray::Array1<VarLenUnicode> = attr.read_1d().unwrap_or_default();
-            let names: Vec<String> = raw.into_iter().map(|s| s.to_string()).collect();
-            (names, true)
-        }
-        Err(_) => (Vec::new(), false),
+    // Tolerate a missing column-order (older files).
+    let mut order = if grp.attr("column-order").is_ok() {
+        read_str_array_attr(&grp, "column-order")?
+    } else {
+        Vec::new()
     };
-
     // Only update column-order if this is a new column (not an overwrite).
-    if !existing.contains(&col_name.to_string()) {
-        let mut new_order = existing;
-        new_order.push(col_name.to_string());
-        if attr_existed {
-            grp.delete_attr("column-order")?;
-        }
-        let vals: Vec<VarLenUnicode> = new_order
-            .iter()
-            .map(|s| VarLenUnicode::from_str(s).unwrap_or_default())
-            .collect();
-        let attr = grp
-            .new_attr::<VarLenUnicode>()
-            .shape(vals.len())
-            .create("column-order")?;
-        attr.write(&ndarray::Array1::from_vec(vals))?;
+    if !order.iter().any(|c| c == col_name) {
+        order.push(col_name.to_string());
+        let order: Vec<&str> = order.iter().map(String::as_str).collect();
+        write_str_array_attr(&grp, "column-order", &order)?;
     }
 
     write_column(&grp, col, compression)
@@ -915,22 +763,34 @@ fn add_dense_dict_entry(
     mat: &DenseMatrix,
     compression: Option<u8>,
 ) -> Result<()> {
-    let grp = match file.group(group_name) {
-        Ok(g) => g,
-        Err(_) => {
-            let g = file.create_group(group_name)?;
-            write_encoding_on_group(&g, "dict", "0.1.0")?;
-            g
-        }
-    };
-    let (nrows, ncols) = mat.shape;
-    let arr = ndarray::Array2::from_shape_vec((nrows, ncols), mat.data.clone())
-        .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+    let grp = dict_group(file, group_name)?;
+    let arr = Array2::from_shape_vec(mat.shape, mat.data.clone())
+        .map_err(|e| ScxError::InvalidFormat(format!("{group_name}['{entry_name}']: {e}")))?;
     let ds = write_2d_f64(&grp, entry_name, &arr, compression)?;
-    write_encoding_on_ds(&ds, "array", "0.2.0")?;
+    write_encoding_on_ds(&ds, "array", "0.2.0")
+}
+
+/// Write every entry of `map` into the dict group `group_name`, in name order.
+fn write_dense_dict(
+    file: &File,
+    group_name: &str,
+    map: &HashMap<String, DenseMatrix>,
+    compression: Option<u8>,
+) -> Result<()> {
+    dict_group(file, group_name)?;
+    let mut names: Vec<&String> = map.keys().collect();
+    names.sort();
+    for name in names {
+        add_dense_dict_entry(file, group_name, name, &map[name], compression)?;
+    }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// H5AdReader
-// ---------------------------------------------------------------------------
+/// The AnnData `shape` attribute `[rows, cols]` of a sparse matrix group.
+fn write_shape(grp: &Group, shape: (usize, usize)) -> Result<()> {
+    grp.new_attr::<i64>()
+        .shape(2)
+        .create("shape")?
+        .write(&Array1::from_vec(vec![shape.0 as i64, shape.1 as i64]))?;
+    Ok(())
+}

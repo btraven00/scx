@@ -1721,3 +1721,225 @@ async fn categorical_codes_stay_narrow_for_small_level_counts() {
         );
     }
 }
+
+// --- Silent-failure audit (Phase 2 #6): each case errors or is a tested skip ---
+
+/// A file with a 2×2 CSR X, for tests that add slots next to it.
+fn file_with_x(path: &std::path::Path) -> File {
+    let f = File::create(path).unwrap();
+    write_csr_group(&f, "X", (2, 2), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+    f
+}
+
+/// Regression: only X rejected CSC. A CSC layer or obsp matrix was read as
+/// CSR, i.e. silently transposed garbage.
+#[tokio::test]
+async fn csc_layer_and_obsp_are_rejected() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = file_with_x(tmp.path());
+        for slot in ["layers", "obsp"] {
+            let g = f.create_group(slot).unwrap();
+            write_csr_group(&g, "m", (2, 2), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+            crate::h5_str::write_str_attr(&g.group("m").unwrap(), "encoding-type", "csc_matrix")
+                .unwrap();
+        }
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    let err = r.layer_metas().await.expect_err("CSC layer read as CSR");
+    assert!(err.to_string().contains("CSC"), "{err}");
+    let err = r.obsp_metas().await.expect_err("CSC obsp read as CSR");
+    assert!(err.to_string().contains("CSC"), "{err}");
+}
+
+/// Regression: the writer stored every layer and obsp matrix as f32, so f64
+/// layers lost precision and integer count layers changed type.
+#[tokio::test]
+async fn layer_values_keep_their_dtype() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let cases = [
+        ("f64", TypedVec::F64(vec![0.1, 1e-300])),
+        ("i32", TypedVec::I32(vec![7, -3])),
+        ("u32", TypedVec::U32(vec![7, u32::MAX])),
+    ];
+    {
+        let mut w = H5AdWriter::create(tmp.path(), 2, 2, DataType::F32).unwrap();
+        let (indptr, indices, data) = diag_csr(2, 2);
+        w.write_obs(&ObsTable {
+            index: vec!["a".into(), "b".into()],
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        w.write_var(&VarTable {
+            index: vec!["g0".into(), "g1".into()],
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        w.write_x_chunk(&MatrixChunk {
+            row_offset: 0,
+            nrows: 2,
+            data: SparseMatrixCSR {
+                shape: (2, 2),
+                indptr: indptr.clone(),
+                indices: indices.clone(),
+                data: TypedVec::F32(data),
+            },
+        })
+        .await
+        .unwrap();
+        for (name, values) in &cases {
+            let meta = SparseMatrixMeta {
+                name: name.to_string(),
+                shape: (2, 2),
+                indptr: indptr.clone(),
+            };
+            w.begin_sparse("layers", name, &meta).await.unwrap();
+            w.write_sparse_chunk(&MatrixChunk {
+                row_offset: 0,
+                nrows: 2,
+                data: SparseMatrixCSR {
+                    shape: (2, 2),
+                    indptr: indptr.clone(),
+                    indices: indices.clone(),
+                    data: values.clone(),
+                },
+            })
+            .await
+            .unwrap();
+            w.end_sparse().await.unwrap();
+        }
+        w.finalize().await.unwrap();
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    let metas = r.layer_metas().await.unwrap();
+    for (name, values) in &cases {
+        let meta = metas.iter().find(|m| m.name == *name).unwrap();
+        let chunk = r.layer_stream(meta, 2).next().await.unwrap().unwrap();
+        assert_eq!(&chunk.data.data, values, "layer {name}");
+    }
+}
+
+/// A `shape` attribute with one entry used to panic on `s[1]`.
+#[test]
+fn short_shape_attr_is_an_error() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = file_with_x(tmp.path());
+        let x = f.group("X").unwrap();
+        x.delete_attr("shape").unwrap();
+        x.new_attr_builder()
+            .with_data(&ndarray::array![2i64])
+            .create("shape")
+            .unwrap();
+    }
+    let err = H5AdReader::open(tmp.path(), 2)
+        .err()
+        .expect("1-entry shape accepted");
+    assert!(err.to_string().contains("shape"), "{err}");
+}
+
+/// An obs column the reader can't decode used to be dropped with a warning,
+/// so a conversion silently lost metadata.
+#[tokio::test]
+async fn undecodable_obs_column_is_an_error() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = file_with_x(tmp.path());
+        let obs = f.create_group("obs").unwrap();
+        write_strings(&obs, "_index", &["a".into(), "b".into()]).unwrap();
+        crate::h5_str::write_str_attr(&obs, "_index", "_index").unwrap();
+        crate::h5_str::write_str_array_attr(&obs, "column-order", &["mystery"]).unwrap();
+        obs.create_group("mystery").unwrap(); // neither codes+categories nor values+mask
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    let err = r.obs().await.expect_err("undecodable column dropped");
+    assert!(err.to_string().contains("mystery"), "{err}");
+}
+
+/// anndata writes an empty `column-order` as a float64 array (h5py's
+/// `np.array([])`), not as strings. That is a frame with no columns.
+#[tokio::test]
+async fn empty_float_column_order_means_no_columns() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = file_with_x(tmp.path());
+        let obs = f.create_group("obs").unwrap();
+        write_strings(&obs, "_index", &["a".into(), "b".into()]).unwrap();
+        crate::h5_str::write_str_attr(&obs, "_index", "_index").unwrap();
+        obs.new_attr::<f64>()
+            .shape(0)
+            .create("column-order")
+            .unwrap();
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    let obs = r.obs().await.unwrap();
+    assert_eq!(obs.index, ["a", "b"]);
+    assert!(obs.columns.is_empty());
+}
+
+/// obsm entries anndata stores as groups (dataframes, sparse matrices) have no
+/// dense representation here and are skipped on purpose; dense entries next
+/// to them still read. A dense entry that can't be read is an error.
+#[tokio::test]
+async fn obsm_groups_are_skipped_but_unreadable_arrays_error() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = file_with_x(tmp.path());
+        let obsm = f.create_group("obsm").unwrap();
+        write_csr_group(&obsm, "sparse", (2, 2), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+        obsm.new_dataset_builder()
+            .with_data(&ndarray::array![[1.0f64, 2.0], [3.0, 4.0]])
+            .create("X_pca")
+            .unwrap();
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    let obsm = r.obsm().await.unwrap();
+    assert_eq!(obsm.map.keys().collect::<Vec<_>>(), ["X_pca"]);
+
+    {
+        let f = File::open_rw(tmp.path()).unwrap();
+        f.group("obsm")
+            .unwrap()
+            .new_dataset_builder()
+            .with_data(&ndarray::array![1.0f64, 2.0])
+            .create("one_d")
+            .unwrap();
+    }
+    let err = r.obsm().await.expect_err("1-D obsm array dropped");
+    assert!(err.to_string().contains("one_d"), "{err}");
+}
+
+/// Dense X of an unsigned type used to be reported as F32 (and an unknown
+/// type silently fell back to F32).
+#[tokio::test]
+async fn dense_unsigned_x_reads_as_u32() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        f.new_dataset_builder()
+            .with_data(&ndarray::array![[0u16, 5], [6, 0]])
+            .create("X")
+            .unwrap();
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    assert_eq!(r.dtype(), DataType::U32);
+    let chunk = r.x_stream().next().await.unwrap().unwrap();
+    assert_eq!(chunk.data.indices, [1, 0]);
+    assert_eq!(chunk.data.data, TypedVec::U32(vec![5, 6]));
+}
+
+/// A column name HDF5 can't store (one with a NUL) used to be written as "".
+#[tokio::test]
+async fn unstorable_column_name_is_an_error() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let mut w = H5AdWriter::create(tmp.path(), 2, 2, DataType::F32).unwrap();
+    let obs = ObsTable {
+        index: vec!["a".into(), "b".into()],
+        columns: vec![Column::new("bad\0name", ColumnData::Int(vec![1, 2]))],
+    };
+    w.write_obs(&obs)
+        .await
+        .expect_err("NUL column name written as empty");
+}
