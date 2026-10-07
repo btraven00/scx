@@ -26,12 +26,15 @@ use crate::h5seurat::H5SeuratWriter;
 use crate::ir::{
     Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
 };
+use crate::sparse::{csr_chunk, dense_to_csr};
 use crate::stream::DatasetWriter;
 
 const DEFAULT_CHUNK_SIZE: usize = 5000;
 
-/// Options for writing `.h5ad`.
+/// Options for writing `.h5ad`. Fields may be added in minor releases, so
+/// start from `H5AdOptions::default()` and set the fields you need.
 #[derive(Default, Clone, Debug)]
+#[non_exhaustive]
 pub struct H5AdOptions {
     /// gzip (deflate) level `0..=9` applied to numeric datasets; `None` writes
     /// uncompressed. Variable-length string datasets are always uncompressed.
@@ -41,7 +44,10 @@ pub struct H5AdOptions {
 }
 
 /// Options for writing a BPCells-backed or dgCMatrix-backed `.h5seurat`.
+/// Fields may be added in minor releases, so start from
+/// `BpcellsOptions::default()` and set the fields you need.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct BpcellsOptions {
     /// Seurat assay name; defaults to "RNA".
     pub assay: String,
@@ -64,129 +70,10 @@ impl Default for BpcellsOptions {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-fn map_err<E: std::fmt::Display>(e: E) -> ScxError {
-    ScxError::Hdf5(e.to_string())
-}
-
-/// Convert a row-major dense view to CSR (cells × genes), dropping exact zeros.
-fn dense_f32_to_csr(arr: ArrayView2<f32>) -> SparseMatrixCSR {
-    let (nrows, ncols) = arr.dim();
-    let mut indices: Vec<u32> = Vec::new();
-    let mut data: Vec<f32> = Vec::new();
-    let mut indptr: Vec<u64> = Vec::with_capacity(nrows + 1);
-    indptr.push(0);
-    for row in arr.rows() {
-        for (j, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                indices.push(j as u32);
-                data.push(v);
-            }
-        }
-        indptr.push(indices.len() as u64);
-    }
-    SparseMatrixCSR {
-        shape: (nrows, ncols),
-        indptr,
-        indices,
-        data: TypedVec::F32(data),
-    }
-}
-
-/// Produce per-chunk (indptr, indices, data) for rows `[row_start, row_end)` of a
-/// sprs CSR view. Indptr is re-based to start at 0 and widened to u64.
-fn slice_sprs_csr(
-    x: CsMatViewI<f32, u32>,
-    row_start: usize,
-    row_end: usize,
-) -> (Vec<u64>, Vec<u32>, Vec<f32>) {
-    let indptr_raw = x.indptr();
-    let indptr_slice = indptr_raw.raw_storage();
-    let base = indptr_slice[row_start] as u64;
-    let sub_indptr: Vec<u64> = indptr_slice[row_start..=row_end]
-        .iter()
-        .map(|&v| v as u64 - base)
-        .collect();
-    let nnz_start = indptr_slice[row_start] as usize;
-    let nnz_end = indptr_slice[row_end] as usize;
-    let sub_indices = x.indices()[nnz_start..nnz_end].to_vec();
-    let sub_data = x.data()[nnz_start..nnz_end].to_vec();
-    (sub_indptr, sub_indices, sub_data)
-}
-
-/// Stream a sprs CSR view through any [`DatasetWriter`] in `chunk_size`-row
-/// row chunks. Used by all `write_*_csr` eager functions.
-fn stream_csr_to_writer(
-    writer: &mut dyn DatasetWriter,
-    x: CsMatViewI<f32, u32>,
-    n_vars: usize,
-    chunk_size: usize,
-) -> Result<(), ScxError> {
-    if !x.is_csr() {
-        return Err(ScxError::WrongOrientation);
-    }
-    let n_obs = x.rows();
-    if x.cols() != n_vars {
-        return Err(ScxError::WrongShape {
-            expected: (n_obs, n_vars),
-            got: (x.rows(), x.cols()),
-        });
-    }
-    let chunk_size = chunk_size.max(1);
-    for row_off in (0..n_obs).step_by(chunk_size) {
-        let row_end = (row_off + chunk_size).min(n_obs);
-        let (sub_indptr, sub_indices, sub_data) = slice_sprs_csr(x, row_off, row_end);
-        let chunk = MatrixChunk {
-            row_offset: row_off,
-            nrows: row_end - row_off,
-            data: SparseMatrixCSR {
-                shape: (row_end - row_off, n_vars),
-                indptr: sub_indptr,
-                indices: sub_indices,
-                data: TypedVec::F32(sub_data),
-            },
-        };
-        block_on(writer.write_x_chunk(&chunk)).map_err(map_err)?;
-    }
-    Ok(())
-}
-
-/// Stream a row-major dense view to a writer in chunks. Avoids materialising
-/// the full CSR up front for very large dense inputs.
-fn stream_dense_to_writer(
-    writer: &mut dyn DatasetWriter,
-    x: ArrayView2<f32>,
-    chunk_size: usize,
-) -> Result<(), ScxError> {
-    let (n_obs, _n_vars) = x.dim();
-    let chunk_size = chunk_size.max(1);
-    for row_off in (0..n_obs).step_by(chunk_size) {
-        let row_end = (row_off + chunk_size).min(n_obs);
-        let slice = x.slice(ndarray::s![row_off..row_end, ..]);
-        let csr = dense_f32_to_csr(slice);
-        let chunk = MatrixChunk {
-            row_offset: row_off,
-            nrows: row_end - row_off,
-            data: csr,
-        };
-        block_on(writer.write_x_chunk(&chunk)).map_err(map_err)?;
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Builders
-// ---------------------------------------------------------------------------
-
-/// Streaming builder for `.h5ad`. Push row chunks via [`H5AdBuilder::push_x_csr_chunk`].
-///
-/// The chunk arguments take anything that converts into a `Vec`: slices are
-/// copied, owned vectors are moved in without a copy.
-pub struct H5AdBuilder {
-    inner: H5AdWriter,
+/// The state and logic every builder shares; the public builders wrap it so
+/// the writer types stay out of the public API.
+struct Core<W> {
+    inner: W,
     n_obs: usize,
     n_vars: usize,
     chunk_size: usize,
@@ -194,79 +81,37 @@ pub struct H5AdBuilder {
     var_written: bool,
 }
 
-impl H5AdBuilder {
-    pub fn new(
-        path: &Path,
-        n_obs: usize,
-        n_vars: usize,
-        opts: &H5AdOptions,
-    ) -> Result<Self, ScxError> {
-        let inner =
-            H5AdWriter::create_compressed(path, n_obs, n_vars, DataType::F32, opts.compression)
-                .map_err(map_err)?;
-        Ok(Self {
+impl<W: DatasetWriter> Core<W> {
+    fn new(inner: W, n_obs: usize, n_vars: usize, chunk_size: Option<usize>) -> Self {
+        Self {
             inner,
             n_obs,
             n_vars,
-            chunk_size: opts.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
+            chunk_size: chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1),
             obs_written: false,
             var_written: false,
-        })
+        }
     }
 
-    pub fn obs(&mut self, obs: ObsTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_obs(&obs)).map_err(map_err)?;
+    fn obs(&mut self, obs: ObsTable) -> Result<(), ScxError> {
+        block_on(self.inner.write_obs(&obs))?;
         self.obs_written = true;
-        Ok(self)
+        Ok(())
     }
 
-    pub fn var(&mut self, var: VarTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_var(&var)).map_err(map_err)?;
+    fn var(&mut self, var: VarTable) -> Result<(), ScxError> {
+        block_on(self.inner.write_var(&var))?;
         self.var_written = true;
-        Ok(self)
+        Ok(())
     }
 
-    pub fn add_obsm(&mut self, obsm: Embeddings) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_obsm(&obsm)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn add_varm(&mut self, varm: Varm) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_varm(&varm)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn add_uns(&mut self, uns: UnsTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_uns(&uns)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn add_layer_csr(
-        &mut self,
-        name: &str,
-        x: CsMatViewI<f32, u32>,
-    ) -> Result<&mut Self, ScxError> {
-        write_sparse_slot(&mut self.inner, "layers", name, x, self.chunk_size)?;
-        Ok(self)
-    }
-
-    pub fn add_obsp_csr(
-        &mut self,
-        name: &str,
-        x: CsMatViewI<f32, u32>,
-    ) -> Result<&mut Self, ScxError> {
-        write_sparse_slot(&mut self.inner, "obsp", name, x, self.chunk_size)?;
-        Ok(self)
-    }
-
-    pub fn push_x_csr_chunk(
+    fn push_x_csr_chunk(
         &mut self,
         row_offset: usize,
-        indptr: impl Into<Vec<u64>>,
-        indices: impl Into<Vec<u32>>,
-        data: impl Into<Vec<f32>>,
-    ) -> Result<&mut Self, ScxError> {
-        let (indptr, indices, data) = (indptr.into(), indices.into(), data.into());
+        indptr: Vec<u64>,
+        indices: Vec<u32>,
+        data: Vec<f32>,
+    ) -> Result<(), ScxError> {
         let nrows = indptr.len().saturating_sub(1);
         let chunk = MatrixChunk {
             row_offset,
@@ -278,41 +123,226 @@ impl H5AdBuilder {
                 data: TypedVec::F32(data),
             },
         };
-        block_on(self.inner.write_x_chunk(&chunk)).map_err(map_err)?;
+        block_on(self.inner.write_x_chunk(&chunk))
+    }
+
+    /// Writes `x` (checked to be `n_rows × n_cols` CSR) under
+    /// `prefix/name` in row chunks.
+    fn sparse_slot(
+        &mut self,
+        prefix: &str,
+        name: &str,
+        x: CsMatViewI<f32, u32>,
+        n_cols: usize,
+    ) -> Result<(), ScxError> {
+        let indptr = csr_indptr(x, (self.n_obs, n_cols))?;
+        let meta = SparseMatrixMeta {
+            name: name.to_string(),
+            shape: (self.n_obs, n_cols),
+            indptr,
+        };
+        block_on(self.inner.begin_sparse(prefix, name, &meta))?;
+        for chunk in csr_chunks(x, &meta.indptr, self.chunk_size) {
+            block_on(self.inner.write_sparse_chunk(&chunk))?;
+        }
+        block_on(self.inner.end_sparse())
+    }
+
+    /// Fills in default obs/var names if none were given, then finalizes.
+    fn finalize(mut self) -> Result<(), ScxError> {
+        if !self.obs_written {
+            self.obs(ObsTable {
+                index: (0..self.n_obs).map(|i| format!("cell_{i}")).collect(),
+                columns: vec![],
+            })?;
+        }
+        if !self.var_written {
+            self.var(VarTable {
+                index: (0..self.n_vars).map(|i| format!("gene_{i}")).collect(),
+                columns: vec![],
+            })?;
+        }
+        block_on(self.inner.finalize())
+    }
+
+    fn write_csr(
+        mut self,
+        x: CsMatViewI<f32, u32>,
+        obs: ObsTable,
+        var: VarTable,
+    ) -> Result<(), ScxError> {
+        self.obs(obs)?;
+        self.var(var)?;
+        let indptr = csr_indptr(x, (self.n_obs, self.n_vars))?;
+        for chunk in csr_chunks(x, &indptr, self.chunk_size) {
+            block_on(self.inner.write_x_chunk(&chunk))?;
+        }
+        self.finalize()
+    }
+
+    /// Converts one row chunk at a time, so the full CSR never exists.
+    fn write_dense(
+        mut self,
+        x: ArrayView2<f32>,
+        obs: ObsTable,
+        var: VarTable,
+    ) -> Result<(), ScxError> {
+        self.obs(obs)?;
+        self.var(var)?;
+        for row_off in (0..self.n_obs).step_by(self.chunk_size) {
+            let row_end = (row_off + self.chunk_size).min(self.n_obs);
+            let rows = x.slice(ndarray::s![row_off..row_end, ..]);
+            let values: Vec<f64> = rows.iter().map(|&v| f64::from(v)).collect();
+            let chunk = MatrixChunk {
+                row_offset: row_off,
+                nrows: row_end - row_off,
+                data: dense_to_csr(&values, self.n_vars, DataType::F32),
+            };
+            block_on(self.inner.write_x_chunk(&chunk))?;
+        }
+        self.finalize()
+    }
+}
+
+/// `x`'s pointer array widened to u64, after checking it is CSR of `shape`.
+fn csr_indptr(x: CsMatViewI<f32, u32>, shape: (usize, usize)) -> Result<Vec<u64>, ScxError> {
+    if !x.is_csr() {
+        return Err(ScxError::WrongOrientation);
+    }
+    if x.shape() != shape {
+        return Err(ScxError::WrongShape {
+            expected: shape,
+            got: x.shape(),
+        });
+    }
+    Ok(x.indptr()
+        .raw_storage()
+        .iter()
+        .map(|&p| u64::from(p))
+        .collect())
+}
+
+/// `x` in `chunk_size`-row chunks; `indptr` is `x`'s pointer array as u64.
+fn csr_chunks<'a>(
+    x: CsMatViewI<'a, f32, u32>,
+    indptr: &'a [u64],
+    chunk_size: usize,
+) -> impl Iterator<Item = MatrixChunk> + 'a {
+    let n_rows = x.rows();
+    (0..n_rows).step_by(chunk_size).map(move |start| {
+        let rows = start..(start + chunk_size).min(n_rows);
+        let nnz = indptr[rows.start] as usize..indptr[rows.end] as usize;
+        csr_chunk(
+            indptr,
+            rows,
+            x.cols(),
+            x.indices()[nnz.clone()].to_vec(),
+            TypedVec::F32(x.data()[nnz].to_vec()),
+        )
+    })
+}
+
+/// The methods every builder has, delegating to [`Core`].
+macro_rules! builder_methods {
+    () => {
+        /// Write cell metadata. Without it, `finalize` names cells `cell_<i>`.
+        pub fn obs(&mut self, obs: ObsTable) -> Result<&mut Self, ScxError> {
+            self.0.obs(obs)?;
+            Ok(self)
+        }
+
+        /// Write gene metadata. Without it, `finalize` names genes `gene_<i>`.
+        pub fn var(&mut self, var: VarTable) -> Result<&mut Self, ScxError> {
+            self.0.var(var)?;
+            Ok(self)
+        }
+
+        /// Write cell embeddings (obsm).
+        pub fn add_obsm(&mut self, obsm: Embeddings) -> Result<&mut Self, ScxError> {
+            block_on(self.0.inner.write_obsm(&obsm))?;
+            Ok(self)
+        }
+
+        /// Write gene loadings (varm).
+        pub fn add_varm(&mut self, varm: Varm) -> Result<&mut Self, ScxError> {
+            block_on(self.0.inner.write_varm(&varm))?;
+            Ok(self)
+        }
+
+        /// Write unstructured metadata (uns).
+        pub fn add_uns(&mut self, uns: UnsTable) -> Result<&mut Self, ScxError> {
+            block_on(self.0.inner.write_uns(&uns))?;
+            Ok(self)
+        }
+
+        /// Append rows of X starting at `row_offset`, as CSR arrays with a
+        /// chunk-local `indptr`. Chunks must arrive in row order. Slices are
+        /// copied; owned vectors are moved in without a copy.
+        pub fn push_x_csr_chunk(
+            &mut self,
+            row_offset: usize,
+            indptr: impl Into<Vec<u64>>,
+            indices: impl Into<Vec<u32>>,
+            data: impl Into<Vec<f32>>,
+        ) -> Result<&mut Self, ScxError> {
+            self.0
+                .push_x_csr_chunk(row_offset, indptr.into(), indices.into(), data.into())?;
+            Ok(self)
+        }
+
+        /// Finish the file.
+        pub fn finalize(self) -> Result<(), ScxError> {
+            self.0.finalize()
+        }
+    };
+}
+
+/// Streaming builder for `.h5ad`. Push row chunks via [`H5AdBuilder::push_x_csr_chunk`].
+pub struct H5AdBuilder(Core<H5AdWriter>);
+
+impl H5AdBuilder {
+    /// Create `path` for an `n_obs × n_vars` f32 matrix.
+    pub fn new(
+        path: &Path,
+        n_obs: usize,
+        n_vars: usize,
+        opts: &H5AdOptions,
+    ) -> Result<Self, ScxError> {
+        let inner =
+            H5AdWriter::create_compressed(path, n_obs, n_vars, DataType::F32, opts.compression)?;
+        Ok(Self(Core::new(inner, n_obs, n_vars, opts.chunk_size)))
+    }
+
+    builder_methods!();
+
+    /// Write an `n_obs × n_vars` CSR matrix as `layers/<name>`.
+    pub fn add_layer_csr(
+        &mut self,
+        name: &str,
+        x: CsMatViewI<f32, u32>,
+    ) -> Result<&mut Self, ScxError> {
+        let n_vars = self.0.n_vars;
+        self.0.sparse_slot("layers", name, x, n_vars)?;
         Ok(self)
     }
 
-    pub fn finalize(mut self) -> Result<(), ScxError> {
-        if !self.obs_written {
-            block_on(self.inner.write_obs(&ObsTable {
-                index: (0..self.n_obs).map(|i| format!("cell_{i}")).collect(),
-                columns: vec![],
-            }))
-            .map_err(map_err)?;
-        }
-        if !self.var_written {
-            block_on(self.inner.write_var(&VarTable {
-                index: (0..self.n_vars).map(|i| format!("gene_{i}")).collect(),
-                columns: vec![],
-            }))
-            .map_err(map_err)?;
-        }
-        block_on(self.inner.finalize()).map_err(map_err)?;
-        Ok(())
+    /// Write an `n_obs × n_obs` CSR matrix as `obsp/<name>`.
+    pub fn add_obsp_csr(
+        &mut self,
+        name: &str,
+        x: CsMatViewI<f32, u32>,
+    ) -> Result<&mut Self, ScxError> {
+        let n_obs = self.0.n_obs;
+        self.0.sparse_slot("obsp", name, x, n_obs)?;
+        Ok(self)
     }
 }
 
 /// Streaming builder for a BPCells-backed `.h5seurat`.
-pub struct BpcellsH5SeuratBuilder {
-    inner: BpcellsH5Writer,
-    n_obs: usize,
-    n_vars: usize,
-    chunk_size: usize,
-    obs_written: bool,
-    var_written: bool,
-}
+pub struct BpcellsH5SeuratBuilder(Core<BpcellsH5Writer>);
 
 impl BpcellsH5SeuratBuilder {
+    /// Create `path` for an `n_obs × n_vars` f32 matrix.
     pub fn new(
         path: &Path,
         n_obs: usize,
@@ -328,99 +358,18 @@ impl BpcellsH5SeuratBuilder {
             Some(&opts.layer),
             None,
             opts.seuratdisk_compat,
-        )
-        .map_err(map_err)?;
-        Ok(Self {
-            inner,
-            n_obs,
-            n_vars,
-            chunk_size: opts.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
-            obs_written: false,
-            var_written: false,
-        })
+        )?;
+        Ok(Self(Core::new(inner, n_obs, n_vars, opts.chunk_size)))
     }
 
-    pub fn obs(&mut self, obs: ObsTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_obs(&obs)).map_err(map_err)?;
-        self.obs_written = true;
-        Ok(self)
-    }
-
-    pub fn var(&mut self, var: VarTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_var(&var)).map_err(map_err)?;
-        self.var_written = true;
-        Ok(self)
-    }
-
-    pub fn add_obsm(&mut self, obsm: Embeddings) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_obsm(&obsm)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn add_varm(&mut self, varm: Varm) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_varm(&varm)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn add_uns(&mut self, uns: UnsTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_uns(&uns)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn push_x_csr_chunk(
-        &mut self,
-        row_offset: usize,
-        indptr: impl Into<Vec<u64>>,
-        indices: impl Into<Vec<u32>>,
-        data: impl Into<Vec<f32>>,
-    ) -> Result<&mut Self, ScxError> {
-        let (indptr, indices, data) = (indptr.into(), indices.into(), data.into());
-        let nrows = indptr.len().saturating_sub(1);
-        let chunk = MatrixChunk {
-            row_offset,
-            nrows,
-            data: SparseMatrixCSR {
-                shape: (nrows, self.n_vars),
-                indptr,
-                indices,
-                data: TypedVec::F32(data),
-            },
-        };
-        block_on(self.inner.write_x_chunk(&chunk)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn finalize(mut self) -> Result<(), ScxError> {
-        if !self.obs_written {
-            block_on(self.inner.write_obs(&ObsTable {
-                index: (0..self.n_obs).map(|i| format!("cell_{i}")).collect(),
-                columns: vec![],
-            }))
-            .map_err(map_err)?;
-        }
-        if !self.var_written {
-            block_on(self.inner.write_var(&VarTable {
-                index: (0..self.n_vars).map(|i| format!("gene_{i}")).collect(),
-                columns: vec![],
-            }))
-            .map_err(map_err)?;
-        }
-        block_on(self.inner.finalize()).map_err(map_err)?;
-        Ok(())
-    }
+    builder_methods!();
 }
 
 /// Streaming builder for a legacy dgCMatrix-backed `.h5seurat`.
-pub struct H5SeuratBuilder {
-    inner: H5SeuratWriter,
-    n_obs: usize,
-    n_vars: usize,
-    chunk_size: usize,
-    obs_written: bool,
-    var_written: bool,
-}
+pub struct H5SeuratBuilder(Core<H5SeuratWriter>);
 
 impl H5SeuratBuilder {
+    /// Create `path` for an `n_obs × n_vars` f32 matrix.
     pub fn new(
         path: &Path,
         n_obs: usize,
@@ -436,130 +385,12 @@ impl H5SeuratBuilder {
             Some(&opts.layer),
             None,
             opts.seuratdisk_compat,
-        )
-        .map_err(map_err)?;
-        Ok(Self {
-            inner,
-            n_obs,
-            n_vars,
-            chunk_size: opts.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
-            obs_written: false,
-            var_written: false,
-        })
+        )?;
+        Ok(Self(Core::new(inner, n_obs, n_vars, opts.chunk_size)))
     }
 
-    pub fn obs(&mut self, obs: ObsTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_obs(&obs)).map_err(map_err)?;
-        self.obs_written = true;
-        Ok(self)
-    }
-
-    pub fn var(&mut self, var: VarTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_var(&var)).map_err(map_err)?;
-        self.var_written = true;
-        Ok(self)
-    }
-
-    pub fn add_obsm(&mut self, obsm: Embeddings) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_obsm(&obsm)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn add_varm(&mut self, varm: Varm) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_varm(&varm)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn add_uns(&mut self, uns: UnsTable) -> Result<&mut Self, ScxError> {
-        block_on(self.inner.write_uns(&uns)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn push_x_csr_chunk(
-        &mut self,
-        row_offset: usize,
-        indptr: impl Into<Vec<u64>>,
-        indices: impl Into<Vec<u32>>,
-        data: impl Into<Vec<f32>>,
-    ) -> Result<&mut Self, ScxError> {
-        let (indptr, indices, data) = (indptr.into(), indices.into(), data.into());
-        let nrows = indptr.len().saturating_sub(1);
-        let chunk = MatrixChunk {
-            row_offset,
-            nrows,
-            data: SparseMatrixCSR {
-                shape: (nrows, self.n_vars),
-                indptr,
-                indices,
-                data: TypedVec::F32(data),
-            },
-        };
-        block_on(self.inner.write_x_chunk(&chunk)).map_err(map_err)?;
-        Ok(self)
-    }
-
-    pub fn finalize(mut self) -> Result<(), ScxError> {
-        if !self.obs_written {
-            block_on(self.inner.write_obs(&ObsTable {
-                index: (0..self.n_obs).map(|i| format!("cell_{i}")).collect(),
-                columns: vec![],
-            }))
-            .map_err(map_err)?;
-        }
-        if !self.var_written {
-            block_on(self.inner.write_var(&VarTable {
-                index: (0..self.n_vars).map(|i| format!("gene_{i}")).collect(),
-                columns: vec![],
-            }))
-            .map_err(map_err)?;
-        }
-        block_on(self.inner.finalize()).map_err(map_err)?;
-        Ok(())
-    }
+    builder_methods!();
 }
-
-fn write_sparse_slot(
-    writer: &mut dyn DatasetWriter,
-    prefix: &str,
-    name: &str,
-    x: CsMatViewI<f32, u32>,
-    chunk_size: usize,
-) -> Result<(), ScxError> {
-    if !x.is_csr() {
-        return Err(ScxError::WrongOrientation);
-    }
-    let (n_obs, n_vars) = (x.rows(), x.cols());
-    let indptr_raw = x.indptr();
-    let indptr_slice = indptr_raw.raw_storage();
-    let full_indptr: Vec<u64> = indptr_slice.iter().map(|&v| v as u64).collect();
-    let meta = SparseMatrixMeta {
-        name: name.to_string(),
-        shape: (n_obs, n_vars),
-        indptr: full_indptr,
-    };
-    block_on(writer.begin_sparse(prefix, name, &meta)).map_err(map_err)?;
-    for row_off in (0..n_obs).step_by(chunk_size.max(1)) {
-        let row_end = (row_off + chunk_size.max(1)).min(n_obs);
-        let (sub_indptr, sub_indices, sub_data) = slice_sprs_csr(x, row_off, row_end);
-        let chunk = MatrixChunk {
-            row_offset: row_off,
-            nrows: row_end - row_off,
-            data: SparseMatrixCSR {
-                shape: (row_end - row_off, n_vars),
-                indptr: sub_indptr,
-                indices: sub_indices,
-                data: TypedVec::F32(sub_data),
-            },
-        };
-        block_on(writer.write_sparse_chunk(&chunk)).map_err(map_err)?;
-    }
-    block_on(writer.end_sparse()).map_err(map_err)?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Eager writers
-// ---------------------------------------------------------------------------
 
 /// Write a CSR matrix (cells × genes) to `.h5ad`.
 pub fn write_h5ad_csr(
@@ -569,14 +400,10 @@ pub fn write_h5ad_csr(
     var: VarTable,
     opts: &H5AdOptions,
 ) -> Result<(), ScxError> {
-    if !x.is_csr() {
-        return Err(ScxError::WrongOrientation);
-    }
-    let (n_obs, n_vars) = (x.rows(), x.cols());
-    let mut b = H5AdBuilder::new(path, n_obs, n_vars, opts)?;
-    b.obs(obs)?.var(var)?;
-    stream_csr_to_writer(&mut b.inner, x, n_vars, b.chunk_size)?;
-    b.finalize()
+    csr_first(x)?;
+    H5AdBuilder::new(path, x.rows(), x.cols(), opts)?
+        .0
+        .write_csr(x, obs, var)
 }
 
 /// Write a dense matrix (cells × genes) to `.h5ad`. Exact zeros are dropped.
@@ -588,10 +415,9 @@ pub fn write_h5ad_dense(
     opts: &H5AdOptions,
 ) -> Result<(), ScxError> {
     let (n_obs, n_vars) = x.dim();
-    let mut b = H5AdBuilder::new(path, n_obs, n_vars, opts)?;
-    b.obs(obs)?.var(var)?;
-    stream_dense_to_writer(&mut b.inner, x, b.chunk_size)?;
-    b.finalize()
+    H5AdBuilder::new(path, n_obs, n_vars, opts)?
+        .0
+        .write_dense(x, obs, var)
 }
 
 /// Write a CSR matrix as a BPCells-backed `.h5seurat`.
@@ -602,14 +428,10 @@ pub fn write_bpcells_h5seurat_csr(
     var: VarTable,
     opts: &BpcellsOptions,
 ) -> Result<(), ScxError> {
-    if !x.is_csr() {
-        return Err(ScxError::WrongOrientation);
-    }
-    let (n_obs, n_vars) = (x.rows(), x.cols());
-    let mut b = BpcellsH5SeuratBuilder::new(path, n_obs, n_vars, opts)?;
-    b.obs(obs)?.var(var)?;
-    stream_csr_to_writer(&mut b.inner, x, n_vars, b.chunk_size)?;
-    b.finalize()
+    csr_first(x)?;
+    BpcellsH5SeuratBuilder::new(path, x.rows(), x.cols(), opts)?
+        .0
+        .write_csr(x, obs, var)
 }
 
 /// Write a dense matrix as a BPCells-backed `.h5seurat`. Exact zeros are dropped.
@@ -621,10 +443,9 @@ pub fn write_bpcells_h5seurat_dense(
     opts: &BpcellsOptions,
 ) -> Result<(), ScxError> {
     let (n_obs, n_vars) = x.dim();
-    let mut b = BpcellsH5SeuratBuilder::new(path, n_obs, n_vars, opts)?;
-    b.obs(obs)?.var(var)?;
-    stream_dense_to_writer(&mut b.inner, x, b.chunk_size)?;
-    b.finalize()
+    BpcellsH5SeuratBuilder::new(path, n_obs, n_vars, opts)?
+        .0
+        .write_dense(x, obs, var)
 }
 
 /// Write a CSR matrix as a legacy dgCMatrix-backed `.h5seurat`.
@@ -635,14 +456,10 @@ pub fn write_h5seurat_dgcmatrix_csr(
     var: VarTable,
     opts: &BpcellsOptions,
 ) -> Result<(), ScxError> {
-    if !x.is_csr() {
-        return Err(ScxError::WrongOrientation);
-    }
-    let (n_obs, n_vars) = (x.rows(), x.cols());
-    let mut b = H5SeuratBuilder::new(path, n_obs, n_vars, opts)?;
-    b.obs(obs)?.var(var)?;
-    stream_csr_to_writer(&mut b.inner, x, n_vars, b.chunk_size)?;
-    b.finalize()
+    csr_first(x)?;
+    H5SeuratBuilder::new(path, x.rows(), x.cols(), opts)?
+        .0
+        .write_csr(x, obs, var)
 }
 
 /// Write a dense matrix as a legacy dgCMatrix-backed `.h5seurat`.
@@ -654,10 +471,18 @@ pub fn write_h5seurat_dgcmatrix_dense(
     opts: &BpcellsOptions,
 ) -> Result<(), ScxError> {
     let (n_obs, n_vars) = x.dim();
-    let mut b = H5SeuratBuilder::new(path, n_obs, n_vars, opts)?;
-    b.obs(obs)?.var(var)?;
-    stream_dense_to_writer(&mut b.inner, x, b.chunk_size)?;
-    b.finalize()
+    H5SeuratBuilder::new(path, n_obs, n_vars, opts)?
+        .0
+        .write_dense(x, obs, var)
+}
+
+/// Rejects CSC before a file is created for it.
+fn csr_first(x: CsMatViewI<f32, u32>) -> Result<(), ScxError> {
+    if x.is_csr() {
+        Ok(())
+    } else {
+        Err(ScxError::WrongOrientation)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +700,36 @@ mod tests {
         let err = write_h5ad_csr(&path, csc.view(), obs, var, &H5AdOptions::default())
             .expect_err("expected WrongOrientation");
         assert!(matches!(err, ScxError::WrongOrientation));
+    }
+
+    #[test]
+    fn add_layer_and_obsp_reject_wrong_shape() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("h5ad");
+        let mut b = H5AdBuilder::new(&path, 4, 3, &H5AdOptions::default()).unwrap();
+        // A layer must be n_obs × n_vars, an obsp matrix n_obs × n_obs.
+        let err = b
+            .add_layer_csr("bad", synthetic_csr(4, 4, 0.5).view())
+            .err()
+            .expect("layer with 4 columns accepted for n_vars = 3");
+        assert!(matches!(
+            err,
+            ScxError::WrongShape {
+                expected: (4, 3),
+                got: (4, 4)
+            }
+        ));
+        let err = b
+            .add_obsp_csr("bad", synthetic_csr(4, 3, 0.5).view())
+            .err()
+            .expect("obsp with 3 columns accepted for n_obs = 4");
+        assert!(matches!(
+            err,
+            ScxError::WrongShape {
+                expected: (4, 4),
+                got: (4, 3)
+            }
+        ));
     }
 
     #[test]

@@ -41,8 +41,11 @@ use crate::{
 type Store = Arc<FilesystemStore>;
 type ZArray = Array<FilesystemStore>;
 
-fn zerr(path: &str, e: impl std::fmt::Display) -> ScxError {
-    ScxError::Zarr(format!("{path}: {e}"))
+fn zerr(path: &str, e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> ScxError {
+    ScxError::Zarr {
+        path: path.to_string(),
+        source: e.into(),
+    }
 }
 
 /// Streaming reader for AnnData Zarr stores. See the module docs.
