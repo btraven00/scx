@@ -69,11 +69,11 @@ for chunk in pk.open_stream(path, chunk_size=8192):
 **Missing.** `indptr` is uint64 and `indices` uint32. scipy's CSR wants signed int32/int64, so every consumer that builds a `csr_matrix` copies both arrays per block (`csr_matrix` upcasts or rejects unsigned).
 
 **API.**
-- `MatrixChunk.to_scipy() -> scipy.sparse.csr_array`, built from `indices.view(np.int32)` and `indptr.view(np.int64)`: the bits are identical (n_vars < 2**31, indptr < 2**63), so the views are free.
+- `MatrixChunk.to_scipy() -> scipy.sparse.csr_array`, built from `indices.view(np.int32)` (identical bits: n_vars < 2**31, so the view is free) and `indptr.astype(np.int32)` when nnz fits. Recent scipy unifies the two index dtypes, so an int64 indptr would upcast, and copy, `indices`.
 - No `index_dtype=` option. The core, CLI, R binding and writers all use u64/u32 (offsets and column ids are never negative), and the views make a second dtype unnecessary.
 
 **Acceptance.**
-- `chunk.to_scipy()` shares memory with `chunk.data` and `chunk.indices` (`np.shares_memory`). `indptr` is exempt: scipy downcasts it to int32 when its values fit, a copy of only nrows + 1 entries.
+- `chunk.to_scipy()` shares memory with `chunk.data` and `chunk.indices` (`np.shares_memory`). `indptr` is exempt: it is cast to int32, a copy of only nrows + 1 entries.
 - `csr_array.has_canonical_format` is preserved.
 - scipy is an optional import: error only if `to_scipy` is called without scipy installed.
 
