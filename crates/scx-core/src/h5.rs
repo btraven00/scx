@@ -18,9 +18,34 @@ use crate::{
 // Typed reads shared by the HDF5 readers (h5ad, H5Seurat, 10x)
 // ---------------------------------------------------------------------------
 
+/// Fail with a clear error when `ds` is compressed with a filter libhdf5 has
+/// no decoder for: hdf5plugin's blosc, zstd, bitshuffle, ... Those show up as
+/// `Filter::User`; lzf is compiled in, so it parses as `Filter::LZF`.
+pub(crate) fn check_filters(ds: &hdf5::Dataset) -> Result<()> {
+    for f in ds.filters() {
+        if let hdf5::filters::Filter::User(id, _) = f {
+            let name = match id {
+                32001 => "blosc",
+                32004 => "lz4",
+                32008 => "bitshuffle",
+                32015 => "zstd",
+                32026 => "blosc2",
+                _ => "unknown",
+            };
+            return Err(ScxError::UnsupportedFilter(format!(
+                "dataset {} uses HDF5 filter {name} (id {id}), which scx can't decode; supported: {}",
+                ds.name(),
+                crate::error::SUPPORTED_FILTERS
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Read an index dataset (indptr, shape, ...) as u64, whatever its integer
 /// width or signedness. Float is accepted too: rhdf5 writes R doubles.
 pub(crate) fn read_u64(ds: &hdf5::Dataset) -> Result<Vec<u64>> {
+    check_filters(ds)?;
     match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Unsigned(_) => Ok(ds.read_raw::<u64>()?),
         TypeDescriptor::Integer(_) => ds
@@ -51,6 +76,7 @@ pub(crate) fn read_u32_range(
     ds: &hdf5::Dataset,
     range: std::ops::Range<usize>,
 ) -> Result<Vec<u32>> {
+    check_filters(ds)?;
     match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
             if ds.dtype()?.size() == 4 {
@@ -122,6 +148,7 @@ pub(crate) fn read_values(
     dtype: DataType,
     range: std::ops::Range<usize>,
 ) -> Result<TypedVec> {
+    check_filters(ds)?;
     if value_dtype(ds)? == dtype && ds.dtype()?.size() == dtype.size() {
         if let Some(plan) = h5_chunk::chunk_plan(ds) {
             let raw =
@@ -243,6 +270,83 @@ fn dtype_str(ds: &hdf5::Dataset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("scx_h5_{name}_{}.h5", std::process::id()))
+    }
+
+    /// h5py's `compression="lzf"` (anndata's second option) must decode.
+    #[test]
+    fn lzf_values_read_back() {
+        let path = tmp("lzf");
+        let vals: Vec<f32> = (0..5000).map(|i| (i % 97) as f32 * 0.5).collect();
+        File::create(&path)
+            .unwrap()
+            .new_dataset::<f32>()
+            .shape([vals.len()])
+            .chunk([1000])
+            .lzf()
+            .create("data")
+            .unwrap()
+            .write(&vals)
+            .unwrap();
+        let ds = File::open(&path).unwrap().dataset("data").unwrap();
+        let got = read_values(&ds, DataType::F32, 100..4100).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(got, TypedVec::F32(v) if v == vals[100..4100]));
+    }
+
+    /// A dataset filtered by zstd (32015), which this build has no decoder for.
+    /// hdf5-metno refuses to create one, so set the filter as optional through
+    /// the C API and store the chunk raw, claiming the filter was applied.
+    fn write_zstd_dataset(path: &Path) {
+        use hdf5_sys::{h5d, h5p, h5s, h5t, h5z};
+        let f = File::create(path).unwrap();
+        let dims = [100u64];
+        let buf = vec![1f32; 100];
+        hdf5::sync::sync(|| unsafe {
+            let dcpl = h5p::H5Pcreate(*h5p::H5P_CLS_DATASET_CREATE);
+            h5p::H5Pset_chunk(dcpl, 1, dims.as_ptr());
+            h5p::H5Pset_filter(dcpl, 32015, h5z::H5Z_FLAG_OPTIONAL, 0, std::ptr::null());
+            let space = h5s::H5Screate_simple(1, dims.as_ptr(), std::ptr::null());
+            let name = c"data";
+            let ds = h5d::H5Dcreate2(
+                f.id(),
+                name.as_ptr(),
+                *h5t::H5T_NATIVE_FLOAT,
+                space,
+                h5p::H5P_DEFAULT,
+                dcpl,
+                h5p::H5P_DEFAULT,
+            );
+            assert!(ds >= 0);
+            let offset = [0u64];
+            let w = h5d::H5Dwrite_chunk(ds, h5p::H5P_DEFAULT, 0, offset.as_ptr(), 400, buf.as_ptr().cast());
+            assert!(w >= 0);
+            h5d::H5Dclose(ds);
+            h5s::H5Sclose(space);
+            h5p::H5Pclose(dcpl);
+        });
+    }
+
+    /// Regression: an unsupported filter leaked libhdf5's compiled-in plugin
+    /// directory ("can't open directory (/home/runner/...)") as the error.
+    #[test]
+    fn unsupported_filter_is_named_not_leaked() {
+        let path = tmp("zstd");
+        write_zstd_dataset(&path);
+        let ds = File::open(&path).unwrap().dataset("data").unwrap();
+
+        let err = read_values(&ds, DataType::F32, 0..100).unwrap_err().to_string();
+        assert!(err.contains("zstd (id 32015)"), "{err}");
+        assert!(err.contains("/data"), "{err}");
+
+        // Any other read path goes through `From<hdf5::Error>`.
+        let err = ScxError::from(ds.read_raw::<f32>().unwrap_err()).to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("can't decode"), "{err}");
+        assert!(!err.contains("plugin"), "{err}");
+    }
 
     #[test]
     fn walk_h5_tree_and_depth_truncation() {

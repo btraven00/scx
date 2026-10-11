@@ -1389,10 +1389,12 @@ checksum = "da648c8200335c8a8fdf270fc91807c949ddbef595dd2572a8a572a31977c3d5"
 dependencies = [
  "bitflags",
  "cfg-if",
+ "errno",
  "hdf5-metno-derive",
  "hdf5-metno-sys",
  "hdf5-metno-types",
  "libc",
+ "lzf-sys",
  "ndarray",
  "pastey",
 ]
@@ -1997,6 +1999,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 dependencies = [
  "twox-hash",
+]
+
+[[package]]
+name = "lzf-sys"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "411d1ba1d5d217b00615238cb6e9d68fbb93dc422f68e3396b5cf803ad832b6f"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

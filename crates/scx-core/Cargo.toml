@@ -43,7 +43,9 @@ net = [
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
-hdf5 = { package = "hdf5-metno", version = "0.15" }
+# `lzf` compiles in h5py's LZF filter (id 32000) and registers it with libhdf5
+# at init, so h5ads written with compression="lzf" read on the serial path.
+hdf5 = { package = "hdf5-metno", version = "0.15", features = ["lzf"] }
 zarrs = { version = "0.23", optional = true, default-features = false, features = ["filesystem", "sharding", "crc32c", "blosc", "zstd", "gzip", "zlib"] }
 hdf5-sys = { package = "hdf5-metno-sys", version = "0.12" }
 # Parallel inflate of deflate-chunked HDF5 datasets: read raw chunks via

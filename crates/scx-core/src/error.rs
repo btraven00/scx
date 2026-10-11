@@ -6,7 +6,12 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum ScxError {
     #[error("HDF5 error: {0}")]
-    Hdf5(#[from] hdf5::Error),
+    Hdf5(hdf5::Error),
+
+    /// An HDF5 dataset compressed with a filter this build can't decode
+    /// (blosc, zstd, bitshuffle, ... from h5py's hdf5plugin).
+    #[error("{0}")]
+    UnsupportedFilter(String),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -51,5 +56,24 @@ pub enum ScxError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
+
+impl From<hdf5::Error> for ScxError {
+    /// libhdf5 reports a filter it doesn't have as a failed search of its
+    /// plugin directory, which is a path compiled into the build (a CI runner
+    /// path in released wheels). Say what is unsupported instead.
+    fn from(e: hdf5::Error) -> Self {
+        let msg = e.to_string();
+        if msg.contains("plugin") || msg.contains("is not registered") {
+            ScxError::UnsupportedFilter(format!(
+                "a dataset uses an HDF5 compression filter scx can't decode; supported: {SUPPORTED_FILTERS}"
+            ))
+        } else {
+            ScxError::Hdf5(e)
+        }
+    }
+}
+
+/// The HDF5 filters scx decodes, for error messages.
+pub(crate) const SUPPORTED_FILTERS: &str = "deflate (gzip), shuffle, lzf";
 
 pub type Result<T> = std::result::Result<T, ScxError>;
