@@ -60,6 +60,15 @@ def test_inspect_h5ad(norman, norman_path) -> None:
     assert [layer["name"] for layer in info["layers"]] == ["counts"]
 
 
+def test_inspect_names(norman, norman_path, bpcells_csr_path) -> None:
+    assert "obs_names" not in pk.inspect(norman_path)
+    info = pk.inspect(norman_path, names=True)
+    assert info["obs_names"] == list(norman.obs_names)
+    assert info["var_names"] == list(norman.var_names)
+    info = pk.inspect(bpcells_csr_path, names=True)
+    assert (len(info["obs_names"]), len(info["var_names"])) == (4, 5)
+
+
 def test_inspect_bpcells_dir(bpcells_csr_path) -> None:
     info = pk.inspect(bpcells_csr_path)
     assert info["format"] == "BPCells"

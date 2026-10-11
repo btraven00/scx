@@ -106,16 +106,18 @@ def write_h5seurat(
         return convert(h5ad, path, assay=assay, chunk_size=chunk_size)
 
 
-def inspect(path: Pathish) -> dict:
+def inspect(path: Pathish, *, names: bool = False) -> dict:
     """Describe a dataset without reading its matrix.
 
     Returns a dict with ``format``, ``n_obs``, ``n_vars``, ``obs_cols``,
     ``obs_dtypes``, ``var_cols``, ``var_dtypes``, ``obsm_keys``,
     ``varm_keys``, ``uns_keys``, ``layers`` and ``obsp`` (lists of dicts
     with name, shape and per-row nnz quartiles), and ``x_stats`` when X is
-    stored as CSR.
+    stored as CSR. With ``names=True`` it also has ``obs_names`` and
+    ``var_names`` (lists of str), e.g. to key per-cell results from
+    :func:`open_stream` without opening the file with anndata.
     """
-    return _native.scx_inspect(_path(path))
+    return _native.scx_inspect(_path(path), names)
 
 
 def open_stream(

@@ -164,7 +164,8 @@ fn nnz_stats<'py>(py: Python<'py>, indptr: &[u64]) -> PyResult<Bound<'py, PyDict
 }
 
 #[pyfunction]
-fn scx_inspect(py: Python<'_>, input: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (input, with_names = false))]
+fn scx_inspect(py: Python<'_>, input: &str, with_names: bool) -> PyResult<Py<PyAny>> {
     let fmt = detect::detect(Path::new(input));
     let opts = scx_core::OpenOptions {
         metadata_only: true,
@@ -230,6 +231,10 @@ fn scx_inspect(py: Python<'_>, input: &str) -> PyResult<Py<PyAny>> {
         .map(|o| o.keys().collect())
         .unwrap_or_default();
     d.set_item("uns_keys", uns_keys)?;
+    if with_names {
+        d.set_item("obs_names", &obs.index)?;
+        d.set_item("var_names", &var.index)?;
+    }
     d.set_item("layers", sparse_list(&layer_metas)?)?;
     d.set_item("obsp", sparse_list(&obsp_metas)?)?;
     Ok(d.into_any().unbind())
