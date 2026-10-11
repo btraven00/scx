@@ -14,7 +14,7 @@ import picklerick as pk
 The PyPI distribution is named `scx-picklerick` because `picklerick` is too
 close to an existing project name. The import name is `picklerick`.
 
-Requires Python 3.14 or newer. Wheels are built for Linux (x86_64, aarch64)
+Requires Python 3.10 or newer. Wheels are built for Linux (x86_64, aarch64)
 and macOS (arm64) and include a statically linked HDF5. You don't need a
 system HDF5.
 

@@ -90,7 +90,7 @@ bpcells    = { features = ["bpcells"] }
 
 # ---------------------------------------------------------------------------
 # py feature — lightweight env for building and testing the picklerick
-# Python package (no R stack). The package supports Python >= 3.14.
+# Python package (no R stack). The package supports Python >= 3.10.
 # ---------------------------------------------------------------------------
 [feature.py.dependencies]
 python   = ">=3.14,<3.16"

@@ -7,7 +7,7 @@ name = "scx-picklerick"
 dynamic = ["version"]
 description = "Streaming conversion between single-cell formats (H5AD, H5Seurat, BPCells, 10x, MTX, Zarr), powered by the SCX Rust engine"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "ben", email = "ben.uzh@proton.me" }]
 keywords = ["single-cell", "anndata", "seurat", "h5ad", "bpcells", "bioinformatics"]
@@ -37,8 +37,9 @@ Issues = "https://github.com/btraven00/scx/issues"
 [tool.maturin]
 python-source = "src"
 module-name = "picklerick.picklerick_py_native"
-# One stable-ABI wheel per platform covers 3.14 and every later CPython.
-features = ["pyo3/abi3-py314"]
+# One stable-ABI wheel per platform covers 3.10 and every later CPython.
+# Nothing needs a newer floor; scientific stacks (faiss, ...) lag behind.
+features = ["pyo3/abi3-py310"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
