@@ -264,6 +264,36 @@ pub struct PyMatrixChunk {
     pub data: Py<PyAny>,
 }
 
+#[pymethods]
+impl PyMatrixChunk {
+    /// The chunk as a ``scipy.sparse.csr_array`` that shares ``data`` and
+    /// ``indices`` with this chunk. scipy wants signed indices of one dtype:
+    /// ``indices`` is viewed as int32 (same bits, never negative) and
+    /// ``indptr`` is cast to int32, a copy of only nrows + 1 entries. Given an
+    /// int64 indptr, scipy would upcast, and so copy, ``indices``.
+    fn to_scipy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if self.n_vars > i32::MAX as usize {
+            return Err(PickleRickError::new_err(format!(
+                "to_scipy: {} columns don't fit int32 indices",
+                self.n_vars
+            )));
+        }
+        let indices = self.indices.bind(py).call_method1("view", ("int32",))?;
+        let nnz = self.data.bind(py).len()?;
+        let indptr = if nnz <= i32::MAX as usize {
+            self.indptr.bind(py).call_method1("astype", ("int32",))?
+        } else {
+            self.indptr.bind(py).call_method1("view", ("int64",))?
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("shape", (self.nrows, self.n_vars))?;
+        kwargs.set_item("copy", false)?;
+        py.import("scipy.sparse")?
+            .getattr("csr_array")?
+            .call(((self.data.bind(py), indices, indptr),), Some(&kwargs))
+    }
+}
+
 fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyMatrixChunk {
     let MatrixChunk {
         row_offset,

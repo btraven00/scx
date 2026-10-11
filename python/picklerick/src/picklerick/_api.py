@@ -133,9 +133,6 @@ def open_stream(
     Examples
     --------
     >>> for chunk in pk.open_stream("atlas.h5ad", chunk_size=5000):
-    ...     X = scipy.sparse.csr_matrix(
-    ...         (chunk.data, chunk.indices, chunk.indptr),
-    ...         shape=(chunk.nrows, chunk.n_vars),
-    ...     )
+    ...     X = chunk.to_scipy()  # csr_array sharing chunk.data / chunk.indices
     """
     return _native.scx_open_stream(_path(path), chunk_size, assay, layer)

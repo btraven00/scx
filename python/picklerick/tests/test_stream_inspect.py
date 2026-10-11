@@ -24,6 +24,18 @@ def test_stream_reassembles_x(norman, norman_path) -> None:
     np.testing.assert_array_equal(x.toarray(), dense(norman.X))
 
 
+def test_to_scipy_shares_data_and_indices(norman, norman_path) -> None:
+    chunks = list(pk.open_stream(norman_path, chunk_size=7))
+    blocks = [c.to_scipy() for c in chunks]
+    for c, m in zip(chunks, blocks):
+        assert isinstance(m, sparse.csr_array)
+        assert m.shape == (c.nrows, c.n_vars)
+        assert m.indices.dtype == np.int32
+        assert np.shares_memory(m.data, c.data)
+        assert np.shares_memory(m.indices, c.indices)
+    np.testing.assert_array_equal(sparse.vstack(blocks).toarray(), dense(norman.X))
+
+
 def test_stream_can_be_abandoned(norman_path) -> None:
     stream = pk.open_stream(norman_path, chunk_size=1)
     assert next(stream).nrows == 1
