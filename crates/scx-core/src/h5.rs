@@ -321,7 +321,14 @@ mod tests {
             );
             assert!(ds >= 0);
             let offset = [0u64];
-            let w = h5d::H5Dwrite_chunk(ds, h5p::H5P_DEFAULT, 0, offset.as_ptr(), 400, buf.as_ptr().cast());
+            let w = h5d::H5Dwrite_chunk(
+                ds,
+                h5p::H5P_DEFAULT,
+                0,
+                offset.as_ptr(),
+                400,
+                buf.as_ptr().cast(),
+            );
             assert!(w >= 0);
             h5d::H5Dclose(ds);
             h5s::H5Sclose(space);
@@ -337,7 +344,9 @@ mod tests {
         write_zstd_dataset(&path);
         let ds = File::open(&path).unwrap().dataset("data").unwrap();
 
-        let err = read_values(&ds, DataType::F32, 0..100).unwrap_err().to_string();
+        let err = read_values(&ds, DataType::F32, 0..100)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("zstd (id 32015)"), "{err}");
         assert!(err.contains("/data"), "{err}");
 
