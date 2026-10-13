@@ -64,6 +64,8 @@ pub struct H5AdWriter {
     /// State for the currently open streaming sparse matrix, if any.
     sparse_state: Option<SparseWriteState>,
     mode: WriterMode,
+    /// HDF5 group the streamed matrix goes to: `"X"` or `"layers/<name>"`.
+    x_path: String,
 }
 
 impl H5AdWriter {
@@ -90,12 +92,33 @@ impl H5AdWriter {
         dtype: DataType,
         compression: Option<u8>,
     ) -> Result<Self> {
+        Self::create_at(path, n_obs, n_vars, dtype, compression, "X")
+    }
+
+    /// Like [`create_compressed`](Self::create_compressed), but the streamed
+    /// matrix goes to `x_slot`: `"X"` (the default) or `"layers/<name>"`.
+    /// With a layer slot `/X` is left absent; the reader then falls back to
+    /// that layer.
+    pub fn create_at<P: AsRef<Path>>(
+        path: P,
+        n_obs: usize,
+        n_vars: usize,
+        dtype: DataType,
+        compression: Option<u8>,
+        x_slot: &str,
+    ) -> Result<Self> {
         if let Some(level) = compression {
             if level > 9 {
                 return Err(ScxError::InvalidFormat(format!(
                     "gzip compression level must be 0..=9, got {level}"
                 )));
             }
+        }
+        let layer = x_slot.strip_prefix("layers/");
+        if x_slot != "X" && !layer.is_some_and(|l| !l.is_empty() && !l.contains('/')) {
+            return Err(ScxError::InvalidFormat(format!(
+                "h5ad X slot must be \"X\" or \"layers/<name>\", got \"{x_slot}\""
+            )));
         }
 
         let file = File::create(path.as_ref())?;
@@ -105,8 +128,11 @@ impl H5AdWriter {
         write_str_attr(&root, "encoding-type", "anndata")?;
         write_str_attr(&root, "encoding-version", "0.1.0")?;
 
-        // /X group — encoding attrs; resizable datasets created here
-        let x_grp = file.create_group("X")?;
+        // Matrix group — encoding attrs; resizable datasets created here
+        let x_grp = match layer {
+            Some(name) => dict_group(&file, "layers")?.create_group(name)?,
+            None => file.create_group("X")?,
+        };
         write_str_attr(&x_grp, "encoding-type", "csr_matrix")?;
         write_str_attr(&x_grp, "encoding-version", "0.1.0")?;
         // shape attr written in finalize() once we know n_obs
@@ -124,6 +150,7 @@ impl H5AdWriter {
             x_indptr: vec![0u64],
             sparse_state: None,
             mode: WriterMode::Create,
+            x_path: x_slot.to_string(),
         })
     }
 
@@ -152,6 +179,7 @@ impl H5AdWriter {
             x_indptr: Vec::new(),
             sparse_state: None,
             mode: WriterMode::Append,
+            x_path: "X".to_string(),
         })
     }
 
@@ -697,7 +725,7 @@ impl DatasetWriter for H5AdWriter {
                 "write_x_chunk must not be called on an append-mode H5AdWriter".into(),
             ));
         }
-        append_csr(&self.file.group("X")?, &chunk.data, self.dtype)?;
+        append_csr(&self.file.group(&self.x_path)?, &chunk.data, self.dtype)?;
         let base = *self.x_indptr.last().unwrap();
         self.x_indptr
             .extend(chunk.data.indptr[1..=chunk.nrows].iter().map(|&p| base + p));
@@ -710,7 +738,7 @@ impl DatasetWriter for H5AdWriter {
                 "finalize must not be called on an append-mode H5AdWriter".into(),
             ));
         }
-        let x_grp = self.file.group("X")?;
+        let x_grp = self.file.group(&self.x_path)?;
         write_indptr(&x_grp, &self.x_indptr, self.compression)?;
         write_shape(&x_grp, (self.n_obs, self.n_vars))?;
         tracing::info!(

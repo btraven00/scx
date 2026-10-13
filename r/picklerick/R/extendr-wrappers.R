@@ -37,14 +37,14 @@ scx_write_h5ad <- function(output, n_obs, n_vars,
                            x_indptr, x_indices, x_data,
                            obs_index, var_index,
                            obs_cols, var_cols,
-                           uns_json, dtype) {
+                           uns_json, dtype, x_slot = "X") {
   .Call(
     "wrap__scx_write_h5ad",
     output, n_obs, n_vars,
     x_indptr, x_indices, x_data,
     obs_index, var_index,
     obs_cols, var_cols,
-    uns_json, dtype,
+    uns_json, dtype, x_slot,
     PACKAGE = "picklerick"
   )
 }

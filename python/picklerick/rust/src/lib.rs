@@ -35,8 +35,8 @@ fn stream_opts(chunk_size: usize, assay: &str, layer: &str) -> scx_core::OpenOpt
 /// Pick the writer from the output extension. H5Seurat output is the
 /// SeuratDisk-compatible dgCMatrix layout, not the CLI's BPCells default.
 ///
-/// Same X-slot rule as `scx convert --x-slot auto`: when the source has a
-/// `counts` layer, X is taken to be normalised and goes to the `data` slot.
+/// `x_slot` is the Seurat slot for H5Seurat output, or `"X"` / `"layers/<name>"`
+/// for H5AD output.
 fn create_writer(
     output: &Path,
     n_obs: usize,
@@ -50,7 +50,9 @@ fn create_writer(
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
     Ok(match ext.as_deref() {
-        Some("h5ad") => Box::new(H5AdWriter::create(output, n_obs, n_vars, dtype)?),
+        Some("h5ad") => Box::new(H5AdWriter::create_at(
+            output, n_obs, n_vars, dtype, None, x_slot,
+        )?),
         Some("h5seurat") => Box::new(H5SeuratWriter::create(
             output,
             n_obs,
@@ -109,7 +111,11 @@ async fn convert(
     Ok(())
 }
 
+/// H5Seurat output follows `scx convert --x-slot auto`: when the source has a
+/// `counts` layer, X is taken to be normalised and goes to the `data` slot.
+/// H5AD output writes the matrix to `x_slot` (`"X"` or `"layers/<name>"`).
 #[pyfunction]
+#[pyo3(signature = (input, output, chunk_size, dtype, assay, layer, x_slot = "X"))]
 fn scx_convert(
     input: &str,
     output: &str,
@@ -117,24 +123,31 @@ fn scx_convert(
     dtype: &str,
     assay: &str,
     layer: &str,
+    x_slot: &str,
 ) -> PyResult<()> {
     let run = || -> anyhow::Result<()> {
         let dtype = dtype.parse::<DataType>()?;
         let mut reader = open_reader(input, stream_opts(chunk_size, assay, layer))?;
         let (n_obs, n_vars) = reader.shape();
         let layer_metas = block_on(reader.layer_metas())?;
-        let x_slot = if layer_metas.iter().any(|m| m.name == "counts") {
+        let output = Path::new(output);
+        let is_seurat = output
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("h5seurat"));
+        let slot = if !is_seurat {
+            x_slot
+        } else if layer_metas.iter().any(|m| m.name == "counts") {
             "data"
         } else {
             "counts"
         };
-        let output = Path::new(output);
-        let mut writer = create_writer(output, n_obs, n_vars, dtype, assay, x_slot)?;
-        // H5Seurat stores X in an assay slot; a layer of the same name can't coexist.
-        let is_seurat = output
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("h5seurat"));
-        let skip = is_seurat.then_some(x_slot);
+        let mut writer = create_writer(output, n_obs, n_vars, dtype, assay, slot)?;
+        // A source layer with the destination's name can't coexist with it.
+        let skip = if is_seurat {
+            Some(slot)
+        } else {
+            slot.strip_prefix("layers/")
+        };
         block_on(convert(
             &mut *reader,
             &mut *writer,

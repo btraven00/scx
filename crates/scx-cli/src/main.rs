@@ -80,10 +80,14 @@ enum Cli {
         #[arg(long)]
         dgcmatrix: bool,
 
-        /// H5Seurat slot to write X into: counts, data, or auto (default).
+        /// Where to write the matrix. H5Seurat: counts, data, or auto
+        /// (default). H5AD: X (= auto) or layers/<name>, which writes the
+        /// matrix there and leaves /X absent.
         ///
-        /// auto: if the source has a layer named "counts", X is assumed to be
-        /// normalised and goes into the "data" slot; otherwise X goes into "counts".
+        /// auto (H5Seurat): if the source has a layer named "counts", X is
+        /// assumed to be normalised and goes into the "data" slot; otherwise
+        /// X goes into "counts". A source layer with the target's name is
+        /// skipped.
         #[arg(long, default_value = "auto")]
         x_slot: String,
 
@@ -847,26 +851,29 @@ async fn convert_with_reader(
     let layer_metas = reader.layer_metas().await?;
     let obsp_metas = reader.obsp_metas().await?;
 
-    // Resolve the effective X slot for H5Seurat output.
-    // auto: if source has a "counts" layer, X is assumed normalised → goes to "data".
-    // Explicit "counts" or "data" overrides the heuristic.
-    let effective_x_slot: &str = if is_h5seurat {
-        match x_slot {
-            "auto" => {
-                if layer_metas.iter().any(|m| m.name == "counts") {
-                    tracing::info!(
-                        "source has a 'counts' layer — writing X to 'data' slot, \
-                         'counts' layer to 'counts' slot (use --x-slot counts to override)"
-                    );
-                    "data"
-                } else {
-                    out_layer
-                }
+    // Resolve the effective X slot.
+    // H5Seurat auto: if source has a "counts" layer, X is assumed normalised → goes to "data".
+    // H5AD auto: "/X". Anything explicit is passed to the writer as-is.
+    let effective_x_slot: &str = match (is_h5seurat, x_slot) {
+        (true, "auto") => {
+            if layer_metas.iter().any(|m| m.name == "counts") {
+                tracing::info!(
+                    "source has a 'counts' layer — writing X to 'data' slot, \
+                     'counts' layer to 'counts' slot (use --x-slot counts to override)"
+                );
+                "data"
+            } else {
+                out_layer
             }
-            other => other,
         }
+        (false, "auto") => "X",
+        (_, other) => other,
+    };
+    // Source layer that would collide with the matrix's destination.
+    let x_layer: Option<&str> = if is_h5seurat {
+        Some(effective_x_slot)
     } else {
-        out_layer
+        effective_x_slot.strip_prefix("layers/")
     };
 
     tracing::info!(
@@ -919,8 +926,13 @@ async fn convert_with_reader(
                 )?)
             }
         } else {
-            Box::new(H5AdWriter::create_compressed(
-                output, n_obs, n_vars, out_dtype, compress,
+            Box::new(H5AdWriter::create_at(
+                output,
+                n_obs,
+                n_vars,
+                out_dtype,
+                compress,
+                effective_x_slot,
             )?)
         };
 
@@ -943,7 +955,7 @@ async fn convert_with_reader(
             tracing::info!(name = %meta.name, "skipping layer (slot filter)");
             continue;
         }
-        if is_h5seurat && meta.name == effective_x_slot {
+        if Some(meta.name.as_str()) == x_layer {
             tracing::warn!(
                 name = %meta.name,
                 "skipping layer '{}': same name as X slot — \

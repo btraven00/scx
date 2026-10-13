@@ -393,6 +393,7 @@ fn list_to_columns(list: &List) -> Result<Vec<Column>> {
 /// @param var_cols  Named list of var columns (length n_vars each).
 /// @param uns_json  JSON-encoded uns object (`{}` for empty).
 /// @param dtype     Output X dtype: `"f32"` | `"f64"` | `"i32"` | `"u32"`.
+/// @param x_slot    Where the matrix goes: `"X"` or `"layers/<name>"`.
 /// @noRd
 #[extendr]
 #[allow(clippy::too_many_arguments)]
@@ -409,10 +410,11 @@ fn scx_write_h5ad(
     var_cols:  List,
     uns_json:  &str,
     dtype:     &str,
+    x_slot:    &str,
 ) {
     or_throw(scx_write_h5ad_inner(
         output, n_obs, n_vars, x_indptr, x_indices, x_data,
-        obs_index, var_index, obs_cols, var_cols, uns_json, dtype,
+        obs_index, var_index, obs_cols, var_cols, uns_json, dtype, x_slot,
     ))
 }
 
@@ -430,6 +432,7 @@ fn scx_write_h5ad_inner(
     var_cols:  List,
     uns_json:  &str,
     dtype:     &str,
+    x_slot:    &str,
 ) -> Result<()> {
     let dtype = parse_dtype(dtype)?;
     let n_obs  = n_obs  as usize;
@@ -500,7 +503,8 @@ fn scx_write_h5ad_inner(
     };
 
     let result = block_on(async {
-        let mut writer = H5AdWriter::create(Path::new(output), n_obs, n_vars, dtype)?;
+        let mut writer =
+            H5AdWriter::create_at(Path::new(output), n_obs, n_vars, dtype, None, x_slot)?;
         writer.write_obs(&obs).await?;
         writer.write_var(&var).await?;
         writer.write_obsm(&Embeddings::default()).await?;

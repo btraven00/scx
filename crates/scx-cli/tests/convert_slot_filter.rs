@@ -83,3 +83,55 @@ fn only_and_exclude_are_mutually_exclusive() {
     );
     assert!(String::from_utf8_lossy(&res.stderr).contains("cannot be used with"));
 }
+
+/// `--x-slot layers/<name>` on h5ad output writes the matrix there, leaves /X
+/// absent, and drops a source layer of the same name instead of writing it twice.
+#[test]
+fn x_slot_layer_on_h5ad_output() {
+    let input = fixture("norman_subset.h5ad");
+    let (src_nnz, src_layers) = {
+        let mut r = H5AdReader::open(&input, 500).unwrap();
+        (count_nnz(&mut r), layer_names(&input))
+    };
+    assert!(
+        src_layers.contains(&"counts".to_string()),
+        "fixture must have a counts layer"
+    );
+
+    let out = tempfile::NamedTempFile::with_suffix(".h5ad").unwrap();
+    let res = convert(&input, out.path(), &["--x-slot", "layers/counts"]);
+    assert_eq!(
+        res.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    // The reader only falls back to a layer when /X is absent.
+    let mut r = H5AdReader::open(out.path(), 500).unwrap();
+    assert_eq!(r.x_source(), "layers/counts");
+    assert_eq!(
+        count_nnz(&mut r),
+        src_nnz,
+        "layers/counts must hold the source X"
+    );
+    assert!(!layer_names(out.path()).contains(&"counts".to_string()));
+
+    let bad = convert(&input, out.path(), &["--x-slot", "obsm/counts"]);
+    assert_ne!(
+        bad.status.code(),
+        Some(0),
+        "non-layer slot must be rejected"
+    );
+}
+
+fn count_nnz(r: &mut H5AdReader) -> usize {
+    use futures::StreamExt;
+    futures::executor::block_on(async {
+        let mut n = 0;
+        let mut s = r.x_stream();
+        while let Some(c) = s.next().await {
+            n += c.unwrap().data.indices.len();
+        }
+        n
+    })
+}

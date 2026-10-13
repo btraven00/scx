@@ -77,3 +77,20 @@ def test_pbmc3k_h5seurat_matches_reference(tmp_path) -> None:
     assert list(got.obs_names) == list(ref.obs_names)
     assert list(got.var_names) == list(ref.var_names)
     assert {"X_pca", "X_umap"} <= set(got.obsm)
+
+
+def test_x_slot_layer_leaves_x_absent(norman, norman_path, tmp_path) -> None:
+    # The matrix lands in layers/raw, X is absent; the fixture's own `counts`
+    # layer is untouched because its name differs.
+    back = ad.read_h5ad(pk.convert(norman_path, tmp_path / "slot.h5ad", x_slot="layers/raw"))
+    assert back.X is None
+    np.testing.assert_array_equal(dense(back.layers["raw"]), dense(norman.X))
+    np.testing.assert_array_equal(dense(back.layers["counts"]), norman.layers["counts"])
+
+    # Same name as a source layer: the source layer is dropped, not written twice.
+    back = ad.read_h5ad(pk.convert(norman_path, tmp_path / "clash.h5ad", x_slot="layers/counts"))
+    assert back.X is None
+    np.testing.assert_array_equal(dense(back.layers["counts"]), dense(norman.X))
+
+    with pytest.raises(Exception, match="layers/<name>"):
+        pk.convert(norman_path, tmp_path / "bad.h5ad", x_slot="counts")

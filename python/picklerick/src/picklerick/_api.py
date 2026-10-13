@@ -26,6 +26,7 @@ def convert(
     dtype: str = "f32",
     assay: str = "RNA",
     layer: str = "counts",
+    x_slot: str = "X",
     chunk_size: int = 5000,
 ) -> Path:
     """Convert a single-cell dataset to ``.h5ad`` or ``.h5seurat``.
@@ -45,6 +46,10 @@ def convert(
     assay, layer
         Seurat assay and layer to read from H5Seurat input; ``assay`` is
         also the assay name written to H5Seurat output.
+    x_slot
+        Where the matrix goes in ``.h5ad`` output: ``"X"`` (default) or
+        ``"layers/<name>"``, which writes it there and leaves ``X`` absent.
+        A source layer of that name is dropped. Ignored for ``.h5seurat``.
     chunk_size
         Cells per streamed chunk.
 
@@ -57,7 +62,7 @@ def convert(
         raise ValueError(f"unknown dtype {dtype!r}: use one of {_DTYPES}")
     out = Path(output).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    _native.scx_convert(_path(input), str(out), chunk_size, dtype, assay, layer)
+    _native.scx_convert(_path(input), str(out), chunk_size, dtype, assay, layer, x_slot)
     return out
 
 

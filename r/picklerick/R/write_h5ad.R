@@ -10,12 +10,15 @@
 #'   `colData()`, `rowData()`, `metadata()`).
 #' @param path     Output `.h5ad` path.
 #' @param assay    Name of the assay to use as `X`. Default `"counts"`.
+#' @param slot     Where the matrix goes in the file: `"X"` (default) or
+#'   `"layers/<name>"`, e.g. `"layers/counts"`, which writes it there and
+#'   leaves `X` absent.
 #' @param dtype    Output X dtype: `"f32"`, `"f64"`, `"i32"`, `"u32"`.
 #'   Default `"f32"` (matches scx convert default).
 #'
 #' @return `path`, invisibly.
 #' @export
-write_h5ad <- function(sce, path, assay = "counts", dtype = "f32") {
+write_h5ad <- function(sce, path, assay = "counts", slot = "X", dtype = "f32") {
   if (!requireNamespace("Matrix", quietly = TRUE)) {
     stop("write_h5ad requires the Matrix package.", call. = FALSE)
   }
@@ -58,7 +61,8 @@ write_h5ad <- function(sce, path, assay = "counts", dtype = "f32") {
     obs_cols  = obs_cols,
     var_cols  = var_cols,
     uns_json  = as.character(uns_json),
-    dtype     = as.character(dtype)
+    dtype     = as.character(dtype),
+    x_slot    = as.character(slot)
   )
   invisible(path)
 }

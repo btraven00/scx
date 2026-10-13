@@ -64,3 +64,19 @@ test_that("convert writes H5Seurat when the output ends in .h5seurat", {
   convert(tiny("tiny.h5ad"), out)
   expect_match(inspect(out)$format, "H5Seurat")
 })
+
+test_that("write_h5ad(slot = 'layers/counts') leaves X absent and reads back", {
+  skip_if_not_installed("SingleCellExperiment")
+  skip_if_not_installed("rhdf5")
+  sce <- read_h5ad(tiny("tiny.h5ad"))
+  out <- tempfile(fileext = ".h5ad")
+  on.exit(unlink(out))
+  write_h5ad(sce, out, assay = 1, slot = "layers/counts")
+  objs <- rhdf5::h5ls(out, recursive = 1)$name
+  expect_false("X" %in% objs)
+  expect_true("layers" %in% objs)
+  back <- read_h5ad(out)
+  expect_equal(unname(as.matrix(SummarizedExperiment::assay(back, 1))),
+               unname(as.matrix(SummarizedExperiment::assay(sce, 1))))
+  expect_error(write_h5ad(sce, out, assay = 1, slot = "counts"), "layers/<name>")
+})

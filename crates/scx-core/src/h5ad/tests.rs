@@ -1943,3 +1943,70 @@ async fn unstorable_column_name_is_an_error() {
         .await
         .expect_err("NUL column name written as empty");
 }
+
+/// `create_at` with `layers/<name>` writes the matrix there and leaves /X
+/// absent; the reader then falls back to that layer. Any other slot is
+/// rejected before the file is created.
+#[tokio::test]
+async fn x_slot_layer_writes_matrix_there_and_no_x() {
+    let (n_obs, n_vars) = (2usize, 3usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let mut w = H5AdWriter::create_at(
+            tmp.path(),
+            n_obs,
+            n_vars,
+            DataType::F32,
+            None,
+            "layers/counts",
+        )
+        .unwrap();
+        w.write_obs(&ObsTable {
+            index: vec!["c0".into(), "c1".into()],
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        w.write_var(&VarTable {
+            index: vec!["g0".into(), "g1".into(), "g2".into()],
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        w.write_x_chunk(&MatrixChunk {
+            row_offset: 0,
+            nrows: n_obs,
+            data: SparseMatrixCSR {
+                shape: (n_obs, n_vars),
+                indptr: vec![0, 2, 3],
+                indices: vec![0, 2, 1],
+                data: TypedVec::F32(vec![1.0, 2.0, 3.0]),
+            },
+        })
+        .await
+        .unwrap();
+        w.finalize().await.unwrap();
+    }
+    let f = File::open(tmp.path()).unwrap();
+    assert!(f.group("X").is_err(), "/X must be absent");
+    assert!(f.group("layers/counts").is_ok());
+    drop(f);
+
+    let mut r = H5AdReader::open(tmp.path(), 1).unwrap();
+    assert_eq!(r.x_source(), "layers/counts");
+    assert_eq!(r.shape(), (n_obs, n_vars));
+    let mut nnz = 0;
+    let mut s = r.x_stream();
+    while let Some(c) = s.next().await {
+        nnz += c.unwrap().data.indices.len();
+    }
+    assert_eq!(nnz, 3);
+
+    for bad in ["counts", "layers/", "layers/a/b", "obsm/x"] {
+        let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+        assert!(
+            H5AdWriter::create_at(tmp.path(), 1, 1, DataType::F32, None, bad).is_err(),
+            "slot {bad:?} must be rejected"
+        );
+    }
+}
