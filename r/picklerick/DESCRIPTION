@@ -13,7 +13,10 @@ Imports:
     methods,
     Matrix,
     jsonlite,
+    DelayedArray,
+    S4Arrays,
     S4Vectors,
+    SparseArray,
     SingleCellExperiment,
     SummarizedExperiment
 Suggests:

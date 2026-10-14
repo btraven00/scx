@@ -48,3 +48,17 @@ scx_write_h5ad <- function(output, n_obs, n_vars,
     PACKAGE = "picklerick"
   )
 }
+
+#' @keywords internal
+scx_seed_open <- function(input, layer) {
+  .Call("wrap__scx_seed_open", input, layer, PACKAGE = "picklerick")
+}
+
+#' @keywords internal
+scx_read_rows <- function(input, chunk_size, layer, starts, ends) {
+  .Call(
+    "wrap__scx_read_rows",
+    input, chunk_size, layer, starts, ends,
+    PACKAGE = "picklerick"
+  )
+}

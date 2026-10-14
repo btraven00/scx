@@ -58,10 +58,6 @@ test_that("uns of a Zarr store is available through parse_uns = TRUE only", {
   expect_error(uns(read_zarr(zarr_fixture("small_v3.zarr"))), "no source path")
 })
 
-test_that("lazy = TRUE stays H5AD-only", {
-  skip_if_not_installed("HDF5Array")
-  expect_error(read_zarr(zarr_fixture("small_v3.zarr"), lazy = TRUE), "H5AD only")
-})
 
 test_that("inspect() reports a Zarr store", {
   info <- inspect(zarr_fixture("small_v3.zarr"))

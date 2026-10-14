@@ -633,6 +633,94 @@ async fn collect_into_robj(
     ).into_robj())
 }
 
+// ---------------------------------------------------------------------------
+// DelayedArray seed support: shape + names at construction, then row ranges
+// of X (or a layer) per block. See R/delayed.R.
+// ---------------------------------------------------------------------------
+
+/// Open `input` with the matrix taken from `layer` (h5ad and Zarr stores) or
+/// from X when `layer` is empty.
+async fn open_matrix(
+    input: &str,
+    chunk_size: usize,
+    layer: &str,
+) -> anyhow::Result<Box<dyn DatasetReader + Send>> {
+    let path = Path::new(input);
+    if layer.is_empty() {
+        let (reader, _) = open_reader(path, &scx_core::OpenOptions::new(chunk_size)).await?;
+        return Ok(reader);
+    }
+    Ok(match detect::detect(path) {
+        Some(Format::H5Ad) => Box::new(scx_core::h5ad::H5AdReader::open_layer(
+            path, chunk_size, Some(layer),
+        )?),
+        Some(Format::ZarrAd) => Box::new(scx_core::zarr_ad::ZarrAdReader::open_layer(
+            path, chunk_size, Some(layer),
+        )?),
+        Some(f) => anyhow::bail!("layer = '{layer}': {} input has no layers", f.display_name()),
+        None => anyhow::bail!("could not detect format of '{input}'"),
+    })
+}
+
+/// Shape and dimnames of the matrix at `input` (X, or `layer`), for the seed.
+/// @noRd
+#[extendr]
+fn scx_seed_open(input: &str, layer: &str) -> Robj {
+    or_throw(scx_seed_open_inner(input, layer))
+}
+
+fn scx_seed_open_inner(input: &str, layer: &str) -> Result<Robj> {
+    block_on(async {
+        let mut r = open_matrix(input, 1, layer).await?;
+        let (n_obs, n_vars) = r.shape();
+        let obs = r.obs().await?;
+        let var = r.var().await?;
+        Ok(list!(
+            n_obs = n_obs as i32,
+            n_vars = n_vars as i32,
+            obs_index = obs.index,
+            var_index = var.index,
+            dtype = r.dtype().to_string()
+        )
+        .into_robj())
+    })
+    .map_err(|e: anyhow::Error| Error::from(e.to_string()))
+}
+
+/// The rows `starts[k]..ends[k]` (0-based, half-open, sorted, disjoint) of
+/// the matrix at `input`, as one CSR triplet over the selected rows in order.
+/// h5ad and Zarr read only those rows.
+/// @noRd
+#[extendr]
+fn scx_read_rows(input: &str, chunk_size: i32, layer: &str, starts: &[i32], ends: &[i32]) -> Robj {
+    or_throw(scx_read_rows_inner(input, chunk_size, layer, starts, ends))
+}
+
+fn scx_read_rows_inner(
+    input: &str,
+    chunk_size: i32,
+    layer: &str,
+    starts: &[i32],
+    ends: &[i32],
+) -> Result<Robj> {
+    if starts.len() != ends.len() {
+        return Err(Error::from("starts and ends differ in length"));
+    }
+    let ranges: Vec<std::ops::Range<usize>> = starts
+        .iter()
+        .zip(ends)
+        .map(|(&a, &b)| a.max(0) as usize..b.max(0) as usize)
+        .collect();
+    let n_rows: usize = ranges.iter().map(|r| r.end.saturating_sub(r.start)).sum();
+    block_on(async {
+        let mut r = open_matrix(input, chunk_size.max(1) as usize, layer).await?;
+        let (_, n_cols) = r.shape();
+        let triplet = concat_csr(r.x_stream_rows(ranges), n_rows).await?;
+        Ok(csr_to_robj(triplet, (n_rows, n_cols)))
+    })
+    .map_err(|e: anyhow::Error| Error::from(e.to_string()))
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 async fn concat_csr(
@@ -815,4 +903,6 @@ extendr_module! {
     fn scx_inspect;
     fn scx_read;
     fn scx_write_h5ad;
+    fn scx_seed_open;
+    fn scx_read_rows;
 }

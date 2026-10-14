@@ -22,12 +22,14 @@
 #'   `"Seurat"`, or `"list"`.
 #' @param chunk_size Cells per internal streaming chunk. Default `5000L`.
 #' @param lazy       When `TRUE`, leave the X matrix on disk and wrap it in a
-#'   `DelayedMatrix` via `HDF5Array::H5SparseMatrix`. The Rust side only
-#'   reads metadata (obs / var / obsm / varm / uns), so peak memory is
-#'   bounded by metadata size rather than the count matrix. Only supported
-#'   for HDF5-backed inputs (`.h5ad`, `.h5`, `.h5seurat`) and only when
-#'   `as = "SingleCellExperiment"` (Seurat does not consume DelayedArray
-#'   natively). Requires the `HDF5Array` package (Bioconductor).
+#'   `DelayedMatrix`. The Rust side only reads metadata (obs / var / obsm /
+#'   varm / uns), so peak memory is bounded by metadata size rather than the
+#'   count matrix. An `.h5ad` is wrapped with `HDF5Array::H5SparseMatrix`
+#'   when that package is installed; everything else (AnnData Zarr, 10x,
+#'   H5Seurat, ...) with [PicklerickMatrix()], a seed that reads selected
+#'   cells through scx. Only when `as = "SingleCellExperiment"` (Seurat does
+#'   not consume DelayedArray natively). Layers and obsp are not attached in
+#'   lazy mode; see [PicklerickMatrix()] to wrap a layer.
 #'
 #' @param constructor How to build the Seurat object when `as = "Seurat"`.
 #'   `"standard"` (default) calls `SeuratObject::CreateSeuratObject()`.
@@ -72,23 +74,14 @@ read_h5ad <- function(path,
       stop("read_h5ad: lazy = TRUE is incompatible with as = 'Seurat' ",
            "(Seurat does not consume DelayedArray).", call. = FALSE)
     }
-    if (!requireNamespace("HDF5Array", quietly = TRUE)) {
-      stop("read_h5ad(lazy = TRUE) requires the HDF5Array package ",
-           "(Bioconductor).", call. = FALSE)
-    }
-    # read_uns = FALSE: Rust skips JSON-serialising uns. R wrapper reads
-    # uns on demand via rhdf5 (uns() / parse_uns = TRUE) — see read_h5ad
-    # docstring. read_uns = TRUE would only matter for non-H5AD inputs
-    # where rhdf5 can't read /uns; current lazy mode is H5AD-only.
-    raw <- scx_read(path, as.integer(chunk_size), read_x = FALSE, read_uns = FALSE)
-    if (!identical(raw$format, "H5AD")) {
-      stop(sprintf(
-        "read_h5ad: lazy = TRUE currently supports H5AD only (got %s). ",
-        raw$format),
-        "Re-run with lazy = FALSE.", call. = FALSE)
-    }
+    # read_uns = FALSE: Rust skips JSON-serialising uns. An HDF5 file reads
+    # uns on demand via rhdf5 (uns() / parse_uns = TRUE); a directory store
+    # (Zarr) has no rhdf5 path, so it is serialised when parse_uns asks.
+    raw <- scx_read(path, as.integer(chunk_size), read_x = FALSE,
+                    read_uns = isTRUE(parse_uns) && dir.exists(path))
     if (as == "list") return(raw)
-    return(.as_sce_lazy(raw, path, parse_uns = parse_uns))
+    return(.as_sce_lazy(raw, path, parse_uns = parse_uns,
+                        chunk_size = as.integer(chunk_size)))
   }
 
   # uns: an HDF5 file is read on demand with rhdf5 (uns() / parse_uns). A
@@ -109,9 +102,10 @@ read_h5ad <- function(path,
 #' @description `read_zarr()` reads an AnnData Zarr store (a `.zarr` directory,
 #'   Zarr v2 or v3, including the sharded v3 arrays anndata >= 0.13 writes by
 #'   default). It is `read_h5ad()` under another name: the format is detected
-#'   from the content, so `read_h5ad()` reads Zarr stores too. `lazy = TRUE`
-#'   is H5AD-only, and for Zarr stores `uns` is only available through
-#'   `parse_uns = TRUE` (the on-demand `uns()` accessor reads HDF5).
+#'   from the content, so `read_h5ad()` reads Zarr stores too. With
+#'   `lazy = TRUE` the matrix is a [PicklerickMatrix()]. For Zarr stores
+#'   `uns` is only available through `parse_uns = TRUE` (the on-demand
+#'   `uns()` accessor reads HDF5).
 #' @export
 read_zarr <- function(path, ...) {
   read_h5ad(path, ...)
@@ -416,26 +410,30 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 }
 
 # ---------------------------------------------------------------------------
-# Lazy SCE assembler: X stays on disk, wrapped as a DelayedMatrix via
-# HDF5Array::H5SparseMatrix. Only h5ad layout is supported (data/indices/
-# indptr at /X). obsp / layers are skipped in lazy mode for now — they could
-# be wrapped the same way but each one is its own HDF5 group lookup.
+# Lazy SCE assembler: X stays on disk as a DelayedMatrix. An h5ad goes through
+# HDF5Array::H5SparseMatrix (the conventional seed for that layout) when the
+# package is installed; anything else, or an h5ad without HDF5Array, through
+# PicklerickMatrixSeed (R/delayed.R). obsp / layers are skipped in lazy mode.
 # ---------------------------------------------------------------------------
 
-.as_sce_lazy <- function(raw, path, parse_uns = FALSE) {
+.as_sce_lazy <- function(raw, path, parse_uns = FALSE, chunk_size = 5000L) {
   if (!requireNamespace("SingleCellExperiment", quietly = TRUE)) {
     stop("read_h5ad(lazy = TRUE) requires the SingleCellExperiment package.",
          call. = FALSE)
   }
 
-  # H5SparseMatrix infers CSR vs CSC from the AnnData encoding-type attribute
-  # on /X. For h5ad: encoding-type = "csr_matrix" → shape (n_obs, n_vars).
-  # We want (n_vars × n_obs) for SCE — t() is a lazy op on DelayedArray.
-  x_lazy <- HDF5Array::H5SparseMatrix(filepath = path, group = "/X")
-  if (nrow(x_lazy) == raw$n_obs && ncol(x_lazy) == raw$n_vars) {
-    x_lazy <- t(x_lazy)   # → (n_vars × n_obs)
+  if (identical(raw$format, "H5AD") && requireNamespace("HDF5Array", quietly = TRUE)) {
+    # H5SparseMatrix infers CSR vs CSC from the AnnData encoding-type
+    # attribute on /X. For h5ad: encoding-type = "csr_matrix" → shape
+    # (n_obs, n_vars). SCE wants (n_vars × n_obs); t() is lazy.
+    x_lazy <- HDF5Array::H5SparseMatrix(filepath = path, group = "/X")
+    if (nrow(x_lazy) == raw$n_obs && ncol(x_lazy) == raw$n_vars) {
+      x_lazy <- t(x_lazy)
+    }
+    dimnames(x_lazy) <- list(raw$var_index, raw$obs_index)
+  } else {
+    x_lazy <- PicklerickMatrix(path, chunk_size = chunk_size)
   }
-  dimnames(x_lazy) <- list(raw$var_index, raw$obs_index)
 
   obs_df <- .cols_to_df(raw$obs_cols, raw$obs_index)
   var_df <- .cols_to_df(raw$var_cols, raw$var_index)

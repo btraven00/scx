@@ -73,6 +73,25 @@ sce <- read_sce("pbmc3k.h5seurat")
 
 See `docs/usage.md` for full details.
 
+## Lazy matrices (DelayedArray)
+
+`PicklerickMatrix()` is a `DelayedMatrix` (features x cells) whose blocks are
+read on demand through scx, for any format scx reads. Selecting cells reads
+only those cells from disk on `.h5ad` and AnnData Zarr stores; the row
+pointer is loaded, then just the selected rows' slices of `data`/`indices`.
+
+```r
+m <- PicklerickMatrix("pbmc.zarr")          # or a layer: layer = "counts"
+m[, 1:100]                                  # reads 100 cells
+DelayedArray::colSums(m)                    # block-wise, chunk_size cells per block
+sce <- read_zarr("pbmc.zarr", lazy = TRUE)  # counts(sce) is this matrix
+```
+
+For plain `.h5ad`, `read_h5ad(lazy = TRUE)` keeps using
+`HDF5Array::H5SparseMatrix` when that package is installed: it is the
+conventional seed for that layout and reads it the same way. The scx seed
+is what makes Zarr v3 (and 10x, H5Seurat, MatrixMarket, BPCells) lazy in R.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
