@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0](https://github.com/btraven00/scx/compare/picklerick-v0.5.0...picklerick-v0.6.0) (2026-10-14)
+
+
+### Features
+
+* AnnData Zarr v3 output and row-range reads (open_stream rows=/where=) ([0b78f11](https://github.com/btraven00/scx/commit/0b78f114364201e3be68b0f099609d8c9a4d8420))
+* **picklerick:** inspect(path, names=True) returns obs and var names ([9944359](https://github.com/btraven00/scx/commit/994435989a50edc162208bdbf008acf875308b48))
+* **picklerick:** MatrixChunk.to_scipy() without copying the arrays ([febc890](https://github.com/btraven00/scx/commit/febc89072b04f9abaf8a76453a584e05932a15db))
+* write the matrix to layers/&lt;name&gt; instead of /X (--x-slot for h5ad) ([bcfc791](https://github.com/btraven00/scx/commit/bcfc791ec63ad59b95a13c89ec0bb6a78717fd10))
+
+
+### Bug Fixes
+
+* **picklerick:** install on Python 3.10 and later ([06c0ece](https://github.com/btraven00/scx/commit/06c0eced56e0682e6a99262abeb97ec8274cffb8))
+
 ## [0.5.0](https://github.com/btraven00/scx/compare/picklerick-v0.4.1...picklerick-v0.5.0) (2026-10-07)
 
 

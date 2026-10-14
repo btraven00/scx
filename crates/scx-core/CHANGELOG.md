@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.0](https://github.com/btraven00/scx/compare/scx-core-v0.5.0...scx-core-v0.6.0) (2026-10-14)
+
+
+### Features
+
+* AnnData Zarr v3 output and row-range reads (open_stream rows=/where=) ([0b78f11](https://github.com/btraven00/scx/commit/0b78f114364201e3be68b0f099609d8c9a4d8420))
+* **core:** read per-cell-list Parquet beyond Tahoe's column names and arrow widths ([53cc756](https://github.com/btraven00/scx/commit/53cc756358ead47f4374a05c9045fa69da307969))
+* write the matrix to layers/&lt;name&gt; instead of /X (--x-slot for h5ad) ([bcfc791](https://github.com/btraven00/scx/commit/bcfc791ec63ad59b95a13c89ec0bb6a78717fd10))
+
+
+### Bug Fixes
+
+* **core:** align h5seurat varm to var by feature name and skip other-assay reductions ([33115d4](https://github.com/btraven00/scx/commit/33115d47c779096496eb6f6902f6e864c88bea37))
+* **core:** decode legacy h5ad `__categories` columns as categoricals ([a38dc80](https://github.com/btraven00/scx/commit/a38dc807119dedd028fca0c659586738d1c9c502))
+* **core:** decode lzf and name unsupported HDF5 filters ([a1192ef](https://github.com/btraven00/scx/commit/a1192ef5eb583d5beef6cc6d5c6e8eb851787abb))
+
 ## [0.5.0](https://github.com/btraven00/scx/compare/scx-core-v0.4.1...scx-core-v0.5.0) (2026-10-07)
 
 
