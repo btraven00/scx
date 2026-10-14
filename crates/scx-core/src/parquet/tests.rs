@@ -425,3 +425,140 @@ fn per_cell_without_map_uses_direct_index() {
         other => panic!("expected f32, got {other:?}"),
     }
 }
+
+// --- Column names and arrow widths beyond Tahoe (X-Atlas/Orion, polars output) ---
+
+#[test]
+fn sniff_matches_list_pair_by_type_and_orion_names() {
+    let large = |name: &str, item: ArrowType| {
+        Field::new(
+            name,
+            ArrowType::LargeList(Arc::new(Field::new("item", item, true))),
+            true,
+        )
+    };
+    let schema = Schema::new(vec![
+        field("cell_barcode", ArrowType::LargeUtf8),
+        large("gene_token_id", ArrowType::Int64),
+        large("gene_expression", ArrowType::Float64),
+    ]);
+    assert_eq!(
+        ParquetLayout::sniff(&schema).expect("sniff"),
+        ParquetLayout::PerCellLists {
+            genes: "gene_token_id".into(),
+            exprs: "gene_expression".into(),
+        }
+    );
+    // Unknown names still work when there is exactly one list of each kind.
+    let schema = Schema::new(vec![
+        list_field("ids", ArrowType::Int32),
+        list_field("vals", ArrowType::Float64),
+    ]);
+    assert!(matches!(
+        ParquetLayout::sniff(&schema).expect("sniff"),
+        ParquetLayout::PerCellLists { .. }
+    ));
+    // Two integer lists and no known name: refuse to guess.
+    let schema = Schema::new(vec![
+        list_field("ids", ArrowType::Int64),
+        list_field("other_ids", ArrowType::Int64),
+        list_field("vals", ArrowType::Float32),
+    ]);
+    assert!(ParquetLayout::sniff(&schema).is_err());
+}
+
+/// An Orion-style file as polars writes it: `LargeList<Float64>` values,
+/// `LargeUtf8` strings, `gene_token_id`/`gene_expression`/`gene_name` names.
+/// Regression for `missing field: token_id` and "`ensembl_id` is not Utf8".
+#[tokio::test]
+async fn reads_orion_names_and_large_arrow_types() {
+    use arrow::array::{Float64Builder, LargeListBuilder, LargeStringArray};
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let put = |path: &str, schema: Arc<Schema>, cols: Vec<ArrayRef>| {
+        let batch = RecordBatch::try_new(schema.clone(), cols).expect("batch");
+        let mut buf = Vec::new();
+        let mut w = ArrowWriter::try_new(&mut buf, schema, None).expect("writer");
+        w.write(&batch).expect("write");
+        w.close().expect("close");
+        (StorePath::from(path), buf)
+    };
+
+    // Dictionary: tokens 3, 7, 9 → columns 0, 1, 2.
+    let dict_schema = Arc::new(Schema::new(vec![
+        Field::new("gene_token_id", ArrowType::Int64, false),
+        Field::new("ensembl_id", ArrowType::LargeUtf8, false),
+        Field::new("gene_name", ArrowType::LargeUtf8, false),
+    ]));
+    let (dict_path, dict_bytes) = put(
+        "gene_metadata.parquet",
+        dict_schema,
+        vec![
+            Arc::new(Int64Array::from(vec![3i64, 7, 9])),
+            Arc::new(LargeStringArray::from(vec!["ENSG_A", "ENSG_B", "ENSG_C"])),
+            Arc::new(LargeStringArray::from(vec!["GENEA", "GENEB", "GENEC"])),
+        ],
+    );
+    store.put(&dict_path, dict_bytes.into()).await.expect("put");
+
+    // Two cells: [3, 9] and [marker 1, 7].
+    let mut gb = LargeListBuilder::new(Int64Builder::new());
+    let mut eb = LargeListBuilder::new(Float64Builder::new());
+    for (g, e) in [
+        (vec![3i64, 9], vec![1.5f64, 2.5]),
+        (vec![1, 7], vec![-1.0, 4.0]),
+    ] {
+        gb.values().append_slice(&g);
+        gb.append(true);
+        eb.values().append_slice(&e);
+        eb.append(true);
+    }
+    let data_schema = Arc::new(Schema::new(vec![
+        Field::new("cell_barcode", ArrowType::LargeUtf8, false),
+        Field::new("gene_target", ArrowType::LargeUtf8, false),
+        Field::new(
+            "gene_token_id",
+            ArrowType::LargeList(Arc::new(Field::new("item", ArrowType::Int64, true))),
+            true,
+        ),
+        Field::new(
+            "gene_expression",
+            ArrowType::LargeList(Arc::new(Field::new("item", ArrowType::Float64, true))),
+            true,
+        ),
+    ]));
+    let (data_path, data_bytes) = put(
+        "HCT116_Batch1.parquet",
+        data_schema,
+        vec![
+            Arc::new(LargeStringArray::from(vec!["AAAC-1", "AAAG-1"])),
+            Arc::new(LargeStringArray::from(vec!["non-targeting", "TP53"])),
+            Arc::new(gb.finish()),
+            Arc::new(eb.finish()),
+        ],
+    );
+    store.put(&data_path, data_bytes.into()).await.expect("put");
+
+    let dict = super::GeneDict::load(store.clone(), dict_path, 1024)
+        .await
+        .expect("dict");
+    assert_eq!(dict.var.index, vec!["ENSG_A", "ENSG_B", "ENSG_C"]);
+    let mut reader = ParquetReader::open(store, data_path, None, Some(dict), 1024)
+        .await
+        .expect("open");
+    assert_eq!(reader.shape(), (2, 3));
+
+    let obs = reader.obs().await.expect("obs");
+    assert_eq!(obs.index, vec!["AAAC-1", "AAAG-1"]);
+    assert_eq!(obs.columns.len(), 1);
+    assert!(matches!(&obs.columns[0].data, ColumnData::String(v) if v[1] == "TP53"));
+
+    let mut stream = reader.x_stream();
+    let chunk = stream.next().await.expect("one chunk").expect("chunk");
+    assert_eq!(chunk.data.indptr, vec![0, 2, 3]);
+    assert_eq!(chunk.data.indices, vec![0, 2, 1]);
+    match &chunk.data.data {
+        TypedVec::F32(v) => assert_eq!(v, &vec![1.5, 2.5, 4.0]),
+        other => panic!("expected f32, got {other:?}"),
+    }
+}

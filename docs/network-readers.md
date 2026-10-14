@@ -66,7 +66,7 @@ The on-disk encoding of the count matrix is **sniffed** from the Parquet schema:
 
 | Layout | Shape | `n_vars` |
 |--------|-------|----------|
-| **Per-cell lists** | one row per cell; two list columns `genes: List<Int64>` + `expressions: List<Float32>` (the Tahoe layout) | must be supplied (`--n-vars` or `--genes`) |
+| **Per-cell lists** | one row per cell; an integer list of gene ids + a float list of values (`genes`/`expressions` in Tahoe, `gene_token_id`/`gene_expression` in X-Atlas/Orion, or any single pair of int/float lists; `List` or `LargeList`, any item width) | must be supplied (`--n-vars` or `--genes`) |
 | **Dense** | one row per cell; one float column per gene | **derived** from the column count |
 
 Long-format COO (`cell, gene, value` triples) is **not supported yet** — the
@@ -86,8 +86,10 @@ neither flag is needed there.
 In a per-cell-list file like Tahoe, the integers in `genes` are **token IDs**
 from a vocabulary, **not column indices**, each cell's list is led by a **marker
 token to ignore**, and the gene axis lives in a *separate* `gene_metadata`
-Parquet (`token_id`, `ensembl_id`, `gene_symbol`). Without joining the two, the
-matrix is scrambled, every cell gets a phantom marker entry, and `var` is empty.
+Parquet (`token_id`, `ensembl_id`, `gene_symbol`; Orion's `gene_token_id`,
+`ensembl_id`, `gene_name` are accepted too, as `Utf8` or `LargeUtf8`). Without
+joining the two, the matrix is scrambled, every cell gets a phantom marker
+entry, and `var` is empty.
 
 `--genes <path-or-url>` supplies that dictionary. When given, `scx`:
 

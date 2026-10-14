@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Int32Array, Int64Array, StringArray};
+use arrow::array::{Array, Int32Array, Int64Array};
 use futures::{pin_mut, StreamExt};
 use object_store::path::Path as StorePath;
 use object_store::ObjectStore;
@@ -24,9 +24,10 @@ use super::net_err;
 use crate::error::{Result, ScxError};
 use crate::ir::{Column, ColumnData, VarTable};
 
-const TOKEN_COL: &str = "token_id";
-const ENSEMBL_COL: &str = "ensembl_id";
-const SYMBOL_COL: &str = "gene_symbol";
+/// Dictionary column names, Tahoe-100M first, then X-Atlas/Orion.
+const TOKEN_COLS: [&str; 2] = ["token_id", "gene_token_id"];
+const ENSEMBL_COLS: [&str; 1] = ["ensembl_id"];
+const SYMBOL_COLS: [&str; 2] = ["gene_symbol", "gene_name"];
 
 /// Guard against a pathological (non-per-gene/hashed) vocabulary blowing up the
 /// dense lookup. Any real gene tokenizer is in the tens of thousands; well under
@@ -48,7 +49,8 @@ impl GeneDict {
     }
 
     /// Load and index a `gene_metadata` Parquet object (columns `token_id`,
-    /// `ensembl_id`, `gene_symbol`). The file is small (~62.7k rows for Tahoe),
+    /// `ensembl_id`, `gene_symbol`, or Orion's `gene_token_id`, `ensembl_id`,
+    /// `gene_name`; `Utf8` or `LargeUtf8`). The file is small (~62.7k rows for Tahoe),
     /// so it is read fully into memory.
     pub async fn load(
         store: Arc<dyn ObjectStore>,
@@ -72,9 +74,9 @@ impl GeneDict {
 
         while let Some(batch) = stream.next().await {
             let batch = batch.map_err(net_err)?;
-            append_i64(&batch, TOKEN_COL, &mut token_ids)?;
-            append_utf8(&batch, ENSEMBL_COL, &mut ensembl)?;
-            append_utf8(&batch, SYMBOL_COL, &mut symbol)?;
+            append_i64(&batch, &TOKEN_COLS, &mut token_ids)?;
+            append_utf8(&batch, &ENSEMBL_COLS, &mut ensembl)?;
+            append_utf8(&batch, &SYMBOL_COLS, &mut symbol)?;
         }
 
         if token_ids.is_empty() {
@@ -103,7 +105,7 @@ impl GeneDict {
         let var = VarTable {
             index: ensembl,
             columns: vec![Column::new(
-                SYMBOL_COL.to_string(),
+                SYMBOL_COLS[0].to_string(),
                 ColumnData::String(symbol),
             )],
         };
@@ -115,14 +117,23 @@ impl GeneDict {
     }
 }
 
+/// The first of `names` present in `batch`.
+fn column<'a>(
+    batch: &'a arrow::record_batch::RecordBatch,
+    names: &'a [&'a str],
+) -> Result<(&'a str, &'a arrow::array::ArrayRef)> {
+    names
+        .iter()
+        .find_map(|n| batch.column_by_name(n).map(|c| (*n, c)))
+        .ok_or_else(|| ScxError::MissingField(names.join(" or ")))
+}
+
 fn append_i64(
     batch: &arrow::record_batch::RecordBatch,
-    name: &str,
+    names: &[&str],
     out: &mut Vec<i64>,
 ) -> Result<()> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| ScxError::MissingField(name.to_string()))?;
+    let (name, col) = column(batch, names)?;
     if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
         out.extend((0..a.len()).map(|i| if a.is_null(i) { -1 } else { a.value(i) }));
         Ok(())
@@ -136,16 +147,11 @@ fn append_i64(
 
 fn append_utf8(
     batch: &arrow::record_batch::RecordBatch,
-    name: &str,
+    names: &[&str],
     out: &mut Vec<String>,
 ) -> Result<()> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| ScxError::MissingField(name.to_string()))?;
-    let a = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| net_err(format!("`{name}` is not Utf8")))?;
+    let (name, col) = column(batch, names)?;
+    let a = super::utf8(col).ok_or_else(|| net_err(format!("`{name}` is not a string column")))?;
     out.extend((0..a.len()).map(|i| {
         if a.is_null(i) {
             String::new()

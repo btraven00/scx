@@ -57,7 +57,8 @@ enum Cli {
         n_vars: Option<usize>,
 
         /// Gene dictionary for per-cell-list Parquet input: a path or URL to the
-        /// gene_metadata Parquet (columns token_id, ensembl_id, gene_symbol).
+        /// gene_metadata Parquet (columns token_id, ensembl_id, gene_symbol;
+        /// Orion's gene_token_id/gene_name are accepted too).
         /// Remaps `genes` token ids to real columns, drops the marker token,
         /// fills var, and derives n_vars. For Tahoe-100M this is the
         /// gene_metadata subset alongside expression_data.

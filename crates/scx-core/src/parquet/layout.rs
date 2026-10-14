@@ -21,17 +21,20 @@
 //! sniffer reports a clear error rather than silently misreading such a file.
 
 use arrow::array::{Array, Float32Array, Float64Array, Int64Array, ListArray};
-use arrow::datatypes::{DataType as ArrowType, Schema};
+use arrow::datatypes::{DataType as ArrowType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 
 use super::net_err;
 use crate::dtype::TypedVec;
 use crate::error::{Result, ScxError};
 use crate::ir::{MatrixChunk, SparseMatrixCSR};
 
-/// Default column names for the per-cell-lists layout (Tahoe-100M).
-const GENES_COL: &str = "genes";
-const EXPRS_COL: &str = "expressions";
+/// Column names the per-cell-lists layout is known under: Tahoe-100M, then
+/// X-Atlas/Orion. Any other file is matched by type (one integer list + one
+/// float list).
+const GENES_COLS: [&str; 2] = ["genes", "gene_token_id"];
+const EXPRS_COLS: [&str; 2] = ["expressions", "gene_expression"];
 
 /// How the count matrix is laid out across a Parquet file's columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,17 +52,39 @@ impl ParquetLayout {
     /// otherwise any float columns are taken as a dense gene matrix. A file with
     /// neither shape — or a long-format/COO file we don't handle yet — errors.
     pub(crate) fn sniff(schema: &Schema) -> Result<Self> {
-        let is_list = |name: &str| {
+        // List columns by item kind; List and LargeList alike (polars writes
+        // LargeList), items cast on read.
+        let lists = |pred: fn(&ArrowType) -> bool| -> Vec<String> {
             schema
-                .column_with_name(name)
-                .map(|(_, f)| matches!(f.data_type(), ArrowType::List(_) | ArrowType::LargeList(_)))
-                .unwrap_or(false)
+                .fields()
+                .iter()
+                .filter(|f| match f.data_type() {
+                    ArrowType::List(item) | ArrowType::LargeList(item) => pred(item.data_type()),
+                    _ => false,
+                })
+                .map(|f| f.name().to_string())
+                .collect()
         };
-        if is_list(GENES_COL) && is_list(EXPRS_COL) {
-            return Ok(Self::PerCellLists {
-                genes: GENES_COL.to_string(),
-                exprs: EXPRS_COL.to_string(),
-            });
+        let int_lists = lists(|t| t.is_integer());
+        let float_lists = lists(|t| t.is_floating());
+        let pick = |cands: &[String], known: &[&str]| -> Option<String> {
+            known
+                .iter()
+                .find(|k| cands.iter().any(|c| c == *k))
+                .map(|k| k.to_string())
+                .or_else(|| (cands.len() == 1).then(|| cands[0].clone()))
+        };
+        if let (Some(genes), Some(exprs)) = (
+            pick(&int_lists, &GENES_COLS),
+            pick(&float_lists, &EXPRS_COLS),
+        ) {
+            return Ok(Self::PerCellLists { genes, exprs });
+        }
+        if !int_lists.is_empty() || !float_lists.is_empty() {
+            return Err(net_err(format!(
+                "ambiguous per-cell-list columns: integer lists {int_lists:?}, float lists \
+                 {float_lists:?}; expected one of each (or {GENES_COLS:?} + {EXPRS_COLS:?})"
+            )));
         }
 
         let gene_cols: Vec<String> = schema
@@ -73,8 +98,8 @@ impl ParquetLayout {
         }
 
         Err(net_err(
-            "could not determine Parquet matrix encoding: expected `genes`+`expressions` \
-             list columns (per-cell) or float columns (dense). Long-format COO \
+            "could not determine Parquet matrix encoding: expected an integer list + a float \
+             list column (per-cell) or float columns (dense). Long-format COO \
              (cell/gene/value triples) is not supported yet.",
         ))
     }
@@ -139,8 +164,8 @@ fn per_cell_lists_chunk(
     row_offset: usize,
     token_map: Option<&[i32]>,
 ) -> Result<MatrixChunk> {
-    let genes = list_column(batch, genes_col)?;
-    let exprs = list_column(batch, exprs_col)?;
+    let genes = list_column(batch, genes_col, ArrowType::Int64)?;
+    let exprs = list_column(batch, exprs_col, ArrowType::Float32)?;
 
     let nrows = batch.num_rows();
     let mut indptr: Vec<u64> = Vec::with_capacity(nrows + 1);
@@ -303,11 +328,18 @@ impl<'a> DenseCol<'a> {
     }
 }
 
-fn list_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray> {
-    batch
+/// The list column `name` as `List<item>`: a `LargeList`, or a list of another
+/// numeric item type (polars writes `LargeList<Float64>`), is cast; a column
+/// already of that type is returned without copying.
+fn list_column(batch: &RecordBatch, name: &str, item: ArrowType) -> Result<ListArray> {
+    let col = batch
         .column_by_name(name)
-        .ok_or_else(|| ScxError::MissingField(name.to_string()))?
-        .as_any()
+        .ok_or_else(|| ScxError::MissingField(name.to_string()))?;
+    let target = ArrowType::List(Arc::new(Field::new_list_field(item, true)));
+    let cast = arrow::compute::cast(col, &target)
+        .map_err(|e| net_err(format!("`{name}` column is not a numeric list: {e}")))?;
+    cast.as_any()
         .downcast_ref::<ListArray>()
+        .cloned()
         .ok_or_else(|| net_err(format!("`{name}` column is not a List")))
 }

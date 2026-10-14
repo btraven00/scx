@@ -3,11 +3,10 @@
 //! The matrix encoding (per-cell lists, dense, …) is sniffed at [`open`](ParquetReader::open)
 //! into a [`ParquetLayout`] and dispatched per batch — see [`super::layout`].
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
-};
+use arrow::array::{Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array};
 use arrow::datatypes::DataType as ArrowType;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
@@ -25,8 +24,10 @@ use crate::ir::{Column, ColumnData, ObsTable, SparseMatrixMeta, VarTable};
 use crate::stream::ChunkStream;
 use crate::stream::DatasetReader;
 
-/// Column whose values become the obs index, when present (Tahoe-100M barcode).
-const INDEX_COLUMN: &str = "BARCODE_SUB_LIB_ID";
+/// Columns whose values become the obs index when present and unique: the
+/// Tahoe-100M barcode, then generic barcode names (X-Atlas/Orion uses
+/// `cell_barcode`). A non-unique one stays an obs column.
+const INDEX_COLUMNS: [&str; 3] = ["BARCODE_SUB_LIB_ID", "cell_barcode", "barcode"];
 
 /// Streams a Parquet dataset off any `object_store` backend — in-memory, local
 /// filesystem, or cloud (S3/GCS/HTTP). The on-disk matrix encoding is detected
@@ -180,12 +181,19 @@ impl ParquetReader {
             }
         }
 
-        // A barcode column, if present, becomes the index rather than a column.
-        let index_pos = accs.iter().position(|a| a.name == INDEX_COLUMN);
+        // A barcode column, if present and unique, becomes the index rather
+        // than a column.
+        let index_pos = INDEX_COLUMNS.iter().find_map(|name| {
+            accs.iter().position(|a| {
+                a.name == *name
+                    && matches!(&a.data, ColumnData::String(v)
+                        if v.iter().collect::<HashSet<_>>().len() == v.len())
+            })
+        });
         let index = match index_pos {
-            Some(pos) => match &accs.remove(pos).data {
-                ColumnData::String(v) => v.clone(),
-                other => string_index_from(other.len()),
+            Some(pos) => match accs.remove(pos).data {
+                ColumnData::String(v) => v,
+                _ => unreachable!("index column is a string column"),
             },
             None => string_index_from(self.n_obs),
         };
@@ -308,9 +316,8 @@ impl ColumnAcc {
         let any = col.as_any();
         match &mut self.data {
             ColumnData::String(out) => {
-                let arr = any
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| net_err(format!("`{}` is not Utf8", self.name)))?;
+                let arr = super::utf8(col)
+                    .ok_or_else(|| net_err(format!("`{}` is not a string column", self.name)))?;
                 for i in 0..arr.len() {
                     out.push(if arr.is_null(i) {
                         String::new()

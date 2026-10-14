@@ -16,6 +16,10 @@
 //! | `expressions` | `List<Float32>`      | values aligned with `genes`          |
 //! | *(other)*     | `Utf8`/`Int64`/`f64` | optional per-cell obs columns        |
 //!
+//! Column names and widths are matched loosely: X-Atlas/Orion's
+//! `gene_token_id`/`gene_expression`, `LargeList`/`LargeUtf8` (polars output)
+//! and `Float64`/`Int32` items all read, see [`layout`].
+//!
 //! Each row maps directly onto one CSR row of a [`MatrixChunk`](crate::ir::MatrixChunk),
 //! so a Parquet `RecordBatch` of `batch_size` rows becomes one chunk.
 //!
@@ -45,4 +49,15 @@ pub(crate) fn net_err(
     e: impl Into<Box<dyn std::error::Error + Send + Sync>>,
 ) -> crate::error::ScxError {
     crate::error::ScxError::Net { source: e.into() }
+}
+
+/// `col` as a `StringArray`: `Utf8` as is, `LargeUtf8` (what polars writes)
+/// and `Utf8View` cast. `None` for a non-string column.
+pub(crate) fn utf8(col: &arrow::array::ArrayRef) -> Option<arrow::array::StringArray> {
+    use arrow::array::Array;
+    arrow::compute::cast(col, &arrow::datatypes::DataType::Utf8)
+        .ok()?
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .cloned()
 }
