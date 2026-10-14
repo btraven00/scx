@@ -49,9 +49,9 @@ def test_write_h5seurat_roundtrip(tmp_path) -> None:
 
 
 def test_read_zarr_matches_anndata(zarr_path) -> None:
-    # The anndata reference needs zarr, which anndata < 0.12 (the last for
-    # Python 3.10) doesn't install.
-    pytest.importorskip("zarr")
+    # The anndata reference needs zarr >= 3 (Python >= 3.11): anndata 0.11,
+    # the last for 3.10, cannot read the fixture's null `raw` even with zarr 2.
+    pytest.importorskip("zarr", minversion="3")
     got = pk.read(zarr_path)
     ref = ad.read_zarr(zarr_path)
     np.testing.assert_array_equal(dense(got.X), dense(ref.X))

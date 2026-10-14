@@ -97,7 +97,8 @@ def test_x_slot_layer_leaves_x_absent(norman, norman_path, tmp_path) -> None:
 
 
 def test_zarr_output_reads_back_with_anndata(norman, norman_path, tmp_path) -> None:
-    pytest.importorskip("zarr")  # anndata needs it for read_zarr
+    # Zarr v3 stores need zarr >= 3, which exists for Python >= 3.11 only.
+    pytest.importorskip("zarr", minversion="3")
 
     out = pk.convert(norman_path, tmp_path / "out.zarr")
     assert out.is_dir()
