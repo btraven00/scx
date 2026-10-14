@@ -31,7 +31,7 @@ build can opt out with `--no-default-features` — see
 | Format | Read | Write |
 |---|:-:|:-:|
 | AnnData `.h5ad` | ✓ | ✓ |
-| AnnData Zarr (v2, v3; directory) | ✓ | |
+| AnnData Zarr (v2, v3; directory) | ✓ | ✓ (v3) |
 | Seurat `.h5seurat` (dgCMatrix or BPCells-backed) | ✓ | ✓ |
 | BPCells matrix directory | ✓ | ✓ X only |
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
@@ -40,7 +40,7 @@ build can opt out with `--no-default-features` — see
 
 Any readable format converts to any writable one: everything goes through a
 single internal representation. Input is detected by content; output by
-extension (`.h5ad`, `.h5seurat`, `.bpcells`).
+extension (`.h5ad`, `.h5seurat`, `.zarr`, `.bpcells`).
 
 ## Usage
 
@@ -48,7 +48,8 @@ extension (`.h5ad`, `.h5seurat`, `.bpcells`).
 
 ```bash
 scx convert pbmc.h5seurat pbmc.h5ad
-scx convert pbmc.zarr pbmc.h5seurat     # AnnData Zarr store (v2 or v3), read-only
+scx convert pbmc.zarr pbmc.h5seurat     # AnnData Zarr store (v2 or v3)
+scx convert pbmc.h5ad pbmc.zarr         # AnnData Zarr v3 store
 scx convert pbmc.h5ad pbmc.h5seurat
 ```
 

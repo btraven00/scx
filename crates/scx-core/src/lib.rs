@@ -1,3 +1,7 @@
+// Row-range APIs and zarrs subsets take `Vec<Range>`; a one-range vec is
+// the intended value there, not a mistyped `(a..b).collect()`.
+#![allow(clippy::single_range_in_vec_init)]
+
 // The raw-byte paths (HDF5 chunk fast path, NPY) treat buffers as
 // little-endian values in place.
 #[cfg(target_endian = "big")]

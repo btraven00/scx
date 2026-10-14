@@ -9,7 +9,7 @@ use ndarray::s;
 
 use crate::h5::{read_csr_rows, read_u64, value_dtype};
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
-use crate::stream::{row_chunks, ChunkStream};
+use crate::stream::{row_chunks, row_range_chunks, ChunkStream};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -631,9 +631,13 @@ impl DatasetReader for H5AdReader {
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
+        self.x_stream_rows(vec![0..self.n_obs])
+    }
+
+    fn x_stream_rows(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
         let this = &*self;
         let indptr = this.indptr.as_deref().unwrap_or(&[]);
-        row_chunks(this.n_obs, this.chunk_size, move |rows| {
+        row_range_chunks(this.n_obs, ranges, this.chunk_size, move |rows| {
             read_rows(&this.path, &this.x_path, indptr, rows, this.n_vars)
         })
     }

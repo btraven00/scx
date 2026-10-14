@@ -10,8 +10,9 @@ use scx_core::{
     dtype::{DataType, TypedVec},
     h5ad::H5AdWriter,
     h5seurat::H5SeuratWriter,
-    ir::{Column, MatrixChunk, SparseMatrixMeta},
+    ir::{mask_to_ranges, Column, MatrixChunk, SparseMatrixMeta},
     stream::{DatasetReader, DatasetWriter},
+    zarr_ad::ZarrAdWriter,
 };
 
 pyo3::create_exception!(picklerick, PickleRickError, pyo3::exceptions::PyException);
@@ -63,8 +64,11 @@ fn create_writer(
             None,
             false,
         )?),
+        Some("zarr") => Box::new(ZarrAdWriter::create_at(
+            output, n_obs, n_vars, dtype, x_slot,
+        )?),
         _ => anyhow::bail!(
-            "unsupported output extension for '{}': use .h5ad or .h5seurat",
+            "unsupported output extension for '{}': use .h5ad, .h5seurat or .zarr",
             output.display()
         ),
     })
@@ -359,21 +363,53 @@ impl PyMatrixStream {
     }
 }
 
+/// `rows` are (start, stop) half-open row ranges; `where` maps obs columns to
+/// the accepted values, all of which must hold. Both are turned into row
+/// ranges; `rows` and `where` together take their intersection.
 #[pyfunction]
+#[pyo3(signature = (path, chunk_size, assay, layer, rows = None, r#where = None))]
 fn scx_open_stream(
     path: &str,
     chunk_size: usize,
     assay: &str,
     layer: &str,
+    rows: Option<Vec<(usize, usize)>>,
+    r#where: Option<Vec<(String, Vec<String>)>>,
 ) -> PyResult<PyMatrixStream> {
     let mut reader = open_reader(path, stream_opts(chunk_size, assay, layer)).map_err(py_err)?;
-    let (_, n_vars) = reader.shape();
+    let (n_obs, n_vars) = reader.shape();
+    let ranges = match (rows, r#where) {
+        (None, None) => None,
+        (rows, filters) => {
+            let mut mask = vec![false; n_obs];
+            for (a, b) in rows.unwrap_or_else(|| vec![(0, n_obs)]) {
+                if b > n_obs {
+                    return Err(py_err(format!(
+                        "row range {a}..{b} is beyond the {n_obs} rows"
+                    )));
+                }
+                mask[a..b.max(a)].fill(true);
+            }
+            if let Some(filters) = filters {
+                let obs = block_on(reader.obs()).map_err(py_err)?;
+                for (column, values) in &filters {
+                    let values: Vec<&str> = values.iter().map(String::as_str).collect();
+                    let hit = obs.rows_where(column, &values).map_err(py_err)?;
+                    mask.iter_mut().zip(hit).for_each(|(m, h)| *m &= h);
+                }
+            }
+            Some(mask_to_ranges(&mask))
+        }
+    };
     // Bounded so the reader stays at most 8 chunks ahead of the consumer.
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
 
     std::thread::spawn(move || {
         block_on(async move {
-            let mut stream = reader.x_stream();
+            let mut stream = match ranges {
+                Some(ranges) => reader.x_stream_rows(ranges),
+                None => reader.x_stream(),
+            };
             while let Some(chunk) = stream.next().await {
                 if tx.send(chunk.map_err(|e| e.to_string())).is_err() {
                     break; // consumer dropped the iterator

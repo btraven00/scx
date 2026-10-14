@@ -89,3 +89,44 @@ def test_inspect_bpcells_dir(bpcells_csr_path) -> None:
 
 def test_version() -> None:
     assert pk.__version__.startswith("0.")
+
+
+def _stack(chunks):
+    blocks = [c.to_scipy() for c in chunks]
+    return sparse.vstack(blocks).toarray() if blocks else np.empty((0, 0))
+
+
+def test_stream_where_reads_only_matching_rows(norman, norman_path) -> None:
+    mask = (norman.obs["split"] == "train").to_numpy()
+    chunks = list(pk.open_stream(norman_path, chunk_size=7, where={"split": "train"}))
+    assert sum(c.nrows for c in chunks) == int(mask.sum())
+    # Each chunk's row_offset is its first row in the full matrix.
+    assert all(mask[c.row_offset : c.row_offset + c.nrows].all() for c in chunks)
+    np.testing.assert_array_equal(_stack(chunks), dense(norman.X)[mask])
+
+    # Values are matched as text: the int column `control` against str(1).
+    both = (norman.obs["split"] == "train") & (norman.obs["control"] == 1)
+    chunks = list(pk.open_stream(norman_path, where={"split": "train", "control": 1}))
+    assert both.sum() > 0
+    assert sum(c.nrows for c in chunks) == int(both.sum())
+    np.testing.assert_array_equal(_stack(chunks), dense(norman.X)[both.to_numpy()])
+
+    assert list(pk.open_stream(norman_path, where={"split": "nope"})) == []
+    with pytest.raises(pk.PickleRickError, match="obs column"):
+        list(pk.open_stream(norman_path, where={"no_such_column": "x"}))
+
+
+def test_stream_rows_accepts_mask_indices_and_ranges(norman, norman_path) -> None:
+    x = dense(norman.X)
+    mask = np.zeros(norman.n_obs, dtype=bool)
+    mask[[3, 4, 5, 10, 40, 41]] = True
+    for rows in (mask, [41, 3, 5, 4, 10, 40, 40], [(3, 6), (10, 11), (40, 42)]):
+        chunks = list(pk.open_stream(norman_path, chunk_size=2, rows=rows))
+        assert [c.row_offset for c in chunks] == [3, 5, 10, 40]
+        np.testing.assert_array_equal(_stack(chunks), x[mask])
+    # rows and where intersect.
+    train = (norman.obs["split"] == "train").to_numpy()
+    chunks = list(pk.open_stream(norman_path, rows=mask, where={"split": "train"}))
+    np.testing.assert_array_equal(_stack(chunks), x[mask & train])
+    with pytest.raises(pk.PickleRickError, match="beyond"):
+        list(pk.open_stream(norman_path, rows=[(0, norman.n_obs + 1)]))

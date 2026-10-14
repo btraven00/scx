@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::dtype::{DataType, TypedVec};
+use crate::error::ScxError;
 
 /// Sparse matrix in CSR (Compressed Sparse Row) format.
 /// Row-major — natural for cell-chunked streaming and AnnData output.
@@ -124,6 +125,55 @@ impl ColumnData {
             ColumnData::Categorical { .. } => "categorical",
         }
     }
+
+    /// Value `i` as text, the way pandas' `astype(str)` spells it (bools as
+    /// `True`/`False`, categoricals by level). Ignores the column mask.
+    pub fn value_str(&self, i: usize) -> String {
+        match self {
+            ColumnData::Int(v) => v[i].to_string(),
+            ColumnData::Float(v) => v[i].to_string(),
+            ColumnData::String(v) => v[i].clone(),
+            ColumnData::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
+            ColumnData::Categorical { codes, levels } => levels[codes[i] as usize].clone(),
+        }
+    }
+}
+
+impl ObsTable {
+    /// Which rows have `column` equal to one of `values`, compared as text
+    /// (see [`ColumnData::value_str`]); NA never matches. AND masks of several
+    /// columns together, then pass [`mask_to_ranges`] to
+    /// [`DatasetReader::x_stream_rows`](crate::stream::DatasetReader::x_stream_rows).
+    pub fn rows_where(&self, column: &str, values: &[&str]) -> Result<Vec<bool>, ScxError> {
+        let col = self
+            .columns
+            .iter()
+            .find(|c| c.name == column)
+            .ok_or_else(|| ScxError::MissingField(format!("obs column '{column}'")))?;
+        Ok((0..col.data.len())
+            .map(|i| !col.is_na(i) && values.contains(&col.data.value_str(i).as_str()))
+            .collect())
+    }
+}
+
+/// The runs of `true` in `mask` as row ranges, sorted and disjoint.
+pub fn mask_to_ranges(mask: &[bool]) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, &m) in mask.iter().enumerate() {
+        match (m, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                out.push(s..i);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push(s..mask.len());
+    }
+    out
 }
 
 /// Named embedding matrices (e.g., PCA, UMAP).

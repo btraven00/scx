@@ -38,11 +38,12 @@ enum Cli {
     ///   .h5ad      — AnnData H5AD  (default)
     ///   .h5seurat  — SeuratDisk H5Seurat
     ///   .bpcells   — BPCells matrix directory (X + dimnames only)
+    ///   .zarr      — AnnData Zarr v3 store (directory)
     Convert {
         /// Input file
         input: String,
 
-        /// Output file (.h5ad or .h5seurat), or a `.bpcells` BPCells matrix dir (X only)
+        /// Output file (.h5ad or .h5seurat), or a directory: `.zarr` (AnnData Zarr v3) or `.bpcells` (X only)
         output: String,
 
         /// Cells per streaming chunk
@@ -881,7 +882,12 @@ async fn convert_with_reader(
         output = %output.display(),
         n_obs, n_vars,
         dtype = %out_dtype,
-        format = if is_h5seurat { "h5seurat" } else { "h5ad" },
+        format = match output.extension().and_then(|e| e.to_str()) {
+            Some("zarr") => "zarr",
+            Some("bpcells") => "bpcells",
+            _ if is_h5seurat => "h5seurat",
+            _ => "h5ad",
+        },
         bpcells = is_h5seurat && !use_dgcmatrix,
         dgcmatrix = use_dgcmatrix && is_h5seurat,
         x_slot = effective_x_slot,
@@ -898,44 +904,59 @@ async fn convert_with_reader(
         t0.elapsed()
     );
 
-    let mut writer: Box<dyn DatasetWriter> =
-        if output.extension().and_then(|e| e.to_str()) == Some("bpcells") {
-            // BPCells matrix directory: X + dimnames only.
-            Box::new(BpcellsDirWriter::create(output, n_obs, n_vars)?)
-        } else if is_h5seurat {
-            if use_dgcmatrix {
-                Box::new(H5SeuratWriter::create(
-                    output,
-                    n_obs,
-                    n_vars,
-                    out_dtype,
-                    Some(out_assay),
-                    Some(effective_x_slot),
-                    Some(project),
-                    seuratdisk_compat,
-                )?)
-            } else {
-                Box::new(BpcellsH5Writer::create(
-                    output,
-                    n_obs,
-                    n_vars,
-                    out_dtype,
-                    Some(out_assay),
-                    Some(effective_x_slot),
-                    Some(project),
-                    seuratdisk_compat,
-                )?)
-            }
-        } else {
-            Box::new(H5AdWriter::create_at(
+    let out_ext = output.extension().and_then(|e| e.to_str());
+    let mut writer: Box<dyn DatasetWriter> = if out_ext == Some("bpcells") {
+        // BPCells matrix directory: X + dimnames only.
+        Box::new(BpcellsDirWriter::create(output, n_obs, n_vars)?)
+    } else if out_ext == Some("zarr") {
+        #[cfg(feature = "zarr")]
+        {
+            Box::new(scx_core::zarr_ad::ZarrAdWriter::create_at(
                 output,
                 n_obs,
                 n_vars,
                 out_dtype,
-                compress,
                 effective_x_slot,
             )?)
-        };
+        }
+        #[cfg(not(feature = "zarr"))]
+        {
+            anyhow::bail!("Zarr output requires building scx with the `zarr` feature")
+        }
+    } else if is_h5seurat {
+        if use_dgcmatrix {
+            Box::new(H5SeuratWriter::create(
+                output,
+                n_obs,
+                n_vars,
+                out_dtype,
+                Some(out_assay),
+                Some(effective_x_slot),
+                Some(project),
+                seuratdisk_compat,
+            )?)
+        } else {
+            Box::new(BpcellsH5Writer::create(
+                output,
+                n_obs,
+                n_vars,
+                out_dtype,
+                Some(out_assay),
+                Some(effective_x_slot),
+                Some(project),
+                seuratdisk_compat,
+            )?)
+        }
+    } else {
+        Box::new(H5AdWriter::create_at(
+            output,
+            n_obs,
+            n_vars,
+            out_dtype,
+            compress,
+            effective_x_slot,
+        )?)
+    };
 
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;

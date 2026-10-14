@@ -5,7 +5,7 @@
 //! WriterMode}` stay stable.
 
 mod reader;
-mod writer;
+pub(crate) mod writer;
 
 pub use reader::H5AdReader;
 pub use writer::{H5AdWriter, WriterMode};

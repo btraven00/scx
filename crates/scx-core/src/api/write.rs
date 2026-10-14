@@ -28,6 +28,8 @@ use crate::ir::{
 };
 use crate::sparse::{csr_chunk, dense_to_csr};
 use crate::stream::DatasetWriter;
+#[cfg(feature = "zarr")]
+use crate::zarr_ad::ZarrAdWriter;
 
 const DEFAULT_CHUNK_SIZE: usize = 5000;
 
@@ -338,6 +340,50 @@ impl H5AdBuilder {
     }
 }
 
+/// Streaming builder for an AnnData Zarr v3 store (`.zarr` directory).
+/// Push row chunks via [`ZarrAdBuilder::push_x_csr_chunk`].
+#[cfg(feature = "zarr")]
+pub struct ZarrAdBuilder(Core<ZarrAdWriter>);
+
+#[cfg(feature = "zarr")]
+impl ZarrAdBuilder {
+    /// Create the store at `path` for an `n_obs × n_vars` f32 matrix.
+    /// `chunk_size` is rows per streaming chunk (5000 when `None`).
+    pub fn new(
+        path: &Path,
+        n_obs: usize,
+        n_vars: usize,
+        chunk_size: Option<usize>,
+    ) -> Result<Self, ScxError> {
+        let inner = ZarrAdWriter::create(path, n_obs, n_vars, DataType::F32)?;
+        Ok(Self(Core::new(inner, n_obs, n_vars, chunk_size)))
+    }
+
+    builder_methods!();
+
+    /// Write an `n_obs × n_vars` CSR matrix as `layers/<name>`.
+    pub fn add_layer_csr(
+        &mut self,
+        name: &str,
+        x: CsMatViewI<f32, u32>,
+    ) -> Result<&mut Self, ScxError> {
+        let n_vars = self.0.n_vars;
+        self.0.sparse_slot("layers", name, x, n_vars)?;
+        Ok(self)
+    }
+
+    /// Write an `n_obs × n_obs` CSR matrix as `obsp/<name>`.
+    pub fn add_obsp_csr(
+        &mut self,
+        name: &str,
+        x: CsMatViewI<f32, u32>,
+    ) -> Result<&mut Self, ScxError> {
+        let n_obs = self.0.n_obs;
+        self.0.sparse_slot("obsp", name, x, n_obs)?;
+        Ok(self)
+    }
+}
+
 /// Streaming builder for a BPCells-backed `.h5seurat`.
 pub struct BpcellsH5SeuratBuilder(Core<BpcellsH5Writer>);
 
@@ -416,6 +462,37 @@ pub fn write_h5ad_dense(
 ) -> Result<(), ScxError> {
     let (n_obs, n_vars) = x.dim();
     H5AdBuilder::new(path, n_obs, n_vars, opts)?
+        .0
+        .write_dense(x, obs, var)
+}
+
+/// Write a CSR matrix (cells × genes) as an AnnData Zarr v3 store.
+#[cfg(feature = "zarr")]
+pub fn write_zarr_csr(
+    path: &Path,
+    x: CsMatViewI<f32, u32>,
+    obs: ObsTable,
+    var: VarTable,
+    chunk_size: Option<usize>,
+) -> Result<(), ScxError> {
+    csr_first(x)?;
+    ZarrAdBuilder::new(path, x.rows(), x.cols(), chunk_size)?
+        .0
+        .write_csr(x, obs, var)
+}
+
+/// Write a dense matrix (cells × genes) as an AnnData Zarr v3 store. Exact
+/// zeros are dropped.
+#[cfg(feature = "zarr")]
+pub fn write_zarr_dense(
+    path: &Path,
+    x: ArrayView2<f32>,
+    obs: ObsTable,
+    var: VarTable,
+    chunk_size: Option<usize>,
+) -> Result<(), ScxError> {
+    let (n_obs, n_vars) = x.dim();
+    ZarrAdBuilder::new(path, n_obs, n_vars, chunk_size)?
         .0
         .write_dense(x, obs, var)
 }

@@ -25,8 +25,8 @@ use zarrs::array::{data_type as zdt, Array, ElementOwned};
 use zarrs::filesystem::FilesystemStore;
 use zarrs::group::Group;
 
-use crate::stream::row_chunks;
 use crate::stream::ChunkStream;
+use crate::stream::{row_chunks, row_range_chunks};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
@@ -773,11 +773,15 @@ impl DatasetReader for ZarrAdReader {
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
+        self.x_stream_rows(vec![0..self.n_obs])
+    }
+
+    fn x_stream_rows(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
         let store = self.store.clone();
         let base = self.x_path.clone();
         let (n_obs, n_vars, dtype) = (self.n_obs, self.n_vars, self.dtype);
         let indptr = &self.indptr;
-        row_chunks(n_obs, self.chunk_size, move |rows| match &indptr {
+        row_range_chunks(n_obs, ranges, self.chunk_size, move |rows| match &indptr {
             Some(indptr) => read_csr_chunk(&store, &base, indptr, rows, n_vars, Some(dtype)),
             None => read_dense_chunk(&store, &base, rows, n_vars, Some(dtype)),
         })
@@ -797,6 +801,9 @@ fn transpose(m: DenseMatrix) -> DenseMatrix {
         data,
     }
 }
+
+mod writer;
+pub use writer::ZarrAdWriter;
 
 #[cfg(test)]
 mod tests;

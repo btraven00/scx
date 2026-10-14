@@ -94,3 +94,22 @@ def test_x_slot_layer_leaves_x_absent(norman, norman_path, tmp_path) -> None:
 
     with pytest.raises(Exception, match="layers/<name>"):
         pk.convert(norman_path, tmp_path / "bad.h5ad", x_slot="counts")
+
+
+def test_zarr_output_reads_back_with_anndata(norman, norman_path, tmp_path) -> None:
+    import zarr  # noqa: F401  (anndata needs it for read_zarr)
+
+    out = pk.convert(norman_path, tmp_path / "out.zarr")
+    assert out.is_dir()
+    back = ad.read_zarr(out)
+    assert back.shape == norman.shape
+    np.testing.assert_array_equal(dense(back.X), dense(norman.X))
+    assert list(back.obs_names) == list(norman.obs_names)
+    assert list(back.var_names) == list(norman.var_names)
+    for col in norman.obs.columns:
+        assert back.obs[col].astype(str).tolist() == norman.obs[col].astype(str).tolist(), col
+    assert set(back.layers) == set(norman.layers)
+    np.testing.assert_array_equal(dense(back.layers["counts"]), dense(norman.layers["counts"]))
+    # And through picklerick's own reader.
+    assert pk.inspect(out)["format"].startswith("Zarr")
+    np.testing.assert_array_equal(dense(pk.read(out).X), dense(norman.X))

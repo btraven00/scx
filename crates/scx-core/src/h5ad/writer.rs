@@ -350,7 +350,7 @@ fn cast_slice<S: Copy + Into<f64> + Sync, T: Send>(
 }
 
 /// `v` converted to `T` through `f`.
-fn cast<T: Send>(v: &TypedVec, f: impl Fn(f64) -> T + Sync + Send) -> Vec<T> {
+pub(crate) fn cast<T: Send>(v: &TypedVec, f: impl Fn(f64) -> T + Sync + Send) -> Vec<T> {
     match v {
         TypedVec::F32(v) => cast_slice(v, f),
         TypedVec::F64(v) => cast_slice(v, f),
