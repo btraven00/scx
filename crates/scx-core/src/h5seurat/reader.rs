@@ -7,7 +7,7 @@ use hdf5::types::{TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 
 use crate::h5::{read_csr_rows, read_u64, value_dtype};
-use crate::h5_str::read_strings;
+use crate::h5_str::{read_str_1d, read_str_attr, read_strings};
 use crate::stream::row_chunks;
 use crate::stream::ChunkStream;
 use crate::{
@@ -545,19 +545,47 @@ fn read_obsp_metas_sync(path: &Path) -> Result<Vec<SparseMatrixMeta>> {
     Ok(metas)
 }
 
-fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
+/// `varm` from the reductions' `feature.loadings`, aligned to the exported
+/// assay's `features` axis.
+///
+/// SeuratDisk stores loadings as `(k, n_features)` where `features` is the
+/// reduction's own feature list (usually the variable features, a subset of
+/// the assay's), and tags each reduction with the assay it was computed on.
+/// A reduction from another assay is skipped: its loadings are not on this
+/// `var` axis at all. Loadings are scattered onto the full `var` index by
+/// name, NaN where a var has no loading, as Seurat's `Loadings()` does.
+/// Without a `features` dataset the loadings are taken to cover all of `var`.
+fn read_varm_sync(path: &Path, assay: &str) -> Result<Varm> {
     let file = File::open(path)?;
     let reds_grp = match file.group("reductions") {
         Err(_) => return Ok(Varm::default()),
         Ok(g) => g,
     };
+    let var_index = read_strings(&file, &format!("assays/{assay}/features"))?;
+    let n_vars = var_index.len();
+    let var_pos: HashMap<&str, usize> = var_index
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
     let mut map = HashMap::new();
     for red_name in reds_grp.member_names().unwrap_or_default() {
-        let ds_path = format!("reductions/{red_name}/feature.loadings");
-        let ds = match file.dataset(&ds_path) {
+        let red_grp = match reds_grp.group(&red_name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let ds = match red_grp.dataset("feature.loadings") {
             Ok(d) => d,
             Err(_) => continue,
         };
+        if let Ok(red_assay) = read_str_attr(&red_grp, "active.assay") {
+            if red_assay != assay {
+                tracing::info!(
+                    "skipping varm '{red_name}': computed on assay '{red_assay}', not '{assay}'"
+                );
+                continue;
+            }
+        }
         let arr: ndarray::Array2<f64> = match ds.read::<f64, ndarray::Ix2>() {
             Ok(a) => a,
             Err(e) => {
@@ -565,19 +593,48 @@ fn read_varm_sync(path: &Path, n_vars: usize) -> Result<Varm> {
                 continue;
             }
         };
-        // feature.loadings stored as (k, n_vars) — transpose to (n_vars, k)
-        let arr = if arr.shape()[1] == n_vars && arr.shape()[0] != n_vars {
-            arr.t().as_standard_layout().into_owned()
-        } else {
-            arr
+        let features = match red_grp.dataset("features") {
+            Ok(d) => read_str_1d(&d)?,
+            Err(_) => var_index.clone(),
         };
-        let shape = (arr.shape()[0], arr.shape()[1]);
-        let varm_key = format!("X_{}", red_name.to_lowercase());
+        let m = features.len();
+        // Stored (k, m) column-major from R; transpose to (m, k) unless the
+        // writer already did (a square matrix is taken as (k, m)).
+        let arr = if arr.shape()[1] == m {
+            arr.t().as_standard_layout().into_owned()
+        } else if arr.shape()[0] == m {
+            arr
+        } else {
+            tracing::warn!(
+                "skipping varm '{red_name}': loadings are {:?} but the reduction has {m} features",
+                arr.shape()
+            );
+            continue;
+        };
+        let k = arr.shape()[1];
+        let data = if features == var_index {
+            arr.into_raw_vec_and_offset().0
+        } else {
+            let mut full = vec![f64::NAN; n_vars * k];
+            let mut dropped = 0usize;
+            for (i, name) in features.iter().enumerate() {
+                match var_pos.get(name.as_str()) {
+                    Some(&p) => full[p * k..(p + 1) * k].copy_from_slice(&arr.row(i).to_vec()),
+                    None => dropped += 1,
+                }
+            }
+            if dropped > 0 {
+                tracing::warn!(
+                    "varm '{red_name}': {dropped} of {m} loading features are not in assay '{assay}'"
+                );
+            }
+            full
+        };
         map.insert(
-            varm_key,
+            format!("X_{}", red_name.to_lowercase()),
             DenseMatrix {
-                shape,
-                data: arr.into_raw_vec_and_offset().0,
+                shape: (n_vars, k),
+                data,
             },
         );
     }
@@ -661,7 +718,7 @@ impl DatasetReader for H5SeuratReader {
     }
 
     async fn varm(&mut self) -> Result<Varm> {
-        read_varm_sync(&self.path, self.n_vars)
+        read_varm_sync(&self.path, &self.assay)
     }
 
     async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {

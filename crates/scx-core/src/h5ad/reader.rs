@@ -442,6 +442,13 @@ fn ad_read_dense_dict(
             Some(n) if arr.shape()[0] != n && arr.shape()[1] == n => arr.t().to_owned(),
             _ => arr,
         };
+        if n_rows.is_some_and(|n| arr.shape()[0] != n) {
+            tracing::warn!(
+                "{group}['{name}'] is {:?} but {group} rows must be {}: anndata will refuse this file",
+                arr.shape(),
+                n_rows.unwrap()
+            );
+        }
         let shape = (arr.shape()[0], arr.shape()[1]);
         let data = arr.as_standard_layout().iter().copied().collect();
         map.insert(name, DenseMatrix { shape, data });
@@ -599,7 +606,7 @@ impl DatasetReader for H5AdReader {
 
     async fn varm(&mut self) -> Result<Varm> {
         let file = File::open(&self.path)?;
-        let map = ad_read_dense_dict(&file, "varm", None)?;
+        let map = ad_read_dense_dict(&file, "varm", Some(self.n_vars))?;
         Ok(Varm { map })
     }
 

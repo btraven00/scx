@@ -686,3 +686,110 @@ async fn test_lean_output_has_no_seuratdisk_attributes() {
     assert!(f.group("/").unwrap().attr("version").is_err());
     assert!(f.group("reductions/pca").unwrap().attr("key").is_err());
 }
+
+// -----------------------------------------------------------------------
+// varm: loadings aligned to var by feature name, other-assay reductions skipped
+// -----------------------------------------------------------------------
+
+/// SeuratDisk stores a reduction's loadings as (k, n_features) over its own
+/// `features` list and tags it with `active.assay`. Regression for the Azimuth
+/// PBMC export where `varm/X_apca` came out (50, 224) for 228 vars and the SCT
+/// reductions' loadings landed in the ADT file.
+#[tokio::test]
+async fn varm_is_scattered_onto_var_and_filtered_by_assay() {
+    let (n_obs, n_vars) = (2usize, 4usize);
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let path = tmp.path().to_path_buf();
+    {
+        let mut writer =
+            H5SeuratWriter::create(&path, n_obs, n_vars, DataType::F32, None, None, None, false)
+                .unwrap();
+        writer
+            .write_obs(&ObsTable {
+                index: vec!["c0".into(), "c1".into()],
+                columns: vec![],
+            })
+            .await
+            .unwrap();
+        writer
+            .write_var(&VarTable {
+                index: vec!["g0".into(), "g1".into(), "g2".into(), "g3".into()],
+                columns: vec![],
+            })
+            .await
+            .unwrap();
+        writer.write_obsm(&Embeddings::default()).await.unwrap();
+        writer
+            .write_x_chunk(&MatrixChunk {
+                row_offset: 0,
+                nrows: n_obs,
+                data: SparseMatrixCSR {
+                    shape: (n_obs, n_vars),
+                    indptr: vec![0, 1, 2],
+                    indices: vec![0, 3],
+                    data: TypedVec::F32(vec![1.0, 2.0]),
+                },
+            })
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    // Hand-write the reductions the way SeuratDisk lays them out.
+    let file = File::open_rw(&path).unwrap();
+    let reds = file
+        .group("reductions")
+        .or_else(|_| file.create_group("reductions"))
+        .unwrap();
+    let put_reduction =
+        |name: &str, assay: &str, feats: &[&str], loadings: ndarray::Array2<f64>| {
+            let g = reds.create_group(name).unwrap();
+            let v = VarLenUnicode::from_str(assay).unwrap();
+            g.new_attr::<VarLenUnicode>()
+                .create("active.assay")
+                .unwrap()
+                .write_scalar(&v)
+                .unwrap();
+            let feats: Vec<VarLenUnicode> = feats
+                .iter()
+                .map(|s| VarLenUnicode::from_str(s).unwrap())
+                .collect();
+            g.new_dataset_builder()
+                .with_data(&feats)
+                .create("features")
+                .unwrap();
+            g.new_dataset_builder()
+                .with_data(&loadings)
+                .create("feature.loadings")
+                .unwrap();
+        };
+    // pca on RNA: 2 PCs over 3 of the 4 vars, in a different order than var.
+    put_reduction(
+        "pca",
+        "RNA",
+        &["g3", "g1", "g0"],
+        ndarray::arr2(&[[31.0, 11.0, 1.0], [32.0, 12.0, 2.0]]),
+    );
+    // apca on another assay: must not appear in RNA's varm.
+    put_reduction(
+        "apca",
+        "ADT",
+        &["a0", "a1"],
+        ndarray::arr2(&[[1.0, 2.0], [3.0, 4.0]]),
+    );
+    drop(file);
+
+    let mut reader = H5SeuratReader::open(&path, 100, None, None).unwrap();
+    let varm = reader.varm().await.unwrap();
+    assert!(
+        !varm.map.contains_key("X_apca"),
+        "ADT reduction leaked into RNA varm"
+    );
+    let pca = &varm.map["X_pca"];
+    assert_eq!(pca.shape, (n_vars, 2));
+    let row = |i: usize| &pca.data[i * 2..i * 2 + 2];
+    assert_eq!(row(0), &[1.0, 2.0]);
+    assert_eq!(row(1), &[11.0, 12.0]);
+    assert!(row(2).iter().all(|v| v.is_nan()), "g2 has no loading: NaN");
+    assert_eq!(row(3), &[31.0, 32.0]);
+}
