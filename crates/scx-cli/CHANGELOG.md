@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.0](https://github.com/btraven00/scx/compare/scx-cli-v0.5.0...scx-cli-v0.6.0) (2026-10-14)
+
+
+### Features
+
+* AnnData Zarr v3 output and row-range reads (open_stream rows=/where=) ([0b78f11](https://github.com/btraven00/scx/commit/0b78f114364201e3be68b0f099609d8c9a4d8420))
+* **core:** read per-cell-list Parquet beyond Tahoe's column names and arrow widths ([53cc756](https://github.com/btraven00/scx/commit/53cc756358ead47f4374a05c9045fa69da307969))
+* write the matrix to layers/&lt;name&gt; instead of /X (--x-slot for h5ad) ([bcfc791](https://github.com/btraven00/scx/commit/bcfc791ec63ad59b95a13c89ec0bb6a78717fd10))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.5.0 to 0.6.0
+
 ## [0.5.0](https://github.com/btraven00/scx/compare/scx-cli-v0.4.1...scx-cli-v0.5.0) (2026-10-07)
 
 
