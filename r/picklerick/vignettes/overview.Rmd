@@ -1,0 +1,84 @@
+---
+title: "picklerick: what it is and what it does"
+author: "SCX Authors"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_vignette:
+    toc: false
+vignette: >
+  %\VignetteIndexEntry{picklerick: what it is and what it does}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+# What it is
+
+picklerick is the R binding of SCX, a format-to-format interoperability
+engine for single-cell data written in Rust. SCX reads a count matrix as a
+stream of cell chunks and writes it out again in another layout, so memory
+is bounded by the chunk size rather than the dataset. It has no Python
+dependency and links its own HDF5, so it does not interfere with `rhdf5` or
+`hdf5r` in the same session.
+
+picklerick keeps that engine behind a small R surface: one reader, one
+inspector, one converter, one writer, and a DelayedArray seed.
+
+# What it does
+
+- **Reads** AnnData `.h5ad` files and Zarr stores, H5Seurat files, 10x HDF5
+  and MatrixMarket output, and BPCells directories. The format is detected
+  from the content, not the extension.
+- **Builds** the R object you want from any of them: a
+  `SingleCellExperiment`, a `Seurat` object, a light AnnData-like handle that
+  defers the S4 cost, or the raw pieces as a list.
+- **Leaves the matrix on disk** when asked, as a `DelayedMatrix` that reads
+  only the cells a block touches.
+- **Converts** file to file, streamed, to `.h5ad`, `.h5seurat` or an AnnData
+  Zarr v3 store.
+- **Writes** a `SingleCellExperiment` back to `.h5ad`.
+
+```{r}
+library(picklerick)
+
+inspect("atlas.h5ad")                        # metadata only
+sce <- read_h5ad("atlas.h5ad")               # SingleCellExperiment
+obj <- read_h5ad("atlas.h5ad", as = "Seurat")
+sce <- read_zarr("atlas.zarr", lazy = TRUE)  # matrix stays on disk
+convert("atlas.h5seurat", "atlas.h5ad")
+write_h5ad(sce, "out.h5ad")
+```
+
+The vignette *Reading single-cell files with picklerick*
+(`vignette("picklerick")`) runs every one of these on a dataset shipped with
+the package.
+
+# Function index
+
+Reference pages are being generated from the roxygen sources; until then
+the help topics below are marked TODO and the two vignettes are the
+documentation. Progress is tracked in
+[scx issue #88](https://github.com/btraven00/scx/issues/88).
+
+| Function | Does | Help page |
+|---|---|---|
+| `read_h5ad(path, as, lazy, ...)` | Read any supported file into a `SingleCellExperiment` (default), `Seurat`, AnnData handle or list | TODO |
+| `read_zarr(path, ...)` | Same, named for Zarr stores | TODO |
+| `inspect(path)` | Shape, column names, embedding keys and per-layer sparsity, without reading the matrix | TODO |
+| `convert(input, output)` | Stream one file into another format, chosen by the output extension | TODO |
+| `write_h5ad(sce, path)` | Write a `SingleCellExperiment` as `.h5ad` | TODO |
+| `uns(x, key)` | Read one key of `uns` on demand | TODO |
+| `as_sce(x)`, `as_seurat(x)` | Turn the AnnData handle from `as = "AnnData"` into an S4 object | TODO |
+| `PicklerickMatrix(path, layer)` | A `DelayedMatrix` whose blocks are read through SCX | TODO |
+| `PicklerickMatrixSeed` | The seed class behind it, with `dim`, `dimnames`, `extract_array`, `extract_sparse_array`, `chunkdim` | TODO |
+
+# Where it fits
+
+For plain `.h5ad` files Bioconductor already has `zellkonverter` (through
+Python) and `HDF5Array::H5SparseMatrix` (lazy). picklerick is for the cases
+those do not cover: no Python available, Zarr stores, H5Seurat, 10x and
+BPCells inputs, one reader for all of them, and lazy access to the non-HDF5
+ones.

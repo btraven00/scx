@@ -78,8 +78,10 @@ One reader for every format, detected by content:
 | 10x MatrixMarket directory | ✓ | |
 | BPCells matrix directory | ✓ | X only |
 
-The vignette, `vignette("picklerick")`, walks through each target object and
-format on a dataset shipped with the package.
+Two vignettes: `vignette("overview")` says what the package is and indexes
+its functions; `vignette("picklerick")` walks through each target object and
+format on a dataset shipped with the package. Reference pages are tracked in
+[issue #88](https://github.com/btraven00/scx/issues/88).
 
 ## Lazy matrices (DelayedArray)
 
