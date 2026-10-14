@@ -1,6 +1,6 @@
 use super::reader::ad_read_categorical;
 use super::*;
-use crate::h5_str::write_strings;
+use crate::h5_str::{write_str_array_attr, write_str_attr, write_strings};
 use futures::StreamExt;
 use hdf5::types::VarLenUnicode;
 use hdf5::File;
@@ -2009,4 +2009,52 @@ async fn x_slot_layer_writes_matrix_there_and_no_x() {
             "slot {bad:?} must be rejected"
         );
     }
+}
+
+/// anndata < 0.8 wrote a categorical as an int code dataset next to a
+/// `__categories/<col>` level table. Regression for Replogle K562, where
+/// `var/gene_name` came out as bare int32 codes.
+#[tokio::test]
+async fn legacy_categories_group_decodes_as_categorical() {
+    let (n_obs, n_vars) = (2usize, 3usize);
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        write_csr_group(&f, "X", (n_obs, n_vars), &[0, 1, 2], &[0, 2], &[1.0, 2.0]);
+        let var = f.create_group("var").unwrap();
+        write_str_attr(&var, "_index", "index").unwrap();
+        write_str_array_attr(&var, "column-order", &["gene_name", "n_cells"]).unwrap();
+        write_strings(
+            &var,
+            "index",
+            &["ENSG1".into(), "ENSG2".into(), "ENSG3".into()],
+        )
+        .unwrap();
+        // codes: NOC2L, NA, LINC01409
+        var.new_dataset_builder()
+            .with_data(&[1i8, -1, 0])
+            .create("gene_name")
+            .unwrap();
+        var.new_dataset_builder()
+            .with_data(&[5i32, 6, 7])
+            .create("n_cells")
+            .unwrap();
+        let cats = var.create_group("__categories").unwrap();
+        write_strings(&cats, "gene_name", &["LINC01409".into(), "NOC2L".into()]).unwrap();
+    }
+
+    let mut reader = H5AdReader::open(tmp.path(), 2).unwrap();
+    let var = reader.var().await.unwrap();
+    assert_eq!(var.columns.len(), 2, "__categories is not a column");
+    let gene = &var.columns[0];
+    assert_eq!(gene.name, "gene_name");
+    match &gene.data {
+        ColumnData::Categorical { codes, levels } => {
+            assert_eq!(levels, &["LINC01409", "NOC2L"]);
+            assert_eq!(codes, &[1, 0, 0]);
+        }
+        other => panic!("expected categorical, got {other:?}"),
+    }
+    assert_eq!(gene.mask.as_deref(), Some(&[true, false, true][..]));
+    assert!(matches!(var.columns[1].data, ColumnData::Int(_)));
 }

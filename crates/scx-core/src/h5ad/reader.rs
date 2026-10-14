@@ -216,7 +216,13 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
         // Groups are categorical; datasets are array/string-array
         let is_group = file.group(&col_path).is_ok() && file.dataset(&col_path).is_err();
 
-        let read = if is_group {
+        // anndata < 0.8 stored a categorical as an int code dataset plus
+        // `<group>/__categories/<col>`; anndata still reads that layout.
+        let legacy_cats = format!("{group_path}/__categories/{col_name}");
+
+        let read = if !is_group && file.dataset(&legacy_cats).is_ok() {
+            ad_read_categorical_at(file, &col_path, &legacy_cats)
+        } else if is_group {
             // Distinguish categorical (codes+categories) from nullable (values+mask)
             if file.dataset(&format!("{col_path}/codes")).is_ok() {
                 ad_read_categorical(file, &col_path)
@@ -302,7 +308,21 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
 /// Read a categorical group. Code -1 is NA: it becomes code 0 with
 /// `missing[i] == true`.
 pub(super) fn ad_read_categorical(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
-    let codes_ds = file.dataset(&format!("{grp_path}/codes"))?;
+    ad_read_categorical_at(
+        file,
+        &format!("{grp_path}/codes"),
+        &format!("{grp_path}/categories"),
+    )
+}
+
+/// [`ad_read_categorical`] with the codes and categories datasets named
+/// separately, for the legacy `__categories` layout.
+fn ad_read_categorical_at(
+    file: &File,
+    codes_path: &str,
+    categories_path: &str,
+) -> Result<(ColumnData, Vec<bool>)> {
+    let codes_ds = file.dataset(codes_path)?;
     let raw: Vec<i64> = match codes_ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Integer(IntSize::U1) => codes_ds
             .read_1d::<i8>()?
@@ -321,7 +341,7 @@ pub(super) fn ad_read_categorical(file: &File, grp_path: &str) -> Result<(Column
             )))
         }
     };
-    let levels = ad_read_levels(file, &format!("{grp_path}/categories"))?;
+    let levels = ad_read_levels(file, categories_path)?;
     let missing: Vec<bool> = raw.iter().map(|&c| c < 0).collect();
     let codes = raw.iter().map(|&c| c.max(0) as u32).collect();
     Ok((ColumnData::Categorical { codes, levels }, missing))
