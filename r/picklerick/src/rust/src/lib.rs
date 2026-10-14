@@ -14,6 +14,8 @@ use scx_core::{
     detect::Format,
     dtype::{DataType, TypedVec},
     h5ad::H5AdWriter,
+    h5seurat::H5SeuratWriter,
+    zarr_ad::ZarrAdWriter,
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
         SparseMatrixCSR, UnsTable, VarTable, Varm,
@@ -64,6 +66,7 @@ async fn do_convert(
     reader: &mut dyn DatasetReader,
     output: &Path,
     dtype: DataType,
+    assay: &str,
 ) -> anyhow::Result<()> {
     let (n_obs, n_vars) = reader.shape();
     let obs          = reader.obs().await?;
@@ -74,7 +77,32 @@ async fn do_convert(
     let layer_metas  = reader.layer_metas().await?;
     let obsp_metas   = reader.obsp_metas().await?;
 
-    let mut writer = H5AdWriter::create(output, n_obs, n_vars, dtype)?;
+    // The output extension picks the writer, as in the CLI and the Python
+    // package. H5Seurat output is the SeuratDisk dgCMatrix layout.
+    let ext = output
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    // H5Seurat output follows `scx convert --x-slot auto`: with a `counts`
+    // layer in the source, X is taken to be normalised and goes to `data`,
+    // and the layer keeps the `counts` slot. A source layer named like X's
+    // slot is skipped, as the two cannot coexist.
+    let has_counts = layer_metas.iter().any(|m| m.name == "counts");
+    let (mut writer, skip_layer): (Box<dyn DatasetWriter>, Option<&str>) = match ext.as_deref() {
+        Some("h5ad") => (Box::new(H5AdWriter::create(output, n_obs, n_vars, dtype)?), None),
+        Some("zarr") => (Box::new(ZarrAdWriter::create(output, n_obs, n_vars, dtype)?), None),
+        Some("h5seurat") => {
+            let slot = if has_counts { "data" } else { "counts" };
+            let w = H5SeuratWriter::create(
+                output, n_obs, n_vars, dtype, Some(assay), Some(slot), None, false,
+            )?;
+            (Box::new(w), Some(slot))
+        }
+        _ => anyhow::bail!(
+            "unsupported output extension for '{}': use .h5ad, .h5seurat or .zarr",
+            output.display()
+        ),
+    };
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
     writer.write_obsm(&obsm).await?;
@@ -82,6 +110,9 @@ async fn do_convert(
     writer.write_varm(&varm).await?;
 
     for meta in &layer_metas {
+        if Some(meta.name.as_str()) == skip_layer {
+            continue;
+        }
         writer.begin_sparse("layers", &meta.name, meta).await?;
         let mut stream = reader.layer_stream(meta, n_obs);
         while let Some(chunk) = stream.next().await {
@@ -115,10 +146,11 @@ async fn do_convert(
 // `R/convert.R` uses `system2("scx", ...)` instead.
 // ---------------------------------------------------------------------------
 
-/// Convert any supported single-cell format to H5AD.
+/// Convert any supported single-cell format to .h5ad, .h5seurat or a Zarr v3
+/// store, chosen by the output extension.
 ///
-/// @param input Path to input file (.h5seurat, .h5ad, .h5).
-/// @param output Path to output .h5ad file.
+/// @param input Path to input file (any format scx reads).
+/// @param output Path to the output file or store.
 /// @param chunk_size Number of cells per streaming chunk.
 /// @param dtype Output numeric type: "f32", "f64", "i32", "u32".
 /// @param assay Seurat assay name (H5Seurat only).
@@ -162,7 +194,7 @@ fn scx_convert_inner(
     };
     let result = block_on(async {
         let (mut r, _) = open_reader(input_path, &opts).await?;
-        do_convert(&mut *r, Path::new(output), dtype).await
+        do_convert(&mut *r, Path::new(output), dtype, assay).await
     });
 
     result.map_err(|e| Error::from(e.to_string()))

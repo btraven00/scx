@@ -4,13 +4,14 @@
 #' `output`. No R objects are constructed; memory usage is bounded by
 #' `chunk_size` regardless of dataset size.
 #'
-#' Supported input formats (auto-detected by content):
-#' - `.h5seurat` — SeuratDisk H5Seurat (Seurat v3/v4)
-#' - `.h5ad`     — AnnData H5AD
-#' - `.h5`       — SCX internal HDF5 schema
+#' The input format is detected from the content: AnnData `.h5ad`, AnnData
+#' Zarr stores, H5Seurat, 10x HDF5, 10x MatrixMarket directories, BPCells
+#' directories. The output format is chosen by the extension of `output`:
+#' `.h5ad`, `.h5seurat` (SeuratDisk dgCMatrix layout) or `.zarr` (AnnData
+#' Zarr v3 store, a directory).
 #'
-#' @param input  Path to the input file.
-#' @param output Path to the output `.h5ad` file.
+#' @param input  Path to the input file or directory.
+#' @param output Path to the output: `.h5ad`, `.h5seurat` or `.zarr`.
 #' @param chunk_size Number of cells per streaming chunk. Default `5000L`.
 #' @param dtype Output numeric type: `"f32"`, `"f64"`, `"i32"`, or `"u32"`.
 #'   Default `"f32"`.
@@ -23,6 +24,7 @@
 #' @examples
 #' \dontrun{
 #' convert("pbmc3k.h5seurat", "pbmc3k.h5ad")
+#' convert("pbmc3k.h5ad", "pbmc3k.zarr")
 #' convert("pbmc3k.h5seurat", "pbmc3k_f64.h5ad", dtype = "f64", chunk_size = 2000L)
 #' }
 convert <- function(input, output,

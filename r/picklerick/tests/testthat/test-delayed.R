@@ -11,8 +11,8 @@ delayed_fixture <- function(name) {
 for (name in c("small.h5ad", "small_v3.zarr", "small_v2.zarr")) {
   test_that(sprintf("PicklerickMatrix over %s matches the eager read", name), {
     path <- delayed_fixture(name)
-    sce <- read_h5ad(path)
-    full <- SummarizedExperiment::assay(sce, "counts")
+    raw <- read_h5ad(path, as = "list")
+    full <- picklerick:::.build_dgc(raw)   # X of the eager read, features x cells
 
     m <- PicklerickMatrix(path, chunk_size = 7L)
     expect_s4_class(m, "DelayedMatrix")
@@ -63,11 +63,13 @@ test_that("PicklerickMatrix drops into a SingleCellExperiment and survives seria
 test_that("read_zarr(lazy = TRUE) wraps X in a PicklerickMatrix", {
   path <- delayed_fixture("small_v3.zarr")
   sce <- read_zarr(path, lazy = TRUE)
-  counts <- SummarizedExperiment::assay(sce, "counts")
-  expect_s4_class(counts, "DelayedMatrix")
-  expect_s4_class(DelayedArray::seed(counts), "PicklerickMatrixSeed")
-  eager <- SummarizedExperiment::assay(read_zarr(path), "counts")
-  expect_equal(as.matrix(counts[, 1:5]), as.matrix(eager[, 1:5]))
+  # The fixture has a `counts` layer, so X is the `X` assay, as when eager.
+  expect_identical(SummarizedExperiment::assayNames(sce), "X")
+  x <- SummarizedExperiment::assay(sce, "X")
+  expect_s4_class(x, "DelayedMatrix")
+  expect_s4_class(DelayedArray::seed(x), "PicklerickMatrixSeed")
+  eager <- SummarizedExperiment::assay(read_zarr(path), "X")
+  expect_equal(as.matrix(x[, 1:5]), as.matrix(eager[, 1:5]))
   expect_identical(SummarizedExperiment::colData(sce)$cluster,
                    SummarizedExperiment::colData(read_zarr(path))$cluster)
 })

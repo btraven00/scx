@@ -1,0 +1,240 @@
+---
+title: "Reading single-cell files with picklerick"
+author: "SCX Authors"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+vignette: >
+  %\VignetteIndexEntry{Reading single-cell files with picklerick}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+has_seurat <- requireNamespace("Seurat", quietly = TRUE)
+```
+
+# Overview
+
+picklerick reads single-cell files through the SCX engine, a Rust library
+that streams a count matrix in chunks of cells and never holds a Python or
+HDF5 object graph in R. One reader function, `read_h5ad()`, handles every
+format: the format is detected from the file's content, not its extension.
+
+| Format | Produced by | Read | Written |
+|---|---|:-:|:-:|
+| AnnData `.h5ad` | anndata, scanpy | yes | yes |
+| AnnData Zarr store (`.zarr` directory, v2 or v3) | `adata.write_zarr()` | yes | yes (v3) |
+| H5Seurat (`.h5seurat`, dgCMatrix or BPCells-backed) | SeuratDisk, Seurat v5 | yes | yes |
+| 10x Genomics HDF5 (`.h5`) | Cell Ranger | yes | |
+| 10x MatrixMarket directory (`matrix.mtx.gz` + features + barcodes) | Cell Ranger | yes | |
+| BPCells matrix directory | BPCells | yes | X only |
+
+Each file gives you the same choice of R object: a `SingleCellExperiment`,
+a `Seurat` object, a light AnnData-like handle, or the raw pieces as a list.
+Large matrices can stay on disk as a `DelayedMatrix`.
+
+This vignette uses a 6-cell by 5-gene dataset shipped with the package in
+every input format. Row 1 has no counts and one gene is expressed in a single
+cell, so empty cells and sparse genes are part of every example.
+
+```{r}
+library(picklerick)
+
+extdata <- system.file("extdata", package = "picklerick")
+h5ad     <- file.path(extdata, "tiny.h5ad")
+tenx_h5  <- file.path(extdata, "tiny_10x.h5")
+mtx_dir  <- file.path(extdata, "tiny_mtx")
+h5seurat <- file.path(extdata, "tiny_v4.h5seurat")
+```
+
+# Looking before reading
+
+`inspect()` reads only metadata: shape, column names, embedding keys, and
+per-layer sparsity from the row pointer. Nothing from the count matrix is
+loaded, whatever the file size.
+
+```{r}
+info <- inspect(h5ad)
+str(info[c("format", "n_obs", "n_vars", "obs_cols", "var_cols", "obsm_keys")])
+info$layers
+```
+
+# Reading into a SingleCellExperiment
+
+The default target is a `SingleCellExperiment`. Features are rows and cells
+are columns, the Bioconductor convention. `obs` becomes `colData()`, `var`
+becomes `rowData()`, `obsm` entries become `reducedDims()`, layers become
+assays of their own name, and `obsp` graphs become `colPairs()`. The AnnData
+`X` becomes the `counts` assay, unless a layer is already called `counts`,
+as here (scanpy keeps raw counts there next to a normalised `X`); then `X`
+keeps its name.
+
+```{r}
+sce <- read_h5ad(h5ad)
+sce
+SummarizedExperiment::assay(sce, "X")
+SummarizedExperiment::colData(sce)
+```
+
+Column encodings survive the trip: categoricals become factors, pandas
+nullable integer and boolean columns keep their `NA`s.
+
+```{r}
+str(as.data.frame(SummarizedExperiment::colData(sce)))
+```
+
+## Unstructured metadata (`uns`)
+
+`uns` can be large and deeply nested, so it is not parsed by default. The
+`uns()` accessor reads one key at a time from the file when you need it, or
+`parse_uns = TRUE` materialises all of it into `metadata()`.
+
+```{r}
+uns(sce)                 # the keys, without reading the values
+uns(sce, "params")
+```
+
+# The same reader for every format
+
+Content detection means the file name does not matter. The four files below
+hold the same cells and genes.
+
+```{r}
+for (f in c(h5ad, tenx_h5, mtx_dir, h5seurat)) {
+  x <- read_h5ad(f)
+  cat(sprintf("%-20s %s  %d x %d\n", basename(f), inspect(f)$format, nrow(x), ncol(x)))
+}
+```
+
+A 10x file carries only the matrix and its names, so its `colData()` is
+empty. An H5Seurat file is read from its `RNA` assay: the `counts` layer
+becomes the `counts` assay and its other layers come along as assays too.
+
+```{r}
+colnames(SummarizedExperiment::colData(read_h5ad(tenx_h5)))
+read_h5ad(h5seurat)
+```
+
+## AnnData Zarr stores
+
+A Zarr store is a directory. Reading one is the same call; `read_zarr()` is
+an alias that makes the intent visible. Here we make one with `convert()`,
+which streams one file into another format without building any R object.
+
+```{r}
+zarr <- file.path(tempdir(), "tiny.zarr")
+convert(h5ad, zarr)
+inspect(zarr)$format
+identical(
+  SummarizedExperiment::assay(read_zarr(zarr), "X"),
+  SummarizedExperiment::assay(sce, "X")
+)
+```
+
+# Reading into a Seurat object
+
+`as = "Seurat"` builds a Seurat v5 object: `counts` from `X`, cell metadata
+from `obs`, feature metadata on the assay, reductions from `obsm`. `obsp`
+graphs are not attached and are dropped with a warning.
+
+```{r, eval = has_seurat}
+obj <- read_h5ad(h5ad, as = "Seurat")
+obj
+head(obj[[]])
+```
+
+`constructor = "fast"` assembles the `Assay5` directly from the matrix just
+read rather than through `CreateSeuratObject()`, which copies it twice. It
+is used only when the names and metadata need none of the sanitising
+`CreateSeuratObject()` does, and falls back otherwise. On 10,000 cells it
+removes the extra 500 MB and most of the construction time; on six cells it
+makes no visible difference.
+
+```{r, eval = has_seurat}
+obj_fast <- read_h5ad(h5ad, as = "Seurat", constructor = "fast")
+identical(SeuratObject::LayerData(obj_fast, "counts"), SeuratObject::LayerData(obj, "counts"))
+```
+
+# Deferring the R object
+
+Building a `SingleCellExperiment` costs a few seconds of S4 warm-up however
+small the data. `as = "AnnData"` returns a light handle instead: a shape, the
+names, and components that are built on first use and cached. Convert it
+later with `as_sce()` or `as_seurat()`.
+
+```{r}
+a <- read_h5ad(h5ad, as = "AnnData")
+a
+dim(a)
+a$obs_names
+a$X                                   # built now, cached
+sce_from_handle <- as_sce(a)
+```
+
+`as = "list"` returns the raw pieces (index vectors, column lists, the CSR
+triplet) for callers assembling something else.
+
+```{r}
+names(read_h5ad(h5ad, as = "list"))
+```
+
+# Leaving the matrix on disk
+
+`lazy = TRUE` reads the metadata and wraps the matrix in a `DelayedMatrix`
+instead of loading it. For an `.h5ad` the wrapper is
+`HDF5Array::H5SparseMatrix` when that package is installed, the conventional
+seed for that layout. For every other format, and for `.h5ad` without
+HDF5Array, it is `PicklerickMatrix()`, a seed that reads blocks through SCX.
+
+```{r}
+lazy <- read_zarr(zarr, lazy = TRUE)
+x <- SummarizedExperiment::assay(lazy, "X")
+class(x)
+DelayedArray::seed(x)
+```
+
+Selecting cells reads only those cells from the store: the row pointer is
+loaded, then just the selected rows' slices of the values and column indices.
+Block operations walk the matrix `chunk_size` cells at a time.
+
+```{r}
+x[, c("cell2", "cell5")]
+as.matrix(x[, c("cell2", "cell5")])
+DelayedArray::colSums(x)
+```
+
+`PicklerickMatrix()` can also be built directly, and can expose a layer.
+
+```{r}
+m <- PicklerickMatrix(zarr, layer = "counts", chunk_size = 2L)
+m
+DelayedArray::chunkdim(DelayedArray::seed(m))
+```
+
+# Writing
+
+`write_h5ad()` writes a `SingleCellExperiment` as `.h5ad`, and `convert()`
+streams any readable file into `.h5ad`, `.h5seurat` or a Zarr v3 store,
+chosen by the output extension. Both bound memory by the chunk size, not
+the dataset.
+
+```{r}
+tenx <- read_h5ad(tenx_h5)
+out <- file.path(tempdir(), "roundtrip.h5ad")
+write_h5ad(tenx, out)
+identical(
+  SummarizedExperiment::assay(read_h5ad(out), "counts"),
+  SummarizedExperiment::assay(tenx, "counts")
+)
+convert(h5ad, file.path(tempdir(), "tiny.h5seurat"))
+inspect(file.path(tempdir(), "tiny.h5seurat"))$format
+```
+
+# Session information
+
+```{r}
+sessionInfo()
+```

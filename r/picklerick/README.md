@@ -54,24 +54,32 @@ open-read-close conversions.
 ```r
 library(picklerick)
 
-# H5Seurat → AnnData
-adata <- read_h5seurat("pbmc3k.h5seurat")
+inspect("pbmc3k.h5ad")                      # shape, columns, keys; no matrix read
 
-# H5AD → AnnData
-adata <- read_h5ad("pbmc3k.h5ad")
+sce <- read_h5ad("pbmc3k.h5ad")             # SingleCellExperiment (default)
+obj <- read_h5ad("pbmc3k.h5ad", as = "Seurat")
+a   <- read_h5ad("pbmc3k.h5ad", as = "AnnData")   # light handle; as_sce(a), as_seurat(a)
+sce <- read_zarr("pbmc3k.zarr")             # AnnData Zarr store, v2 or v3
+sce <- read_h5ad("filtered_feature_bc_matrix.h5")  # the format is detected, not the extension
 
-# AnnData → H5Seurat
-write_h5seurat(adata, "out.h5seurat")
-
-# AnnData → H5AD
-write_h5ad(adata, "out.h5ad")
-
-# Direct coercions (require Seurat / SingleCellExperiment packages)
-seu <- read_seurat("pbmc3k.h5seurat")
-sce <- read_sce("pbmc3k.h5seurat")
+uns(sce)                                    # uns keys; uns(sce, "key") reads one
+write_h5ad(sce, "out.h5ad")
+convert("pbmc3k.h5seurat", "pbmc3k.h5ad")   # file to file, streamed; .h5ad / .h5seurat / .zarr
 ```
 
-See `docs/usage.md` for full details.
+One reader for every format, detected by content:
+
+| Format | Read | Write |
+|---|:-:|:-:|
+| AnnData `.h5ad` | ✓ | ✓ |
+| AnnData Zarr store (`.zarr` directory, v2 and v3) | ✓ | ✓ (v3) |
+| H5Seurat (dgCMatrix or BPCells-backed) | ✓ | ✓ |
+| 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
+| 10x MatrixMarket directory | ✓ | |
+| BPCells matrix directory | ✓ | X only |
+
+The vignette, `vignette("picklerick")`, walks through each target object and
+format on a dataset shipped with the package.
 
 ## Lazy matrices (DelayedArray)
 

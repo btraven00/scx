@@ -80,6 +80,16 @@ setMethod("dim", "PicklerickMatrixSeed", function(x) x@dim)
 setMethod("dimnames", "PicklerickMatrixSeed", function(x) x@dimnames)
 
 #' @rdname PicklerickMatrix
+#' @param object A `PicklerickMatrixSeed`.
+#' @export
+setMethod("show", "PicklerickMatrixSeed", function(object) {
+  cat(sprintf("<PicklerickMatrixSeed> %d x %d (features x cells), chunk_size %d\n",
+              object@dim[[1L]], object@dim[[2L]], object@chunk_size))
+  cat("  path:  ", object@path, "\n", sep = "")
+  cat("  matrix:", if (nzchar(object@layer)) paste0("layers/", object@layer) else "X", "\n")
+})
+
+#' @rdname PicklerickMatrix
 #' @export
 setMethod("is_sparse", "PicklerickMatrixSeed", function(x) TRUE)
 

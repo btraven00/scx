@@ -4,6 +4,10 @@
 #' `SingleCellExperiment` (default), a `Seurat` object, or the raw named list
 #' of pieces (`as = "list"`) for callers that want to assemble something else.
 #'
+#' In a `SingleCellExperiment`, `X` becomes the `counts` assay and each layer
+#' an assay of its own name. When a layer is itself called `counts`, `X` is
+#' named `X` instead, so the two never share a name.
+#'
 #' Memory: this v1 materializes the X matrix in both Rust and R (~2× peak).
 #' For very large datasets prefer `convert()` (streaming, file-to-file).
 #'
@@ -311,8 +315,12 @@ uns <- function(x, key = NULL, sub_key = NULL) {
   meta_list <- .materialise_uns(parse_uns, path, raw$uns_json)
   if (!is.null(path) && !dir.exists(path)) meta_list$.uns_path <- path
 
+  # X is called "counts" unless a layer already has that name (scanpy keeps
+  # raw counts in layers$counts next to a normalised X); then X keeps its
+  # AnnData name, "X", so the assays stay distinguishable.
+  x_name <- if ("counts" %in% names(layer_assays)) "X" else "counts"
   sce <- SingleCellExperiment::SingleCellExperiment(
-    assays      = c(list(counts = m), layer_assays),
+    assays      = c(stats::setNames(list(m), x_name), layer_assays),
     colData     = S4Vectors::DataFrame(obs_df),
     rowData     = S4Vectors::DataFrame(var_df),
     reducedDims = reduced,
@@ -446,8 +454,10 @@ uns <- function(x, key = NULL, sub_key = NULL) {
   meta_list <- .materialise_uns(parse_uns, path, raw$uns_json)
   if (!is.null(path) && !dir.exists(path)) meta_list$.uns_path <- path
 
+  # Same naming rule as the eager path: X is "counts" unless a layer is.
+  x_name <- if ("counts" %in% names(raw$layers)) "X" else "counts"
   sce <- SingleCellExperiment::SingleCellExperiment(
-    assays      = list(counts = x_lazy),
+    assays      = stats::setNames(list(x_lazy), x_name),
     colData     = S4Vectors::DataFrame(obs_df),
     rowData     = S4Vectors::DataFrame(var_df),
     reducedDims = reduced,

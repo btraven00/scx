@@ -80,3 +80,13 @@ test_that("write_h5ad(slot = 'layers/counts') leaves X absent and reads back", {
                unname(as.matrix(SummarizedExperiment::assay(sce, 1))))
   expect_error(write_h5ad(sce, out, assay = 1, slot = "counts"), "layers/<name>")
 })
+
+test_that("X is named 'X' when a layer is already called 'counts'", {
+  skip_if_not_installed("SingleCellExperiment")
+  e <- expected()
+  sce <- read_h5ad(tiny("tiny.h5ad"))
+  expect_identical(SummarizedExperiment::assayNames(sce), c("X", "counts"))
+  expect_equal(unname(as.matrix(SummarizedExperiment::assay(sce, "X"))), t(e$X))
+  # A file without a counts layer keeps the conventional name.
+  expect_identical(SummarizedExperiment::assayNames(read_h5ad(tiny("tiny_10x.h5"))), "counts")
+})

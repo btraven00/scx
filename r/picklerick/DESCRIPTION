@@ -5,9 +5,11 @@ Authors@R:
     person("SCX Authors", role = c("aut", "cre"),
            email = "placeholder@example.com")
 Description: R bindings to the SCX streaming interop engine for single-cell
-    genomics. Converts between H5Seurat, H5AD, and SCX internal formats via
-    a memory-bounded streaming pipeline. Inspect file metadata without loading
-    data into memory. No Python dependency.
+    genomics. Reads AnnData (.h5ad and Zarr), H5Seurat, 10x HDF5, 10x
+    MatrixMarket and BPCells files into SingleCellExperiment or Seurat
+    objects, or wraps the matrix in a DelayedArray that reads cells on demand.
+    Converts between formats through a memory-bounded streaming pipeline and
+    inspects file metadata without loading the matrix. No Python dependency.
 License: MIT + file LICENSE
 Imports:
     methods,
@@ -21,10 +23,16 @@ Imports:
     SummarizedExperiment
 Suggests:
     HDF5Array,
+    knitr,
     rhdf5,
+    rmarkdown,
     Seurat,
     SeuratObject,
     testthat (>= 3.1.7)
+VignetteBuilder: knitr
+biocViews: SingleCell, DataImport, DataRepresentation, Software
+URL: https://github.com/btraven00/scx
+BugReports: https://github.com/btraven00/scx/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
