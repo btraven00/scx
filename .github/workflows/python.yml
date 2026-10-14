@@ -60,7 +60,7 @@ jobs:
         run: |
           for py in python3.10 python3.12 python3.14; do
             $py -m venv ".venv-$py"
-            ".venv-$py/bin/python" -m pip install python/picklerick/dist/*.whl pytest scipy
+            ".venv-$py/bin/python" -m pip install python/picklerick/dist/*.whl pytest scipy zarr
             ".venv-$py/bin/python" -m pytest python/picklerick/tests -q -rs
           done
       - uses: actions/upload-artifact@v4

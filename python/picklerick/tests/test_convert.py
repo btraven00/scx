@@ -97,7 +97,7 @@ def test_x_slot_layer_leaves_x_absent(norman, norman_path, tmp_path) -> None:
 
 
 def test_zarr_output_reads_back_with_anndata(norman, norman_path, tmp_path) -> None:
-    import zarr  # noqa: F401  (anndata needs it for read_zarr)
+    pytest.importorskip("zarr")  # anndata needs it for read_zarr
 
     out = pk.convert(norman_path, tmp_path / "out.zarr")
     assert out.is_dir()
