@@ -18,6 +18,10 @@ default = ["vendored-hdf5", "zarr"]
 vendored-hdf5 = ["scx-core/vendored-hdf5"]
 # AnnData Zarr stores (v2 and v3) as convert/inspect input.
 zarr = ["scx-core/zarr"]
+# bixverse binary sparse stores (v3 and v4) as convert/inspect input; the
+# parquet variant also reads obs.parquet / var.parquet sidecars.
+bixverse = ["scx-core/bixverse"]
+bixverse-parquet = ["scx-core/bixverse-parquet"]
 # Network-backed input (Parquet over object_store). Forwards to scx-core/net and
 # pulls a tokio runtime so cloud readers get a real reactor at the CLI entry point.
 net = ["scx-core/net", "dep:tokio"]

@@ -558,6 +558,21 @@ async fn run() -> anyhow::Result<()> {
                         }
                     }
                 }
+                #[cfg(feature = "bixverse")]
+                Some(Format::Bixverse) => {
+                    let mut r = scx_core::bixverse::BixverseReader::open(
+                        input_path,
+                        chunk,
+                        scx_core::bixverse::BixverseLayer::Raw,
+                    )?;
+                    inspect(&mut r, &input, "bixverse store").await?;
+                }
+                #[cfg(not(feature = "bixverse"))]
+                Some(Format::Bixverse) => {
+                    anyhow::bail!(
+                        "bixverse input requires building scx with the `bixverse` feature"
+                    )
+                }
                 Some(Format::PlainH5) => {
                     let nodes = walk_h5(input_path, 2)?;
                     inspect_plain_h5(&nodes, &input);

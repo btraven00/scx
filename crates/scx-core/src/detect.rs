@@ -7,6 +7,7 @@
 //! | H5AD     | Root attr `encoding-type = "anndata"` |
 //! | H5Seurat | Root dataset `cell.names` + root attr `active.assay` |
 //! | TenxH5   | `/matrix` group with `/matrix/barcodes` + `/matrix/features` |
+//! | Bixverse | File (or `counts_cells.bin` in a directory) starting with the magic `SCRNASEQ` |
 //! | ZarrAd   | Directory with `.zgroup` (Zarr v2) or `zarr.json` (Zarr v3)      |
 //! | PlainH5  | Any valid HDF5 file not matching the above |
 
@@ -35,6 +36,8 @@ pub enum Format {
     ZarrAd,
     /// R serialization stream (`saveRDS` / `save`) holding a Seurat object.
     Rds,
+    /// bixverse binary sparse store (file versions 3 and 4).
+    Bixverse,
     /// Valid HDF5 file with no recognized single-cell format fingerprint.
     PlainH5,
 }
@@ -51,6 +54,7 @@ impl Format {
             Format::Mtx => "MatrixMarket",
             Format::ZarrAd => "Zarr (AnnData)",
             Format::Rds => "RDS (Seurat)",
+            Format::Bixverse => "bixverse store",
             Format::PlainH5 => "HDF5 (unrecognized)",
         }
     }
@@ -64,6 +68,7 @@ impl Format {
 /// than re-deriving it.
 pub fn detect(path: &Path) -> Option<Format> {
     sniff_dir(path)
+        .or_else(|| sniff_bixverse(path))
         .or_else(|| sniff_mtx(path))
         .or_else(|| crate::rds::sniff(path).then_some(Format::Rds))
         .or_else(|| sniff(path))
@@ -73,6 +78,21 @@ pub fn detect(path: &Path) -> Option<Format> {
             Some("parquet") => Some(Format::Parquet),
             _ => None,
         })
+}
+
+/// Sniff a bixverse store: a file starting with the `SCRNASEQ` magic, or a
+/// directory holding such a `counts_cells.bin`.
+pub fn sniff_bixverse(path: &Path) -> Option<Format> {
+    use std::io::Read;
+
+    let bin = if path.is_dir() {
+        path.join("counts_cells.bin")
+    } else {
+        path.to_path_buf()
+    };
+    let mut magic = [0u8; 8];
+    std::fs::File::open(bin).ok()?.read_exact(&mut magic).ok()?;
+    (&magic == b"SCRNASEQ").then_some(Format::Bixverse)
 }
 
 /// Sniff a bare `.mtx[.gz]` file by its MatrixMarket banner. Directories are

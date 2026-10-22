@@ -8,6 +8,8 @@
 compile_error!("scx-core assumes a little-endian target");
 
 pub mod api;
+#[cfg(feature = "bixverse")]
+pub mod bixverse;
 pub mod bpcells;
 pub mod concat;
 pub mod detect;

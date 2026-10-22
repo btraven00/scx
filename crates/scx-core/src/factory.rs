@@ -113,6 +113,21 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
                 "'{input}' is a Zarr store, which requires building with the `zarr` feature"
             )));
         }
+        #[cfg(feature = "bixverse")]
+        Format::Bixverse => {
+            use crate::bixverse::{BixverseLayer, BixverseReader};
+            let layer = match opts.layer.as_deref() {
+                Some("norm") => BixverseLayer::Norm,
+                _ => BixverseLayer::Raw,
+            };
+            Box::new(BixverseReader::open(path, cs, layer)?)
+        }
+        #[cfg(not(feature = "bixverse"))]
+        Format::Bixverse => {
+            return Err(ScxError::InvalidFormat(format!(
+                "'{input}' is a bixverse store, which requires building with the `bixverse` feature"
+            )));
+        }
         Format::Parquet => {
             #[cfg(feature = "net")]
             {
