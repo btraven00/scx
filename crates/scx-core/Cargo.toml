@@ -41,7 +41,7 @@ net = [
 ]
 
 # bixverse binary sparse stores (file versions 3 and 4) as input. Off by
-# default: it pulls in bixverse-sc-data and with it faer and ann-search-rs.
+# default: it pulls in bixverse-sc-data and bixverse-sparse (no faer or ann-search-rs).
 bixverse = ["dep:bixverse-sc-data"]
 # Typed obs/var sidecars (obs.parquet / var.parquet) for the bixverse reader.
 # Sync reader only: no tokio or object_store, unlike `net`. Same parquet/arrow
@@ -52,7 +52,7 @@ bixverse-parquet = ["bixverse", "dep:parquet", "dep:arrow"]
 async-trait = "0.1"
 # Reads the bixverse binary sparse store (file versions 3 and 4). No `h5`
 # feature: HDF5 comes from this crate's own hdf5-metno, never a second copy.
-bixverse-sc-data = { version = "0.9", default-features = false, optional = true }
+bixverse-sc-data = { version = "0.9.1", default-features = false, optional = true }
 futures = "0.3"
 # `lzf` compiles in h5py's LZF filter (id 32000) and registers it with libhdf5
 # at init, so h5ads written with compression="lzf" read on the serial path.
