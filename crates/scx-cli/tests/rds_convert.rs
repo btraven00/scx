@@ -77,3 +77,24 @@ fn converts_double_gzipped_rds_url() {
     convert(&url, &out);
     assert_tiny(&out);
 }
+
+/// `inspect` downloads an .rds URL first, as `convert` does.
+#[cfg(feature = "net")]
+#[test]
+fn inspects_rds_url() {
+    let url = format!("file://{}", fixture().display());
+    let out = Command::new(env!("CARGO_BIN_EXE_scx"))
+        .args(["inspect", &url])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("RDS (Seurat)") && stdout.contains("6 obs"),
+        "{stdout}"
+    );
+}

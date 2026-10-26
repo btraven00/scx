@@ -106,7 +106,14 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// A downloaded copy of a remote file, deleted when dropped.
-pub(crate) struct Spool(pub(crate) std::path::PathBuf);
+pub struct Spool(pub(crate) std::path::PathBuf);
+
+impl Spool {
+    /// Where the copy is on disk.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
 
 impl Drop for Spool {
     fn drop(&mut self) {
@@ -114,11 +121,12 @@ impl Drop for Spool {
     }
 }
 
-/// Download `url` (any object-store location) to a temporary file.
+/// Download `url` (any object-store location) to a temporary file, deleted
+/// when the returned [`Spool`] is dropped.
 // ponytail: one full download before parsing; stream it straight into the
 // skeleton pass if remote .rds files get big enough for the wait to matter.
 #[cfg(feature = "net")]
-pub(crate) async fn spool(url: &str) -> Result<Spool> {
+pub async fn spool(url: &str) -> Result<Spool> {
     use futures::StreamExt;
     use object_store::ObjectStoreExt;
     use std::io::Write;
