@@ -37,6 +37,7 @@ build can opt out with `--no-default-features` — see
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
 | MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
 | Parquet, local or S3/GCS/HTTP (build with `--features net`) | ✓ | |
+| Seurat `.rds` / `.rda` (counts + meta.data; v3/v4 `Assay`, v5 `Assay5`; URLs with `--features net`) | ✓ | |
 
 Any readable format converts to any writable one: everything goes through a
 single internal representation. Input is detected by content; output by

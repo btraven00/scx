@@ -33,6 +33,8 @@ pub enum Format {
     Mtx,
     /// AnnData Zarr store (v2 or v3): a directory with `.zgroup` / `zarr.json`.
     ZarrAd,
+    /// R serialization stream (`saveRDS` / `save`) holding a Seurat object.
+    Rds,
     /// Valid HDF5 file with no recognized single-cell format fingerprint.
     PlainH5,
 }
@@ -48,6 +50,7 @@ impl Format {
             Format::Parquet => "Parquet",
             Format::Mtx => "MatrixMarket",
             Format::ZarrAd => "Zarr (AnnData)",
+            Format::Rds => "RDS (Seurat)",
             Format::PlainH5 => "HDF5 (unrecognized)",
         }
     }
@@ -62,6 +65,7 @@ impl Format {
 pub fn detect(path: &Path) -> Option<Format> {
     sniff_dir(path)
         .or_else(|| sniff_mtx(path))
+        .or_else(|| crate::rds::sniff(path).then_some(Format::Rds))
         .or_else(|| sniff(path))
         .or_else(|| match path.extension().and_then(|e| e.to_str()) {
             Some("h5seurat") => Some(Format::H5Seurat),

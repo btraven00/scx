@@ -31,6 +31,7 @@ pub mod npy;
 #[cfg(feature = "net")]
 pub mod parquet;
 pub mod provenance;
+pub mod rds;
 pub mod sparse;
 pub mod stream;
 pub mod tenx;

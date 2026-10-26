@@ -525,6 +525,15 @@ async fn run() -> anyhow::Result<()> {
                     let mut r = scx_core::mtx::MtxReader::open(input_path, chunk)?;
                     inspect(&mut r, &input, "MatrixMarket").await?;
                 }
+                Some(Format::Rds) => {
+                    let mut r = scx_core::rds::RdsSeuratReader::open(
+                        input_path,
+                        chunk,
+                        None,
+                        layer.as_deref(),
+                    )?;
+                    inspect(&mut r, &input, "RDS (Seurat)").await?;
+                }
                 Some(Format::PlainH5) => {
                     let nodes = walk_h5(input_path, 2)?;
                     inspect_plain_h5(&nodes, &input);

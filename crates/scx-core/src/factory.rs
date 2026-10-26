@@ -23,7 +23,8 @@ use crate::tenx::TenxH5Reader;
 pub struct OpenOptions {
     /// Cells per streaming chunk.
     pub chunk_size: usize,
-    /// H5Seurat assay (default "RNA" when `None`).
+    /// H5Seurat assay (default "RNA" when `None`); for a Seurat `.rds`, the
+    /// object's active assay when `None`.
     pub assay: Option<String>,
     /// H5Seurat layer (default "counts" when `None`).
     pub layer: Option<String>,
@@ -58,10 +59,20 @@ impl Default for OpenOptions {
 /// Detect the format of `input` and open the matching [`DatasetReader`].
 ///
 /// `input` is a filesystem path, or — with the `net` feature — an object-store
-/// URL (`s3://`, `https://`, …) which is routed to the Parquet reader.
+/// URL (`s3://`, `https://`, …): an `.rds`/`.rda` URL is downloaded and read as
+/// a Seurat object, anything else is routed to the Parquet reader.
 pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetReader + Send>> {
     #[cfg(feature = "net")]
     if crate::net::is_network_url(input) {
+        if crate::rds::is_rds_name(input) {
+            let spool = crate::rds::spool(input).await?;
+            return Ok(Box::new(crate::rds::RdsSeuratReader::open_spooled(
+                spool,
+                opts.chunk_size,
+                opts.assay.as_deref(),
+                opts.layer.as_deref(),
+            )?));
+        }
         return open_parquet(input, opts).await;
     }
 
@@ -79,6 +90,12 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
             Box::new(BpcellsDatasetReader::open_metadata_only(path)?)
         }
         Format::BPCells => Box::new(BpcellsDatasetReader::open(path, cs)?),
+        Format::Rds => Box::new(crate::rds::RdsSeuratReader::open(
+            path,
+            cs,
+            opts.assay.as_deref(),
+            opts.layer.as_deref(),
+        )?),
         Format::H5Seurat => open_h5seurat(path, cs, opts.assay.as_deref(), opts.layer.as_deref())?,
         #[cfg(feature = "zarr")]
         Format::ZarrAd => Box::new(crate::zarr_ad::ZarrAdReader::open(path, cs)?),
