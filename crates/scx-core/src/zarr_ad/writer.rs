@@ -284,9 +284,16 @@ fn write_column(store: &Store, path: &str, col: &Column) -> Result<()> {
         (ColumnData::String(v), None) => {
             write_strings(store, path, v, encoding("string-array", "0.2.0"))
         }
-        (ColumnData::Categorical { codes, levels }, _) => {
+        (
+            ColumnData::Categorical {
+                codes,
+                levels,
+                ordered,
+            },
+            _,
+        ) => {
             let mut attrs = encoding("categorical", "0.2.0");
-            attrs.insert("ordered".into(), json!(false));
+            attrs.insert("ordered".into(), json!(ordered));
             create_group(store, path, attrs)?;
             // NA is code -1; codes are the narrowest signed int holding every
             // level index (as h5ad).

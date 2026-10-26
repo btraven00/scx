@@ -785,7 +785,7 @@ fn test_categorical_int64_levels() {
     // codes index into integer levels [10, 20, 30].
     let file = write_cat_group::<i64>(tmp.path(), &[0, 2, 1, 0], &[10, 20, 30]);
     match ad_read_categorical(&file, "col").unwrap().0 {
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical { codes, levels, .. } => {
             assert_eq!(levels, vec!["10", "20", "30"]);
             assert_eq!(codes, vec![0, 2, 1, 0]);
         }
@@ -798,7 +798,7 @@ fn test_categorical_uint32_levels() {
     let tmp = NamedTempFile::with_suffix(".h5").unwrap();
     let file = write_cat_group::<u32>(tmp.path(), &[1, 0], &[100u32, 200u32]);
     match ad_read_categorical(&file, "col").unwrap().0 {
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical { codes, levels, .. } => {
             assert_eq!(levels, vec!["100", "200"]);
             assert_eq!(codes, vec![1, 0]);
         }
@@ -820,7 +820,7 @@ fn test_categorical_string_levels_unchanged() {
         .unwrap();
     write_strings(&grp, "categories", &["a".into(), "b".into()]).unwrap();
     match ad_read_categorical(&file, "col").unwrap().0 {
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical { codes, levels, .. } => {
             assert_eq!(levels, vec!["a", "b"]);
             assert_eq!(codes, vec![0, 1, 0]);
         }
@@ -944,6 +944,7 @@ async fn synthetic_roundtrip_all_slots() {
                 ColumnData::Categorical {
                     codes: (0..n_obs as u32).map(|i| i % 3).collect(),
                     levels: vec!["A".into(), "B".into(), "C".into()],
+                    ordered: false,
                 },
             ),
         ],
@@ -1112,6 +1113,7 @@ async fn write_synthetic_compressed(compression: Option<u8>) -> NamedTempFile {
                 ColumnData::Categorical {
                     codes: (0..n_obs as u32).map(|i| i % 3).collect(),
                     levels: vec!["A".into(), "B".into(), "C".into()],
+                    ordered: false,
                 },
             ),
         ],
@@ -1592,6 +1594,7 @@ async fn categorical_codes_wider_than_i16_are_not_truncated() {
             ColumnData::Categorical {
                 codes: codes.clone(),
                 levels: levels.clone(),
+                ordered: false,
             },
         )],
     };
@@ -1631,6 +1634,7 @@ async fn categorical_codes_wider_than_i16_are_not_truncated() {
         ColumnData::Categorical {
             codes: rc,
             levels: rl,
+            ..
         } => {
             assert_eq!(rl.len(), levels.len(), "level count must round-trip");
             assert_eq!(rc, &codes, "codes must round-trip exactly, not wrap");
@@ -1680,6 +1684,7 @@ async fn categorical_codes_stay_narrow_for_small_level_counts() {
                 ColumnData::Categorical {
                     codes: (0..n_obs as u32).collect(),
                     levels: (0..n_levels).map(|i| format!("l{i}")).collect(),
+                    ordered: false,
                 },
             )],
         };
@@ -2049,7 +2054,7 @@ async fn legacy_categories_group_decodes_as_categorical() {
     let gene = &var.columns[0];
     assert_eq!(gene.name, "gene_name");
     match &gene.data {
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical { codes, levels, .. } => {
             assert_eq!(levels, &["LINC01409", "NOC2L"]);
             assert_eq!(codes, &[1, 0, 0]);
         }

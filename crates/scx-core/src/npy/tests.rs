@@ -24,6 +24,7 @@ fn synthetic_dataset() -> SingleCellDataset {
                 ColumnData::Categorical {
                     codes: vec![0, 1, 0],
                     levels: vec!["A".into(), "B".into()],
+                    ordered: false,
                 },
             ),
             Column::new(
@@ -147,10 +148,12 @@ fn test_full_roundtrip() {
                 ColumnData::Categorical {
                     codes: ca,
                     levels: la,
+                    ..
                 },
                 ColumnData::Categorical {
                     codes: cb,
                     levels: lb,
+                    ..
                 },
             ) => {
                 assert_eq!(ca, cb);

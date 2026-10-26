@@ -567,7 +567,16 @@ fn read_categorical(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)
             .map(|v| v.to_string())
             .collect()
     };
-    Ok((ColumnData::Categorical { codes, levels }, missing))
+    let ordered = matches!(node(store, path), Some(Node::Group(a))
+        if a.get("ordered").and_then(Value::as_bool) == Some(true));
+    Ok((
+        ColumnData::Categorical {
+            codes,
+            levels,
+            ordered,
+        },
+        missing,
+    ))
 }
 
 /// `values` + `mask` (mask true = NA), as for pandas' nullable dtypes.

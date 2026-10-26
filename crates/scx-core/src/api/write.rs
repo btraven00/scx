@@ -1028,6 +1028,7 @@ mod tests {
                     ColumnData::Categorical {
                         codes: vec![0, 1, 0, 2, 1, 2],
                         levels: vec!["A".into(), "B".into(), "C".into()],
+                        ordered: false,
                     },
                 ),
             ],
@@ -1068,7 +1069,7 @@ mod tests {
         // h5ad encodes plain strings as categorical on disk; accept either.
         let materialized_batch: Vec<String> = match &batch.data {
             ColumnData::String(v) => v.clone(),
-            ColumnData::Categorical { codes, levels } => {
+            ColumnData::Categorical { codes, levels, .. } => {
                 codes.iter().map(|&c| levels[c as usize].clone()).collect()
             }
             other => panic!("batch wrong type: {}", other.dtype_str()),
@@ -1080,7 +1081,7 @@ mod tests {
             .find(|c| c.name == "cluster")
             .expect("cluster");
         match &cluster.data {
-            ColumnData::Categorical { codes, levels } => {
+            ColumnData::Categorical { codes, levels, .. } => {
                 assert_eq!(codes, &vec![0u32, 1, 0, 2, 1, 2]);
                 assert_eq!(levels, &vec!["A".to_string(), "B".into(), "C".into()]);
             }

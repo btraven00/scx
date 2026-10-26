@@ -315,15 +315,30 @@ fn read_int_column(ds: &hdf5::Dataset) -> Result<ColumnData> {
     })
 }
 
-/// Read a categorical group: codes (i8 or i16) + categories (string-array).
-/// Read a categorical group. Code -1 is NA: it becomes code 0 with
+/// Read a categorical group: codes (i8 or i16) + categories (string-array),
+/// and the group's `ordered` attribute. Code -1 is NA: it becomes code 0 with
 /// `missing[i] == true`.
 pub(super) fn ad_read_categorical(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
-    ad_read_categorical_at(
+    let (mut data, missing) = ad_read_categorical_at(
         file,
         &format!("{grp_path}/codes"),
         &format!("{grp_path}/categories"),
-    )
+    )?;
+    if let ColumnData::Categorical { ordered, .. } = &mut data {
+        *ordered = read_ordered_attr(&file.group(grp_path)?);
+    }
+    Ok((data, missing))
+}
+
+/// The categorical `ordered` attribute: h5py writes a numpy bool (an HDF5
+/// enum), scx used to write a u8. Absent means unordered.
+fn read_ordered_attr(grp: &Group) -> bool {
+    let Ok(a) = grp.attr("ordered") else {
+        return false;
+    };
+    a.read_scalar::<bool>()
+        .or_else(|_| a.read_scalar::<u8>().map(|x| x != 0))
+        .unwrap_or(false)
 }
 
 /// [`ad_read_categorical`] with the codes and categories datasets named
@@ -355,7 +370,14 @@ fn ad_read_categorical_at(
     let levels = ad_read_levels(file, categories_path)?;
     let missing: Vec<bool> = raw.iter().map(|&c| c < 0).collect();
     let codes = raw.iter().map(|&c| c.max(0) as u32).collect();
-    Ok((ColumnData::Categorical { codes, levels }, missing))
+    Ok((
+        ColumnData::Categorical {
+            codes,
+            levels,
+            ordered: false,
+        },
+        missing,
+    ))
 }
 
 /// Read a categorical `categories` dataset as level labels. AnnData usually

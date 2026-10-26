@@ -71,7 +71,11 @@ pub fn reindex_column(col: &Column, reindex: &[Option<usize>]) -> Column {
                 .map(|r| r.map(|i| v[i].clone()).unwrap_or_default())
                 .collect(),
         ),
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical {
+            codes,
+            levels,
+            ordered,
+        } => {
             let new_codes = reindex
                 .iter()
                 .map(|r| r.map(|i| codes[i]).unwrap_or(0))
@@ -79,6 +83,7 @@ pub fn reindex_column(col: &Column, reindex: &[Option<usize>]) -> Column {
             ColumnData::Categorical {
                 codes: new_codes,
                 levels: levels.clone(),
+                ordered: *ordered,
             }
         }
     };
@@ -162,13 +167,19 @@ mod tests {
             ColumnData::Categorical {
                 codes: vec![0, 1, 0],
                 levels: vec!["A".to_string(), "B".to_string()],
+                ordered: true,
             },
         );
         let ri = vec![Some(2), None, Some(0)];
         let out = reindex_column(&col, &ri);
         assert!(out.is_na(1));
         match out.data {
-            ColumnData::Categorical { codes, levels } => {
+            ColumnData::Categorical {
+                codes,
+                levels,
+                ordered,
+            } => {
+                assert!(ordered);
                 assert_eq!(codes, vec![0, 0, 0]); // patch[2]=0, NA→0, patch[0]=0
                 assert_eq!(levels, vec!["A", "B"]);
             }

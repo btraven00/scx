@@ -595,12 +595,19 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
             let ds = write_strings(grp, name, v)?;
             write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
         }
-        (ColumnData::Categorical { codes, levels }, _) => {
+        (
+            ColumnData::Categorical {
+                codes,
+                levels,
+                ordered,
+            },
+            _,
+        ) => {
             let cat_grp = grp.create_group(name)?;
             write_encoding_on_group(&cat_grp, "categorical", "0.2.0")?;
-            // ordered = false (stored as uint8 boolean)
+            // Stored as a uint8 0/1, which anndata reads with bool().
             let attr = cat_grp.new_attr::<u8>().create("ordered")?;
-            attr.write_scalar(&0u8)?;
+            attr.write_scalar(&u8::from(*ordered))?;
 
             // Codes are written as the narrowest signed integer that can hold
             // every level index. Signed because AnnData reserves -1 for NA.

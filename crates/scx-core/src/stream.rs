@@ -292,6 +292,7 @@ mod tests {
                     ColumnData::Categorical {
                         codes: vec![0, 1, 0, 1],
                         levels: vec!["A549".into(), "MCF7".into()],
+                        ordered: false,
                     },
                 ),
                 Column::with_missing(

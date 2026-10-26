@@ -414,7 +414,7 @@ pub(super) fn write_col(col_dir: &Path, col: &Column) -> Result<()> {
         ColumnData::Float(v) => write_1d_f64(&col_dir.join(format!("{}.npy", col.name)), v)?,
         ColumnData::Bool(v) => write_1d_bool(&col_dir.join(format!("{}.npy", col.name)), v)?,
         ColumnData::String(v) => write_txt(&col_dir.join(format!("{}_strings.txt", col.name)), v)?,
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical { codes, levels, .. } => {
             write_1d_u32(&col_dir.join(format!("{}_codes.npy", col.name)), codes)?;
             write_txt(&col_dir.join(format!("{}_levels.txt", col.name)), levels)?;
         }
@@ -435,7 +435,11 @@ pub(super) fn read_col(col_dir: &Path, name: &str, cm: &ColumnMeta) -> Result<Co
         "categorical" => {
             let codes = read_1d_u32(&col_dir.join(format!("{name}_codes.npy")))?;
             let levels = read_txt(&col_dir.join(format!("{name}_levels.txt")))?;
-            ColumnData::Categorical { codes, levels }
+            ColumnData::Categorical {
+                codes,
+                levels,
+                ordered: cm.ordered,
+            }
         }
         other => {
             return Err(ScxError::InvalidFormat(format!(

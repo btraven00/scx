@@ -380,7 +380,11 @@ fn robj_to_column_data(name: &str, obj: &Robj) -> Result<ColumnData> {
             .into_iter()
             .map(|x| if x < 1 { 0u32 } else { (x - 1) as u32 })
             .collect();
-        return Ok(ColumnData::Categorical { codes, levels });
+        return Ok(ColumnData::Categorical {
+            codes,
+            levels,
+            ordered: obj.inherits("ordered"),
+        });
     }
     if let Some(v) = obj.as_logical_slice() {
         let bools: Vec<bool> = v.iter().map(|b| b.is_true()).collect();
@@ -884,7 +888,7 @@ fn columns_to_robj(cols: Vec<Column>) -> Robj {
             ColumnData::Float(v)  => v.into_robj(),
             ColumnData::Bool(v)   => v.into_robj(),
             ColumnData::String(v) => v.into_robj(),
-            ColumnData::Categorical { codes, levels } => {
+            ColumnData::Categorical { codes, levels, ordered } => {
                 // R factor: 1-based integer codes, written straight into the
                 // INTSXP (no intermediate Vec<i32>). NA sentinel = code 0
                 // → level 1 (we have no NA from IR).
@@ -895,7 +899,8 @@ fn columns_to_robj(cols: Vec<Column>) -> Robj {
                 }
                 let mut robj = ints.into_robj();
                 let _ = robj.set_attrib("levels", levels);
-                let _ = robj.set_attrib("class", "factor");
+                let class: &[&str] = if ordered { &["ordered", "factor"] } else { &["factor"] };
+                let _ = robj.set_attrib("class", class);
                 robj
             }
         };

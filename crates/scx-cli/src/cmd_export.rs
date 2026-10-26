@@ -108,7 +108,7 @@ fn column_data_to_column(col: &scx_core::ir::Column) -> anyhow::Result<Column> {
         ColumnData::Float(v) => Column::new(name, opt(col, v)),
         ColumnData::String(v) => Column::new(name, opt(col, v)),
         ColumnData::Bool(v) => Column::new(name, opt(col, v)),
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical { codes, levels, .. } => {
             let decoded: Vec<&str> = codes
                 .iter()
                 .map(|&c| levels.get(c as usize).map(|s| s.as_str()).unwrap_or(""))

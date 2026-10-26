@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ir::ColumnData;
+use crate::ir::{Column, ColumnData};
 
 // ---------------------------------------------------------------------------
 // Slot filter
@@ -92,6 +92,27 @@ pub(super) struct ColumnMeta {
     pub(super) shape: [usize; 1],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) n_levels: Option<usize>,
+    /// Categorical level order is meaningful; absent means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) ordered: bool,
+}
+
+impl ColumnMeta {
+    pub(super) fn of(col: &Column) -> Self {
+        let (n_levels, ordered) = match &col.data {
+            ColumnData::Categorical {
+                levels, ordered, ..
+            } => (Some(levels.len()), *ordered),
+            _ => (None, false),
+        };
+        Self {
+            name: col.name.clone(),
+            kind: col_kind(&col.data).to_string(),
+            shape: [col.data.len()],
+            n_levels,
+            ordered,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,6 +199,7 @@ mod tests {
             col_kind(&ColumnData::Categorical {
                 codes: vec![0],
                 levels: vec!["a".into()],
+                ordered: false,
             }),
             "categorical"
         );

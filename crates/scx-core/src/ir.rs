@@ -101,6 +101,8 @@ pub enum ColumnData {
     Categorical {
         codes: Vec<u32>,
         levels: Vec<String>,
+        /// Level order is meaningful (pandas `ordered=True`, R `ordered`).
+        ordered: bool,
     },
 }
 
@@ -140,7 +142,7 @@ impl ColumnData {
             ColumnData::Float(v) => v[i].to_string(),
             ColumnData::String(v) => v[i].clone(),
             ColumnData::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
-            ColumnData::Categorical { codes, levels } => levels[codes[i] as usize].clone(),
+            ColumnData::Categorical { codes, levels, .. } => levels[codes[i] as usize].clone(),
         }
     }
 }
@@ -261,6 +263,7 @@ mod tests {
                 ColumnData::Categorical {
                     codes: vec![0, 1],
                     levels: vec!["x".into(), "y".into()],
+                    ordered: false,
                 },
                 2,
                 "categorical",

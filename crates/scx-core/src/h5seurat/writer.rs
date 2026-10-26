@@ -298,7 +298,9 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
         ColumnData::String(v) => {
             write_strings(grp, name, v)?;
         }
-        ColumnData::Categorical { codes, levels } => {
+        // SeuratDisk saves any factor as values + levels; `ordered` has no
+        // H5Seurat encoding and is dropped.
+        ColumnData::Categorical { codes, levels, .. } => {
             let col_grp = grp.create_group(name)?;
             // 1-based codes, NA_integer_ for missing.
             let values = codes

@@ -1782,6 +1782,7 @@ mod tests {
                     ColumnData::Categorical {
                         codes: vec![0, 1, 0],
                         levels: vec!["T cell".into(), "B cell".into()],
+                        ordered: false,
                     },
                 ),
             ],
@@ -1856,7 +1857,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "cell_type")
             .expect("cell_type column missing");
-        if let ColumnData::Categorical { codes, levels } = &ct.data {
+        if let ColumnData::Categorical { codes, levels, .. } = &ct.data {
             assert_eq!(codes, &[0u32, 1, 0], "cell_type codes mismatch");
             assert_eq!(levels, &["T cell", "B cell"], "cell_type levels mismatch");
         } else {

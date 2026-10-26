@@ -289,7 +289,15 @@ fn read_factor_column(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bo
         .iter()
         .map(|&v| if v < 1 { 0 } else { v as u32 - 1 })
         .collect();
-    Ok((ColumnData::Categorical { codes, levels }, missing))
+    // SeuratDisk writes no ordered flag.
+    Ok((
+        ColumnData::Categorical {
+            codes,
+            levels,
+            ordered: false,
+        },
+        missing,
+    ))
 }
 
 fn read_logical_column(file: &File, ds_path: &str) -> Result<(ColumnData, Vec<bool>)> {

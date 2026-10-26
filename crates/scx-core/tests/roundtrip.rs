@@ -510,7 +510,6 @@ fn ordered_on_disk(path: &Path, col: &str) -> bool {
 }
 
 #[tokio::test]
-#[ignore = "bug: categoricals carry no ordered flag; writers always write ordered=false"]
 async fn h5ad_and_zarr_keep_ordered_categorical() {
     let dir = tempfile::tempdir().unwrap();
     for (w, path) in h5ad_and_zarr_writers(dir.path()) {

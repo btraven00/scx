@@ -370,6 +370,7 @@ fn test_merge_create_obs_column() {
                 ColumnData::Categorical {
                     codes: vec![0, 1, 0, 1, 2, 0],
                     levels: vec!["A".into(), "B".into(), "C".into()],
+                    ordered: false,
                 },
             )],
         );
@@ -839,6 +840,7 @@ fn test_export_obs_csv() {
                     ColumnData::Categorical {
                         codes: vec![0, 0, 1, 2, 1],
                         levels: vec!["T".into(), "B".into(), "NK".into()],
+                        ordered: false,
                     },
                 ),
             ],

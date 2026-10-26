@@ -222,7 +222,7 @@ fn concat_outer_join_realigns_genes_and_labels_cells() {
 
     let label = obs.columns.iter().find(|c| c.name == "sample").unwrap();
     match &label.data {
-        ColumnData::Categorical { codes, levels } => {
+        ColumnData::Categorical { codes, levels, .. } => {
             assert_eq!(levels, &vec!["a".to_string(), "b".to_string()]);
             assert_eq!(codes, &vec![0, 0, 1]);
         }

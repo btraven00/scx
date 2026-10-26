@@ -8,7 +8,7 @@ use futures::StreamExt;
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
-    ir::{ColumnData, SingleCellDataset, SparseMatrixMeta},
+    ir::{SingleCellDataset, SparseMatrixMeta},
     stream::DatasetReader,
 };
 
@@ -64,16 +64,7 @@ impl NpyIrWriter {
             if filter.includes(&format!("obs:{}", col.name)) {
                 fs::create_dir_all(&od)?;
                 write_col(&od, col)?;
-                meta.obs.push(ColumnMeta {
-                    name: col.name.clone(),
-                    kind: col_kind(&col.data).to_string(),
-                    shape: [col.data.len()],
-                    n_levels: if let ColumnData::Categorical { levels, .. } = &col.data {
-                        Some(levels.len())
-                    } else {
-                        None
-                    },
-                });
+                meta.obs.push(ColumnMeta::of(col));
             }
         }
 
@@ -83,16 +74,7 @@ impl NpyIrWriter {
             if filter.includes(&format!("var:{}", col.name)) {
                 fs::create_dir_all(&vd)?;
                 write_col(&vd, col)?;
-                meta.var.push(ColumnMeta {
-                    name: col.name.clone(),
-                    kind: col_kind(&col.data).to_string(),
-                    shape: [col.data.len()],
-                    n_levels: if let ColumnData::Categorical { levels, .. } = &col.data {
-                        Some(levels.len())
-                    } else {
-                        None
-                    },
-                });
+                meta.var.push(ColumnMeta::of(col));
             }
         }
 
@@ -222,16 +204,7 @@ impl NpyIrWriter {
             if filter.includes(&format!("obs:{}", col.name)) {
                 fs::create_dir_all(&od)?;
                 write_col(&od, col)?;
-                meta.obs.push(ColumnMeta {
-                    name: col.name.clone(),
-                    kind: col_kind(&col.data).to_string(),
-                    shape: [col.data.len()],
-                    n_levels: if let ColumnData::Categorical { levels, .. } = &col.data {
-                        Some(levels.len())
-                    } else {
-                        None
-                    },
-                });
+                meta.obs.push(ColumnMeta::of(col));
             }
         }
 
@@ -240,16 +213,7 @@ impl NpyIrWriter {
             if filter.includes(&format!("var:{}", col.name)) {
                 fs::create_dir_all(&vd)?;
                 write_col(&vd, col)?;
-                meta.var.push(ColumnMeta {
-                    name: col.name.clone(),
-                    kind: col_kind(&col.data).to_string(),
-                    shape: [col.data.len()],
-                    n_levels: if let ColumnData::Categorical { levels, .. } = &col.data {
-                        Some(levels.len())
-                    } else {
-                        None
-                    },
-                });
+                meta.var.push(ColumnMeta::of(col));
             }
         }
 

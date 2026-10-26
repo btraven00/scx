@@ -515,6 +515,7 @@ fn build_obs(
             ColumnData::Categorical {
                 codes,
                 levels: keys.to_vec(),
+                ordered: false,
             },
         ));
     }
@@ -632,10 +633,20 @@ fn concat_data(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
             ColumnData::String(out)
         }
         Kind::Cat => {
+            // Order survives only when every input is ordered over the same
+            // levels, as in pandas.
+            let first_levels = match cols.iter().flatten().next() {
+                Some(ColumnData::Categorical { levels, .. }) => Some(levels),
+                _ => None,
+            };
+            let ordered = cols.iter().flatten().all(|c| {
+                matches!(c, ColumnData::Categorical { levels, ordered: true, .. }
+                    if Some(levels) == first_levels)
+            });
             let mut b = CatBuilder::default();
             for (c, &n) in cols.iter().zip(lens) {
                 match c {
-                    Some(ColumnData::Categorical { codes, levels }) => {
+                    Some(ColumnData::Categorical { codes, levels, .. }) => {
                         let remap: Vec<u32> = levels.iter().map(|l| b.level(l)).collect();
                         // A masked code is a placeholder; any in-range value will do.
                         b.codes.extend(
@@ -656,6 +667,7 @@ fn concat_data(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
             ColumnData::Categorical {
                 codes: b.codes,
                 levels: b.levels,
+                ordered,
             }
         }
     }
@@ -700,7 +712,7 @@ fn col_str(c: &ColumnData) -> Vec<String> {
             .iter()
             .map(|&x| if x { "True" } else { "False" }.to_string())
             .collect(),
-        ColumnData::Categorical { codes, levels } => codes
+        ColumnData::Categorical { codes, levels, .. } => codes
             .iter()
             .map(|&c| levels.get(c as usize).cloned().unwrap_or_default())
             .collect(),
@@ -944,6 +956,7 @@ mod tests {
             ColumnData::Categorical {
                 codes: vec![0, 1],
                 levels: sv(&["x", "y"]),
+                ordered: false,
             },
             [false, true],
         );
@@ -951,7 +964,7 @@ mod tests {
         let (data, missing) = concat_column(&[Some(&a), Some(&b), None], &[2, 2, 1]);
         assert_eq!(missing, [false, true, false, false, true]);
         match data {
-            ColumnData::Categorical { codes, levels } => {
+            ColumnData::Categorical { codes, levels, .. } => {
                 assert_eq!(levels, sv(&["x", "y", "z"]), "no spurious \"NA\" level");
                 assert_eq!([codes[0], codes[2], codes[3]], [0, 1, 2]);
             }
