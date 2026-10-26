@@ -18,6 +18,7 @@
                             ordered categorical, int64 beyond i32, nullable
                             string with NA, non-ASCII level, duplicate var
                             names, a dense and a CSC layer
+    tiny_edge.zarr          the same AnnData as a Zarr v3 store
 
 tiny_v4.h5seurat also carries a second assay (ADT, 2 features x 6 cells) that
 an RNA-only conversion drops.
@@ -36,6 +37,7 @@ usage: pixi run -e py make-tiny-fixtures
 
 import gzip
 import json
+import shutil
 from pathlib import Path
 
 import anndata as ad
@@ -178,6 +180,8 @@ def write_edge_h5ad():
     a.layers["csc"] = sp.csc_matrix(X)
     ad.settings.allow_write_nullable_strings = True  # else "note" becomes categorical
     a.write_h5ad(OUT / "tiny_edge.h5ad", convert_strings_to_categoricals=False)
+    shutil.rmtree(OUT / "tiny_edge.zarr", ignore_errors=True)
+    a.write_zarr(OUT / "tiny_edge.zarr", convert_strings_to_categoricals=False)
 
 
 def write_10x():

@@ -444,14 +444,38 @@ async fn edge_int64_obs_column() {
     assert_eq!(got, want);
 }
 
-/// One CSC layer fails `layer_metas` for the whole file, so converting
-/// tiny_edge.h5ad errors (clearly) rather than dropping or transposing it.
+/// Regression: one CSC layer failed `layer_metas` for the whole file, so
+/// tiny_edge could not be converted at all, even with `--exclude layers`.
+/// The CSC layer now reads like its dense twin, from h5ad and from Zarr.
 #[tokio::test]
-async fn edge_csc_layer_is_an_error() {
-    let err = open("tiny_edge.h5ad")
-        .await
-        .layer_metas()
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("CSC"), "{err}");
+async fn edge_csc_layer_reads_like_dense() {
+    let e = &expected()["edge"];
+    let names: &[&str] = if cfg!(feature = "zarr") {
+        &["tiny_edge.h5ad", "tiny_edge.zarr"]
+    } else {
+        &["tiny_edge.h5ad"]
+    };
+    for name in names {
+        let mut r = open(name).await;
+        let metas = r.layer_metas().await.unwrap();
+        for layer in ["csc", "dense"] {
+            let meta = metas.iter().find(|m| m.name == layer).expect(layer);
+            let mut dense = vec![vec![0.0; meta.shape.1]; meta.shape.0];
+            let mut stream = r.layer_stream(meta, 4);
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.unwrap();
+                let values = chunk.data.data.to_f64();
+                for row in 0..chunk.nrows {
+                    let (a, b) = (
+                        chunk.data.indptr[row] as usize,
+                        chunk.data.indptr[row + 1] as usize,
+                    );
+                    for k in a..b {
+                        dense[chunk.row_offset + row][chunk.data.indices[k] as usize] = values[k];
+                    }
+                }
+            }
+            assert_eq!(dense, matrix(&e["layers"][layer]), "{name}: layer {layer}");
+        }
+    }
 }

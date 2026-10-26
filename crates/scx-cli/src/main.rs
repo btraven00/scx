@@ -850,8 +850,18 @@ async fn convert_with_reader(
         }
     }
 
-    let layer_metas = reader.layer_metas().await?;
-    let obsp_metas = reader.obsp_metas().await?;
+    // An excluded slot is not read at all, so a matrix scx cannot read there
+    // never blocks the conversion.
+    let layer_metas = if filter.includes_any("layers") {
+        reader.layer_metas().await?
+    } else {
+        Vec::new()
+    };
+    let obsp_metas = if filter.includes_any("obsp") {
+        reader.obsp_metas().await?
+    } else {
+        Vec::new()
+    };
 
     // Resolve the effective X slot.
     // H5Seurat auto: if source has a "counts" layer, X is assumed normalised → goes to "data".

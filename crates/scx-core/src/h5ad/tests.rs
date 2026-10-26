@@ -1736,25 +1736,79 @@ fn file_with_x(path: &std::path::Path) -> File {
     f
 }
 
-/// Regression: only X rejected CSC. A CSC layer or obsp matrix was read as
-/// CSR, i.e. silently transposed garbage.
-#[tokio::test]
-async fn csc_layer_and_obsp_are_rejected() {
+/// CSC X is refused at open: X streams by row range from the file, and
+/// reading CSC storage that way would transpose it silently.
+#[test]
+fn csc_x_is_refused() {
     let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
     {
-        let f = file_with_x(tmp.path());
-        for slot in ["layers", "obsp"] {
-            let g = f.create_group(slot).unwrap();
-            write_csr_group(&g, "m", (2, 2), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
-            crate::h5_str::write_str_attr(&g.group("m").unwrap(), "encoding-type", "csc_matrix")
-                .unwrap();
-        }
+        let f = File::create(tmp.path()).unwrap();
+        write_csr_group(&f, "X", (2, 2), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+        crate::h5_str::write_str_attr(&f.group("X").unwrap(), "encoding-type", "csc_matrix")
+            .unwrap();
     }
-    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
-    let err = r.layer_metas().await.expect_err("CSC layer read as CSR");
+    let err = H5AdReader::open(tmp.path(), 2).err().expect("CSC X opened");
     assert!(err.to_string().contains("CSC"), "{err}");
-    let err = r.obsp_metas().await.expect_err("CSC obsp read as CSR");
-    assert!(err.to_string().contains("CSC"), "{err}");
+}
+
+/// Regression: a CSC layer or obsp matrix was first read as CSR (silently
+/// transposed), then rejected, which failed the whole file. Both now read as
+/// the matrix they store. The 2x3 matrix [[1, 0, 2], [0, 3, 0]] is stored by
+/// column, so rows and columns differ in count.
+#[tokio::test]
+async fn csc_layer_and_obsp_read_transposed_correctly() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        write_csr_group(&f, "X", (2, 3), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+        let g = f.create_group("layers").unwrap();
+        write_csr_group(&g, "m", (2, 3), &[0, 1, 2, 3], &[0, 1, 0], &[1.0, 3.0, 2.0]);
+        crate::h5_str::write_str_attr(&g.group("m").unwrap(), "encoding-type", "csc_matrix")
+            .unwrap();
+        let g = f.create_group("obsp").unwrap();
+        // [[0, 5], [6, 0]] by column
+        write_csr_group(&g, "m", (2, 2), &[0, 1, 2], &[1, 0], &[6.0, 5.0]);
+        crate::h5_str::write_str_attr(&g.group("m").unwrap(), "encoding-type", "csc_matrix")
+            .unwrap();
+    }
+    let mut r = H5AdReader::open(tmp.path(), 1).unwrap();
+    let rows = |chunks: Vec<crate::ir::MatrixChunk>| -> Vec<(Vec<u32>, Vec<f64>)> {
+        chunks
+            .iter()
+            .flat_map(|c| {
+                (0..c.nrows).map(move |k| {
+                    let (a, b) = (c.data.indptr[k] as usize, c.data.indptr[k + 1] as usize);
+                    (
+                        c.data.indices[a..b].to_vec(),
+                        c.data.data.to_f64()[a..b].to_vec(),
+                    )
+                })
+            })
+            .collect()
+    };
+
+    let layers = r.layer_metas().await.unwrap();
+    assert_eq!(
+        (layers[0].shape, layers[0].indptr.clone()),
+        ((2, 3), vec![0, 2, 3])
+    );
+    let got: Vec<_> = r
+        .layer_stream(&layers[0], 1)
+        .map(|c| c.unwrap())
+        .collect()
+        .await;
+    assert_eq!(
+        rows(got),
+        vec![(vec![0, 2], vec![1.0, 2.0]), (vec![1], vec![3.0])]
+    );
+
+    let obsp = r.obsp_metas().await.unwrap();
+    let got: Vec<_> = r
+        .obsp_stream(&obsp[0], 1)
+        .map(|c| c.unwrap())
+        .collect()
+        .await;
+    assert_eq!(rows(got), vec![(vec![1], vec![5.0]), (vec![0], vec![6.0])]);
 }
 
 /// Regression: the writer stored every layer and obsp matrix as f32, so f64

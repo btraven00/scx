@@ -33,6 +33,73 @@ pub(crate) fn csr_chunk(
     }
 }
 
+/// A CSC matrix (`indptr` over its `shape.1` columns, row ids in `indices`) as
+/// CSR. Column ids come out sorted within each row.
+pub(crate) fn csc_to_csr(
+    shape: (usize, usize),
+    indptr: &[u64],
+    indices: &[u32],
+    data: &TypedVec,
+) -> SparseMatrixCSR {
+    let row_ptr = csc_row_ptr(shape.0, indices);
+    // Destination of each stored entry: its row's next free slot. Walking the
+    // columns in order keeps every row's column ids ascending.
+    let mut next: Vec<u64> = row_ptr[..shape.0].to_vec();
+    let mut dest = vec![0usize; indices.len()];
+    let mut csr_indices = vec![0u32; indices.len()];
+    for col in 0..shape.1 {
+        for k in indptr[col] as usize..indptr[col + 1] as usize {
+            let r = indices[k] as usize;
+            dest[k] = next[r] as usize;
+            csr_indices[dest[k]] = col as u32;
+            next[r] += 1;
+        }
+    }
+    fn scatter<T: Copy + Default>(v: &[T], dest: &[usize]) -> Vec<T> {
+        let mut out = vec![T::default(); v.len()];
+        for (k, &d) in dest.iter().enumerate() {
+            out[d] = v[k];
+        }
+        out
+    }
+    let data = match data {
+        TypedVec::F32(v) => TypedVec::F32(scatter(v, &dest)),
+        TypedVec::F64(v) => TypedVec::F64(scatter(v, &dest)),
+        TypedVec::I32(v) => TypedVec::I32(scatter(v, &dest)),
+        TypedVec::U32(v) => TypedVec::U32(scatter(v, &dest)),
+    };
+    SparseMatrixCSR {
+        shape,
+        indptr: row_ptr,
+        indices: csr_indices,
+        data,
+    }
+}
+
+/// Rows `rows` of an in-memory CSR matrix as a chunk.
+pub(crate) fn csr_rows(m: &SparseMatrixCSR, rows: Range<usize>) -> MatrixChunk {
+    let nnz = m.indptr[rows.start] as usize..m.indptr[rows.end] as usize;
+    csr_chunk(
+        &m.indptr,
+        rows,
+        m.shape.1,
+        m.indices[nnz.clone()].to_vec(),
+        m.data.slice(nnz),
+    )
+}
+
+/// The CSR row pointer of a CSC matrix with `n_rows` rows, from its row ids.
+pub(crate) fn csc_row_ptr(n_rows: usize, indices: &[u32]) -> Vec<u64> {
+    let mut ptr = vec![0u64; n_rows + 1];
+    for &r in indices {
+        ptr[r as usize + 1] += 1;
+    }
+    for i in 0..n_rows {
+        ptr[i + 1] += ptr[i];
+    }
+    ptr
+}
+
 /// Row-major dense values (`n_cols` per row) as CSR, dropping exact zeros.
 pub(crate) fn dense_to_csr(values: &[f64], n_cols: usize, dtype: DataType) -> SparseMatrixCSR {
     let nrows = values.len().checked_div(n_cols).unwrap_or(0);
@@ -172,5 +239,21 @@ mod tests {
         sort_csr_indices(&mut csr);
         assert_eq!(csr.indices, orig.indices);
         assert_eq!(csr.data.to_f64(), orig.data.to_f64());
+    }
+
+    #[test]
+    fn csc_to_csr_transposes_storage() {
+        // [[1, 0, 2],
+        //  [0, 0, 3],
+        //  [4, 5, 0]] stored by column.
+        let csr = csc_to_csr(
+            (3, 3),
+            &[0, 2, 3, 5],
+            &[0, 2, 2, 0, 1],
+            &TypedVec::I32(vec![1, 4, 5, 2, 3]),
+        );
+        assert_eq!(csr.indptr, vec![0, 2, 3, 5]);
+        assert_eq!(csr.indices, vec![0, 2, 2, 0, 1]);
+        assert_eq!(csr.data, TypedVec::I32(vec![1, 2, 3, 4, 5]));
     }
 }

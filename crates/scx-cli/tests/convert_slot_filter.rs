@@ -135,3 +135,37 @@ fn count_nnz(r: &mut H5AdReader) -> usize {
         n
     })
 }
+
+/// Regression: tiny_edge.h5ad has a CSC layer, which failed every conversion
+/// of the file, even with `--exclude layers`. It now converts, carrying the
+/// CSC layer through, and `--only` naming one layer keeps just that one.
+#[test]
+fn file_with_a_csc_layer_converts() {
+    let input = fixture("tiny/tiny_edge.h5ad");
+    let out = tempfile::NamedTempFile::with_suffix(".h5ad").unwrap();
+    let res = convert(&input, out.path(), &[]);
+    assert!(
+        res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    let mut names = layer_names(out.path());
+    names.sort();
+    assert_eq!(names, ["csc", "dense"]);
+
+    let res = convert(&input, out.path(), &["--exclude", "layers"]);
+    assert!(
+        res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    assert!(layer_names(out.path()).is_empty());
+
+    let res = convert(&input, out.path(), &["--only", "obs,var,layers:dense"]);
+    assert!(
+        res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    assert_eq!(layer_names(out.path()), ["dense"]);
+}

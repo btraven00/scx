@@ -7,15 +7,16 @@ use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
 use hdf5::{File, Group};
 use ndarray::s;
 
-use crate::h5::{read_csr_rows, read_u64, value_dtype};
+use crate::h5::{read_csr_rows, read_u32_range, read_u64, read_values, value_dtype};
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
+use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows};
 use crate::stream::{row_chunks, row_range_chunks, ChunkStream};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
-        UnsTable, VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+        SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
     sparse::dense_to_csr,
     stream::DatasetReader,
@@ -82,6 +83,14 @@ impl H5AdReader {
             }
             (sh[0], sh[1], None, value_dtype(&ds)?)
         } else {
+            // X streams by row range straight from the file, so CSC (which
+            // layers and obsp read whole and transpose) is refused here.
+            if is_csc(&file.group(&base)?) {
+                return Err(ScxError::InvalidFormat(format!(
+                    "{base} is stored as CSC. Convert to CSR first, e.g. \
+                     adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
+                )));
+            }
             let meta = ad_read_sparse_meta(&file, &base, &base)?;
             let dtype = value_dtype(&file.dataset(&format!("{base}/data"))?)?;
             (meta.shape.0, meta.shape.1, Some(meta.indptr), dtype)
@@ -507,18 +516,25 @@ fn ad_read_dense_dict(
     Ok(map)
 }
 
-/// The shape and indptr of the CSR matrix group at `group_path`. CSC is an
-/// error: reading it as CSR would silently transpose the matrix.
+/// The shape and CSR indptr of the sparse matrix group at `group_path`. For a
+/// CSC group the indptr is derived from its row ids; [`sparse_chunks`] then
+/// reads it transposed.
 fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
-    if read_str_attr(&grp, "encoding-type").is_ok_and(|enc| enc == "csc_matrix") {
-        return Err(ScxError::InvalidFormat(format!(
-            "{group_path} is stored as CSC. Convert to CSR first, e.g. \
-             adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
-        )));
-    }
     let shape = read_shape(&grp)?;
-    let indptr = read_u64(&file.dataset(&format!("{group_path}/indptr"))?)?;
+    let indptr = if is_csc(&grp) {
+        let ds = file.dataset(&format!("{group_path}/indices"))?;
+        let rows = read_u32_range(&ds, 0..ds.size())?;
+        if let Some(&r) = rows.iter().find(|&&r| r as usize >= shape.0) {
+            return Err(ScxError::InvalidFormat(format!(
+                "{group_path}: row index {r} out of range for {} rows",
+                shape.0
+            )));
+        }
+        csc_row_ptr(shape.0, &rows)
+    } else {
+        read_u64(&file.dataset(&format!("{group_path}/indptr"))?)?
+    };
     if indptr.len() != shape.0 + 1 {
         return Err(ScxError::InvalidFormat(format!(
             "{group_path}/indptr has {} entries, expected n_rows + 1 = {}",
@@ -530,6 +546,49 @@ fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<Spar
         name: name.to_string(),
         shape,
         indptr,
+    })
+}
+
+fn is_csc(grp: &Group) -> bool {
+    read_str_attr(grp, "encoding-type").is_ok_and(|enc| enc == "csc_matrix")
+}
+
+/// Row chunks of the layer or obsp matrix at `matrix`. A CSC matrix is read
+/// whole and transposed on the first chunk.
+// ponytail: a CSC matrix costs its full size in memory while it streams;
+// read it column-block by column-block if CSC layers ever come at atlas scale.
+fn sparse_chunks<'a>(
+    path: &'a Path,
+    matrix: String,
+    meta: &'a SparseMatrixMeta,
+    chunk_size: usize,
+) -> ChunkStream<'a> {
+    let mut csc: Option<SparseMatrixCSR> = None;
+    row_chunks(meta.shape.0, chunk_size, move |rows| {
+        if csc.is_none() && !meta.indptr.is_empty() {
+            let file = File::open(path)?;
+            let grp = file.group(&matrix)?;
+            if is_csc(&grp) {
+                let ds = |n: &str| file.dataset(&format!("{matrix}/{n}"));
+                let col_ptr = read_u64(&ds("indptr")?)?;
+                if col_ptr.len() != meta.shape.1 + 1 {
+                    return Err(ScxError::InvalidFormat(format!(
+                        "{matrix}/indptr has {} entries, expected n_cols + 1 = {}",
+                        col_ptr.len(),
+                        meta.shape.1 + 1
+                    )));
+                }
+                let nnz = *col_ptr.last().unwrap() as usize;
+                let rows_ids = read_u32_range(&ds("indices")?, 0..nnz)?;
+                let data_ds = ds("data")?;
+                let data = read_values(&data_ds, value_dtype(&data_ds)?, 0..nnz)?;
+                csc = Some(csc_to_csr(meta.shape, &col_ptr, &rows_ids, &data));
+            }
+        }
+        match &csc {
+            Some(m) => Ok(csr_rows(m, rows)),
+            None => read_rows(path, &matrix, &meta.indptr, rows, meta.shape.1),
+        }
     })
 }
 
@@ -642,17 +701,16 @@ impl DatasetReader for H5AdReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> ChunkStream<'a> {
-        let matrix = format!("layers/{}", meta.name);
-        row_chunks(meta.shape.0, chunk_size, move |rows| {
-            read_rows(&self.path, &matrix, &meta.indptr, rows, meta.shape.1)
-        })
+        sparse_chunks(
+            &self.path,
+            format!("layers/{}", meta.name),
+            meta,
+            chunk_size,
+        )
     }
 
     fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
-        let matrix = format!("obsp/{}", meta.name);
-        row_chunks(meta.shape.0, chunk_size, move |rows| {
-            read_rows(&self.path, &matrix, &meta.indptr, rows, meta.shape.1)
-        })
+        sparse_chunks(&self.path, format!("obsp/{}", meta.name), meta, chunk_size)
     }
 
     async fn varm(&mut self) -> Result<Varm> {

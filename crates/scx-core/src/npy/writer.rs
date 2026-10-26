@@ -186,8 +186,16 @@ impl NpyIrWriter {
         let obsm = reader.obsm().await?;
         let uns = reader.uns().await?;
         let varm = reader.varm().await?;
-        let layer_metas = reader.layer_metas().await?;
-        let obsp_metas = reader.obsp_metas().await?;
+        let layer_metas = if filter.includes_any("layers") {
+            reader.layer_metas().await?
+        } else {
+            Vec::new()
+        };
+        let obsp_metas = if filter.includes_any("obsp") {
+            reader.obsp_metas().await?
+        } else {
+            Vec::new()
+        };
 
         // --- obs/var indexes and columns ---
         if filter.includes("obs_index") {

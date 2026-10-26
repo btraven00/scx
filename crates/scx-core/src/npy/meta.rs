@@ -56,6 +56,19 @@ impl SlotFilter {
         }
         true
     }
+
+    /// Whether any key of `slot` can pass: false only when the whole slot is
+    /// excluded, or `only` names nothing in it. Lets a caller skip reading a
+    /// slot it would then drop entirely.
+    pub fn includes_any(&self, slot: &str) -> bool {
+        if self.exclude.iter().any(|s| s == slot) {
+            return false;
+        }
+        match &self.only {
+            Some(only) => only.iter().any(|s| slot_matches(slot, s)),
+            None => true,
+        }
+    }
 }
 
 pub(super) fn slot_matches(filter: &str, target: &str) -> bool {
@@ -188,6 +201,18 @@ pub(super) fn varp_key_dir(root: &Path, k: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn includes_any_skips_only_a_wholly_dropped_slot() {
+        let f = SlotFilter::from_exclude("layers");
+        assert!(!f.includes_any("layers"));
+        assert!(f.includes_any("obsp"));
+        // Excluding one key leaves the slot to read.
+        assert!(SlotFilter::from_exclude("layers:counts").includes_any("layers"));
+        // --only naming a key inside the slot keeps it; naming others drops it.
+        assert!(SlotFilter::from_only("X,layers:counts").includes_any("layers"));
+        assert!(!SlotFilter::from_only("X,obsm").includes_any("layers"));
+    }
 
     #[test]
     fn col_kind_all_variants() {
