@@ -13,6 +13,14 @@
                             Seurat v5 layout; this script writes names and
                             metadata, scripts/make_tiny_fixtures_bpcells.R adds
                             the BPCells-encoded counts matrix
+    tiny_v5.h5seurat        Seurat v5 layout with dgCMatrix assays/RNA/layers/counts
+    tiny_edge.h5ad          fidelity edge cases (expected.json "edge"): int X,
+                            ordered categorical, int64 beyond i32, nullable
+                            string with NA, non-ASCII level, duplicate var
+                            names, a dense and a CSC layer
+
+tiny_v4.h5seurat also carries a second assay (ADT, 2 features x 6 cells) that
+an RNA-only conversion drops.
 
 Row 1 has no counts and gene 2 is expressed in one cell only, so empty rows
 and sparse columns are always exercised.
@@ -72,6 +80,17 @@ CONN = sp.csr_matrix(
 )
 
 
+# tiny_edge.h5ad
+STAGE = ["late", "early", "mid", "early", "late", None]
+STAGE_LEVELS = ["early", "mid", "late"]  # ordered
+BIG = [0, 1, 2**31, -(2**31) - 1, 2**40, 5]  # int64; 3 values overflow i32
+NOTE = ["a", None, "b", "c", None, "d"]  # pandas nullable string
+LABEL = ["CD4⁺ T", "B", "CD4⁺ T", "B", "B", "CD4⁺ T"]  # non-ASCII level
+EDGE_GENES = ["gene0", "gene1", "gene1", "gene3", "gene4"]  # duplicate name
+ADT = np.array([[3, 0, 1, 0, 2, 0], [0, 4, 0, 0, 1, 7]], dtype=np.int32)  # features x cells
+ADT_FEATURES = ["CD3", "CD19"]
+
+
 def write_expected():
     nan_to_none = lambda xs: [None if isinstance(x, float) and np.isnan(x) else x for x in xs]
     expected = {
@@ -101,8 +120,22 @@ def write_expected():
             "colors": ["red", "blue"],
             "weights": [0.25, 0.75],
         },
+        "adt": {"features": ADT_FEATURES, "counts": ADT.T.tolist()},
+        "edge": {
+            "X": COUNTS.tolist(),
+            "var_names": EDGE_GENES,
+            "obs": {
+                "stage": {"type": "categorical", "ordered": True, "levels": STAGE_LEVELS, "values": STAGE},
+                "big": {"type": "int64", "values": BIG},
+                "note": {"type": "string", "values": NOTE},
+                "label": {"type": "categorical", "levels": ["B", "CD4⁺ T"], "values": LABEL},
+            },
+            "layers": {"dense": X.tolist(), "csc": X.tolist()},
+        },
     }
-    (OUT / "expected.json").write_text(json.dumps(expected, indent=1) + "\n")
+    (OUT / "expected.json").write_text(
+        json.dumps(expected, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
 
 def write_h5ad():
@@ -132,6 +165,19 @@ def write_h5ad():
     ad.AnnData(X=X, obs=pd.DataFrame(index=CELLS), var=pd.DataFrame(index=GENES)).write_h5ad(
         OUT / "tiny_dense.h5ad"
     )
+
+
+def write_edge_h5ad():
+    obs = pd.DataFrame(index=CELLS)
+    obs["stage"] = pd.Categorical(STAGE, categories=STAGE_LEVELS, ordered=True)
+    obs["big"] = np.array(BIG, dtype=np.int64)
+    obs["note"] = pd.array(NOTE, dtype="string")
+    obs["label"] = pd.Categorical(LABEL)
+    a = ad.AnnData(X=sp.csr_matrix(COUNTS), obs=obs, var=pd.DataFrame(index=EDGE_GENES))
+    a.layers["dense"] = X
+    a.layers["csc"] = sp.csc_matrix(X)
+    ad.settings.allow_write_nullable_strings = True  # else "note" becomes categorical
+    a.write_h5ad(OUT / "tiny_edge.h5ad", convert_strings_to_categoricals=False)
 
 
 def write_10x():
@@ -217,7 +263,7 @@ def write_dgc(grp: h5py.Group, dense: np.ndarray, dtype):
     grp["data"] = m.data.astype(dtype)
     grp["indices"] = m.indices.astype(np.int32)
     grp["indptr"] = m.indptr.astype(np.int32)
-    grp.attrs["dims"] = np.array([len(GENES), len(CELLS)], dtype=np.int32)
+    grp.attrs["dims"] = np.array(dense.shape[::-1], dtype=np.int32)
 
 
 def write_h5seurat():
@@ -230,15 +276,24 @@ def write_h5seurat():
         pca["cell.embeddings"] = PCA.T.astype(np.float64)
         pca.attrs["key"] = "PC_"
         pca.attrs["active.assay"] = "RNA"
+        adt = f.create_group("assays/ADT")
+        adt.attrs["key"] = "adt_"
+        adt.create_dataset("features", data=ADT_FEATURES, dtype=h5py.string_dtype())
+        write_dgc(adt.create_group("counts"), ADT.T, np.float64)
 
     with h5py.File(OUT / "tiny_v5_bpcells.h5seurat", "w") as f:
         write_seurat_common(f, "5.0.0")
+
+    with h5py.File(OUT / "tiny_v5.h5seurat", "w") as f:
+        rna = write_seurat_common(f, "5.0.0")
+        write_dgc(rna.create_group("layers/counts"), COUNTS, np.float64)
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     write_expected()
     write_h5ad()
+    write_edge_h5ad()
     write_10x()
     write_mtx()
     write_h5seurat()

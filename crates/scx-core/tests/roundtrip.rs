@@ -282,7 +282,7 @@ async fn check_cell_type(back: &mut (dyn DatasetReader + Send)) {
         .iter()
         .find(|c| c.name == "cell_type")
         .expect("cell_type");
-    let scx_core::ir::ColumnData::Categorical { codes, levels } = &col.data else {
+    let scx_core::ir::ColumnData::Categorical { codes, levels, .. } = &col.data else {
         panic!("cell_type is {}", col.data.dtype_str());
     };
     let got: Vec<Option<&str>> = (0..codes.len())
@@ -401,5 +401,123 @@ async fn h5ad_nullable_columns_carry_anndata_encodings() {
     for col in ["batch", "flag"] {
         assert_eq!(enc(&format!("obs/{col}/values")), "array", "{col}");
         assert_eq!(enc(&format!("obs/{col}/mask")), "array", "{col}");
+    }
+}
+
+/// tiny_edge.h5ad's obs and X through `w`, read back by scx. (Its CSC layer
+/// is skipped: one CSC layer fails `layer_metas` for the whole file.)
+async fn edge_obs_through(mut w: Box<dyn DatasetWriter>, path: &Path) -> scx_core::ir::ObsTable {
+    let src = tiny("tiny_edge.h5ad");
+    let mut r = scx_core::open(src.to_str().unwrap(), &scx_core::OpenOptions::new(CHUNK))
+        .await
+        .unwrap();
+    w.write_obs(&r.obs().await.unwrap()).await.unwrap();
+    w.write_var(&r.var().await.unwrap()).await.unwrap();
+    let mut s = r.x_stream();
+    while let Some(c) = s.next().await {
+        w.write_x_chunk(&c.unwrap()).await.unwrap();
+    }
+    drop(s);
+    w.finalize().await.unwrap();
+    let opts = scx_core::OpenOptions::new(CHUNK);
+    let mut back = scx_core::open(path.to_str().unwrap(), &opts).await.unwrap();
+    back.obs().await.unwrap()
+}
+
+fn obs_col<'a>(obs: &'a scx_core::ir::ObsTable, name: &str) -> &'a scx_core::ir::ColumnData {
+    &obs.columns
+        .iter()
+        .find(|c| c.name == name)
+        .expect(name)
+        .data
+}
+
+/// `big` as text (`value_str`), so the check reads the same whatever
+/// integer or float variant holds it.
+fn big_as_text(col: &scx_core::ir::ColumnData) -> Vec<String> {
+    (0..col.len()).map(|i| col.value_str(i)).collect()
+}
+
+fn big_values() -> Vec<String> {
+    expected()["edge"]["obs"]["big"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_string())
+        .collect()
+}
+
+/// An h5ad writer, plus a Zarr one when the `zarr` feature is on.
+fn h5ad_and_zarr_writers(dir: &Path) -> Vec<(Box<dyn DatasetWriter>, PathBuf)> {
+    let h5ad = dir.join("out.h5ad");
+    #[allow(unused_mut)]
+    let mut out: Vec<(Box<dyn DatasetWriter>, PathBuf)> = vec![(
+        Box::new(H5AdWriter::create(&h5ad, 6, 5, DataType::I32).unwrap()),
+        h5ad,
+    )];
+    #[cfg(feature = "zarr")]
+    {
+        let zarr = dir.join("out.zarr");
+        out.push((
+            Box::new(scx_core::zarr_ad::ZarrAdWriter::create(&zarr, 6, 5, DataType::I32).unwrap()),
+            zarr,
+        ));
+    }
+    out
+}
+
+#[tokio::test]
+#[ignore = "bug: int64 obs columns are read as i32 and clamped silently"]
+async fn h5ad_and_zarr_keep_int64() {
+    let dir = tempfile::tempdir().unwrap();
+    for (w, path) in h5ad_and_zarr_writers(dir.path()) {
+        let obs = edge_obs_through(w, &path).await;
+        let big = obs_col(&obs, "big");
+        assert_eq!(big.dtype_str(), "int64", "{}", path.display());
+        assert_eq!(big_as_text(big), big_values(), "{}", path.display());
+    }
+}
+
+/// R has no int64: H5Seurat gets a double when a value is beyond i32 (exact
+/// below 2^53), not a clamped integer.
+#[tokio::test]
+#[ignore = "bug: int64 obs columns are read as i32 and clamped silently"]
+async fn h5seurat_writes_wide_int64_as_double() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.h5seurat");
+    let w = H5SeuratWriter::create(&path, 6, 5, DataType::I32, None, None, None, false).unwrap();
+    let obs = edge_obs_through(Box::new(w), &path).await;
+    let big = obs_col(&obs, "big");
+    assert_eq!(big.dtype_str(), "float64");
+    assert_eq!(big_as_text(big), big_values());
+}
+
+/// The `ordered` attribute as written to `obs/<col>`: an h5ad group attr or
+/// the zarr group's JSON attributes.
+fn ordered_on_disk(path: &Path, col: &str) -> bool {
+    if path.extension().is_some_and(|e| e == "zarr") {
+        let meta = std::fs::read_to_string(path.join(format!("obs/{col}/zarr.json"))).unwrap();
+        let v: Value = serde_json::from_str(&meta).unwrap();
+        return v["attributes"]["ordered"].as_bool().unwrap();
+    }
+    let n: u8 = hdf5::File::open(path)
+        .unwrap()
+        .group(&format!("obs/{col}"))
+        .unwrap()
+        .attr("ordered")
+        .unwrap()
+        .read_scalar()
+        .unwrap();
+    n != 0
+}
+
+#[tokio::test]
+#[ignore = "bug: categoricals carry no ordered flag; writers always write ordered=false"]
+async fn h5ad_and_zarr_keep_ordered_categorical() {
+    let dir = tempfile::tempdir().unwrap();
+    for (w, path) in h5ad_and_zarr_writers(dir.path()) {
+        edge_obs_through(w, &path).await;
+        assert!(ordered_on_disk(&path, "stage"), "{}", path.display());
+        assert!(!ordered_on_disk(&path, "label"), "{}", path.display());
     }
 }

@@ -162,7 +162,7 @@ async fn h5ad_counts_layer() {
 
 /// Categorical values with NA as `None`.
 fn categorical_values(col: &Column) -> Vec<Option<String>> {
-    let ColumnData::Categorical { codes, levels } = &col.data else {
+    let ColumnData::Categorical { codes, levels, .. } = &col.data else {
         panic!("{} is {}, not categorical", col.name, col.data.dtype_str());
     };
     (0..codes.len())
@@ -362,4 +362,97 @@ async fn h5seurat_reads_fixed_length_strings() {
         .await
         .unwrap();
     assert_eq!(r.obs().await.unwrap().index, names);
+}
+
+// tiny_edge.h5ad, tiny_v5.h5seurat and the ADT assay: the fidelity edge
+// cases in expected.json "edge" / "adt".
+
+fn obs_col<'a>(obs: &'a scx_core::ir::ObsTable, name: &str) -> &'a Column {
+    obs.columns.iter().find(|c| c.name == name).expect(name)
+}
+
+#[tokio::test]
+async fn h5seurat_v5_dgc_layers_matrix() {
+    check_matrix("tiny_v5.h5seurat", "counts").await;
+}
+
+#[tokio::test]
+async fn h5seurat_second_assay() {
+    let e = expected();
+    let opts = scx_core::OpenOptions {
+        assay: Some("ADT".into()),
+        ..scx_core::OpenOptions::new(4)
+    };
+    let mut r = scx_core::open(tiny("tiny_v4.h5seurat").to_str().unwrap(), &opts)
+        .await
+        .unwrap();
+    assert_eq!(r.var().await.unwrap().index, strings(&e["adt"]["features"]));
+    assert_eq!(dense_x(&mut *r).await, matrix(&e["adt"]["counts"]));
+}
+
+#[tokio::test]
+async fn edge_int_x_and_duplicate_var_names() {
+    let e = &expected()["edge"];
+    let mut r = open("tiny_edge.h5ad").await;
+    assert_eq!(r.dtype(), scx_core::dtype::DataType::I32);
+    assert_eq!(r.var().await.unwrap().index, strings(&e["var_names"]));
+    assert_eq!(dense_x(&mut *r).await, matrix(&e["X"]));
+}
+
+#[tokio::test]
+async fn edge_nullable_string_and_non_ascii_categorical() {
+    let e = &expected()["edge"];
+    let obs = open("tiny_edge.h5ad").await.obs().await.unwrap();
+    let note = obs_col(&obs, "note");
+    let ColumnData::String(vals) = &note.data else {
+        panic!("note is {}", note.data.dtype_str());
+    };
+    let got: Vec<Option<&str>> = (0..6)
+        .map(|i| (!note.is_na(i)).then(|| vals[i].as_str()))
+        .collect();
+    let want: Vec<Option<&str>> = e["obs"]["note"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(Value::as_str)
+        .collect();
+    assert_eq!(got, want);
+    assert_eq!(
+        categorical_values(obs_col(&obs, "label")),
+        e["obs"]["label"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+#[ignore = "bug: int64 obs columns are read as i32 and clamped silently"]
+async fn edge_int64_obs_column() {
+    let e = &expected()["edge"];
+    let obs = open("tiny_edge.h5ad").await.obs().await.unwrap();
+    let col = &obs_col(&obs, "big").data;
+    assert_eq!(col.dtype_str(), "int64");
+    let got: Vec<String> = (0..col.len()).map(|i| col.value_str(i)).collect();
+    let want: Vec<String> = e["obs"]["big"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// One CSC layer fails `layer_metas` for the whole file, so converting
+/// tiny_edge.h5ad errors (clearly) rather than dropping or transposing it.
+#[tokio::test]
+async fn edge_csc_layer_is_an_error() {
+    let err = open("tiny_edge.h5ad")
+        .await
+        .layer_metas()
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("CSC"), "{err}");
 }
