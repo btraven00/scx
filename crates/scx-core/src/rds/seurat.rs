@@ -333,7 +333,16 @@ fn meta_columns(
                     .iter()
                     .map(|&v| if v == NA_INT { 0 } else { (v - 1) as u32 })
                     .collect();
-                Column::with_missing(name, ColumnData::Categorical { codes, levels }, missing)
+                let ordered = c.has_class("ordered");
+                Column::with_missing(
+                    name,
+                    ColumnData::Categorical {
+                        codes,
+                        levels,
+                        ordered,
+                    },
+                    missing,
+                )
             }
             Kind::Int(_) | Kind::Lazy { num: Num::Int, .. } => {
                 let v = pick(&ints(c, f)?);

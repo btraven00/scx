@@ -122,6 +122,25 @@ fn check(name: &str) {
     }
 }
 
+/// An R ordered factor keeps `ordered`; a plain factor does not.
+fn check_ordered(name: &str) {
+    let mut r = block_on(open(tiny(name).to_str().unwrap(), &OpenOptions::new(4))).unwrap();
+    let obs = block_on(r.obs()).unwrap();
+    let ordered = |col: &str| match &obs.columns.iter().find(|c| c.name == col).unwrap().data {
+        scx_core::ir::ColumnData::Categorical { ordered, .. } => *ordered,
+        other => panic!("{name}: {col} is {}", other.dtype_str()),
+    };
+    assert!(ordered("cell_type_ordered"), "{name}");
+    assert!(!ordered("cell_type"), "{name}");
+}
+
+#[test]
+fn ordered_factors_stay_ordered() {
+    for name in ["tiny_v4.rds", "tiny_v5.rds", "tiny_v5_split.rds"] {
+        check_ordered(name);
+    }
+}
+
 #[test]
 fn seurat_v4_assay() {
     check("tiny_v4.rds");

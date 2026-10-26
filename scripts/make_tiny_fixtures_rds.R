@@ -28,6 +28,9 @@ for (name in names(e$obs)) {
   )
 }
 
+# An R ordered factor, not in expected.json: the reader must keep `ordered`.
+meta$cell_type_ordered <- factor(meta$cell_type, levels = levels(meta$cell_type), ordered = TRUE)
+
 make <- function(assay_version) {
   options(Seurat.object.assay.version = assay_version)
   CreateSeuratObject(counts = counts, meta.data = meta, min.cells = 0, min.features = 0)
