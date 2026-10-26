@@ -23,8 +23,44 @@ use scx_core::{
     validate::{run_validation, ValidationSchema},
 };
 
+// `scx --version` names the optional features this binary was built with:
+// a URL input or a Zarr store fails without them, so that is the first
+// thing to check.
+#[cfg(feature = "net")]
+macro_rules! net_flag {
+    () => {
+        "+net"
+    };
+}
+#[cfg(not(feature = "net"))]
+macro_rules! net_flag {
+    () => {
+        "-net"
+    };
+}
+#[cfg(feature = "zarr")]
+macro_rules! zarr_flag {
+    () => {
+        "+zarr"
+    };
+}
+#[cfg(not(feature = "zarr"))]
+macro_rules! zarr_flag {
+    () => {
+        "-zarr"
+    };
+}
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    net_flag!(),
+    " ",
+    zarr_flag!(),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "scx", about = "Single-cell streaming interop engine")]
+#[command(name = "scx", version = VERSION, about = "Single-cell streaming interop engine")]
 enum Cli {
     /// Convert between single-cell formats
     ///
