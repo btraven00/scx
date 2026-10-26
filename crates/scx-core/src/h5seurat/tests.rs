@@ -592,9 +592,14 @@ async fn test_norman_obs_roundtrip() {
             .find(|c| c.name == src_col.name)
             .unwrap_or_else(|| panic!("obs column '{}' missing after round-trip", src_col.name));
 
-        // Dtype class must be preserved.
-        let src_kind = std::mem::discriminant(&src_col.data);
-        let rt_kind = std::mem::discriminant(&rt_col.data);
+        // Dtype class must be preserved; int64 comes back int32 (R has no
+        // int64, and these values fit).
+        let kind = |d: &ColumnData| match d.dtype_str() {
+            "int64" => "int32",
+            s => s,
+        };
+        let src_kind = kind(&src_col.data);
+        let rt_kind = kind(&rt_col.data);
         assert_eq!(
             src_kind, rt_kind,
             "obs column '{}' changed dtype after round-trip",

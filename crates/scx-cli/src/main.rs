@@ -1092,6 +1092,7 @@ fn numeric_stats(data: &ColumnData) -> String {
     let raw: Vec<f64> = match data {
         ColumnData::Float(v) => v.clone(),
         ColumnData::Int(v) => v.iter().map(|&x| x as f64).collect(),
+        ColumnData::Int64(v) => v.iter().map(|&x| x as f64).collect(),
         _ => return String::new(),
     };
     let total = raw.len();

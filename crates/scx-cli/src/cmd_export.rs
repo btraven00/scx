@@ -104,6 +104,7 @@ fn column_data_to_column(col: &scx_core::ir::Column) -> anyhow::Result<Column> {
     }
     Ok(match &col.data {
         ColumnData::Int(v) => Column::new(name, opt(col, v)),
+        ColumnData::Int64(v) => Column::new(name, opt(col, v)),
         ColumnData::Float(v) => Column::new(name, opt(col, v)),
         ColumnData::String(v) => Column::new(name, opt(col, v)),
         ColumnData::Bool(v) => Column::new(name, opt(col, v)),

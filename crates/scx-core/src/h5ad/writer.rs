@@ -563,7 +563,21 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
             write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
             write_nullable_mask(&g, m, compression)?;
         }
+        (ColumnData::Int64(v), Some(m)) => {
+            write_nullable(
+                grp,
+                name,
+                "nullable-integer",
+                Array1::from_vec(v.clone()),
+                m,
+                compression,
+            )?;
+        }
         (ColumnData::Int(v), None) => {
+            let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
+            write_encoding_on_ds(&ds, "array", "0.2.0")?;
+        }
+        (ColumnData::Int64(v), None) => {
             let ds = write_1d(grp, name, Array1::from_vec(v.clone()), compression)?;
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
         }

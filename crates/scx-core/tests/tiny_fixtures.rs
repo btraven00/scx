@@ -429,7 +429,6 @@ async fn edge_nullable_string_and_non_ascii_categorical() {
 }
 
 #[tokio::test]
-#[ignore = "bug: int64 obs columns are read as i32 and clamped silently"]
 async fn edge_int64_obs_column() {
     let e = &expected()["edge"];
     let obs = open("tiny_edge.h5ad").await.obs().await.unwrap();

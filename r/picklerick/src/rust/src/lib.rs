@@ -872,6 +872,15 @@ fn columns_to_robj(cols: Vec<Column>) -> Robj {
     for c in cols {
         let v: Robj = match c.data {
             ColumnData::Int(v)    => v.into_robj(),
+            // R has no int64: integer when every value fits (i32::MIN is
+            // NA_integer_), else double, exact up to 2^53.
+            ColumnData::Int64(v) => {
+                if v.iter().all(|&x| x > i32::MIN as i64 && x <= i32::MAX as i64) {
+                    v.into_iter().map(|x| x as i32).collect::<Vec<_>>().into_robj()
+                } else {
+                    v.into_iter().map(|x| x as f64).collect::<Vec<_>>().into_robj()
+                }
+            }
             ColumnData::Float(v)  => v.into_robj(),
             ColumnData::Bool(v)   => v.into_robj(),
             ColumnData::String(v) => v.into_robj(),

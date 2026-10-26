@@ -145,7 +145,8 @@ and `var_index.txt` are the only files at the root.
     { "name": "orig.ident", "kind": "categorical", "shape": [2638], "n_levels": 3 },
     { "name": "active",     "kind": "bool",        "shape": [2638] },
     { "name": "notes",      "kind": "string",      "shape": [2638] },
-    { "name": "n_genes",    "kind": "int",         "shape": [2638] }
+    { "name": "n_genes",    "kind": "int",         "shape": [2638] },
+    { "name": "umi_total",  "kind": "int64",       "shape": [2638] }
   ],
   "var": [
     { "name": "highly_variable", "kind": "bool", "shape": [1838] }

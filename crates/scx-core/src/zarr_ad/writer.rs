@@ -133,6 +133,10 @@ fn write_i32s(store: &Store, path: &str, v: &[i32], attrs: Map<String, Value>) -
     write_1d(store, path, zdt::int32(), FillValue::from(0i32), v, attrs)
 }
 
+fn write_i64s(store: &Store, path: &str, v: &[i64], attrs: Map<String, Value>) -> Result<()> {
+    write_1d(store, path, zdt::int64(), FillValue::from(0i64), v, attrs)
+}
+
 fn write_f64s(store: &Store, path: &str, v: &[f64], attrs: Map<String, Value>) -> Result<()> {
     write_1d(store, path, zdt::float64(), FillValue::from(0f64), v, attrs)
 }
@@ -261,6 +265,11 @@ fn write_column(store: &Store, path: &str, col: &Column) -> Result<()> {
         (ColumnData::Int(v), Some(m)) => write_nullable(store, path, "nullable-integer", m, |p| {
             write_i32s(store, p, v, array_enc())
         }),
+        (ColumnData::Int64(v), Some(m)) => {
+            write_nullable(store, path, "nullable-integer", m, |p| {
+                write_i64s(store, p, v, array_enc())
+            })
+        }
         (ColumnData::Bool(v), Some(m)) => write_nullable(store, path, "nullable-boolean", m, |p| {
             write_bools(store, p, v, array_enc())
         }),
@@ -270,6 +279,7 @@ fn write_column(store: &Store, path: &str, col: &Column) -> Result<()> {
             })
         }
         (ColumnData::Int(v), None) => write_i32s(store, path, v, array_enc()),
+        (ColumnData::Int64(v), None) => write_i64s(store, path, v, array_enc()),
         (ColumnData::Bool(v), None) => write_bools(store, path, v, array_enc()),
         (ColumnData::String(v), None) => {
             write_strings(store, path, v, encoding("string-array", "0.2.0"))

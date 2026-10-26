@@ -467,7 +467,6 @@ fn h5ad_and_zarr_writers(dir: &Path) -> Vec<(Box<dyn DatasetWriter>, PathBuf)> {
 }
 
 #[tokio::test]
-#[ignore = "bug: int64 obs columns are read as i32 and clamped silently"]
 async fn h5ad_and_zarr_keep_int64() {
     let dir = tempfile::tempdir().unwrap();
     for (w, path) in h5ad_and_zarr_writers(dir.path()) {
@@ -481,7 +480,6 @@ async fn h5ad_and_zarr_keep_int64() {
 /// R has no int64: H5Seurat gets a double when a value is beyond i32 (exact
 /// below 2^53), not a clamped integer.
 #[tokio::test]
-#[ignore = "bug: int64 obs columns are read as i32 and clamped silently"]
 async fn h5seurat_writes_wide_int64_as_double() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("out.h5seurat");

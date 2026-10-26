@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use futures::stream::{self};
-use hdf5::types::{TypeDescriptor, VarLenUnicode};
+use hdf5::types::{IntSize, TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 
 use crate::h5::{read_csr_rows, read_u64, value_dtype};
@@ -307,6 +307,10 @@ fn read_meta_column(file: &File, ds_path: &str) -> Result<(ColumnData, Vec<bool>
     Ok(match ds.dtype()?.to_descriptor()? {
         // NA_real_ is a NaN, so float NAs need no mask.
         TypeDescriptor::Float(_) => (ColumnData::Float(ds.read_1d::<f64>()?.to_vec()), Vec::new()),
+        // R never writes int64; other tools may. No NA sentinel there.
+        TypeDescriptor::Integer(IntSize::U8) => {
+            (ColumnData::Int64(ds.read_1d::<i64>()?.to_vec()), Vec::new())
+        }
         TypeDescriptor::Integer(_) => {
             let v = ds.read_1d::<i32>()?.to_vec();
             let missing = v.iter().map(|&x| x == NA_INTEGER).collect();

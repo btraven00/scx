@@ -528,10 +528,22 @@ fn read_column(arr: &ZArray) -> Result<ColumnData> {
         // 1-byte ints encode bools, as in h5ad.
         Ok(ColumnData::Bool(read_bools(arr)?))
     } else {
-        Ok(ColumnData::Int(
-            read_i64(arr, None)?.into_iter().map(|x| x as i32).collect(),
-        ))
+        Ok(read_ints(arr)?)
     }
+}
+
+/// `Int64` for 64-bit and unsigned 32-bit arrays, `Int` otherwise, so values
+/// beyond i32 are never truncated.
+fn read_ints(arr: &ZArray) -> Result<ColumnData> {
+    let v = read_i64(arr, None)?;
+    let dt = arr.data_type();
+    Ok(
+        if *dt == zdt::int64() || *dt == zdt::uint32() || *dt == zdt::uint64() {
+            ColumnData::Int64(v)
+        } else {
+            ColumnData::Int(v.into_iter().map(|x| x as i32).collect())
+        },
+    )
 }
 
 /// Code -1 is NA: it becomes code 0 with `missing[i] == true`.
@@ -572,12 +584,7 @@ fn read_nullable(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)> {
     } else if is_float(&values) {
         ColumnData::Float(read_f64(&values, None)?)
     } else {
-        ColumnData::Int(
-            read_i64(&values, None)?
-                .into_iter()
-                .map(|v| v as i32)
-                .collect(),
-        )
+        read_ints(&values)?
     };
     Ok((data, missing))
 }

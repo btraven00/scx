@@ -237,18 +237,40 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
             .write(&Array1::from_vec(v))?;
         Ok(())
     };
+    let write_f64 = |v: Vec<f64>| -> Result<()> {
+        // NA_real_ is a NaN.
+        let v: Vec<f64> = v
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| if na(i) { f64::NAN } else { x })
+            .collect();
+        grp.new_dataset::<f64>()
+            .shape(v.len())
+            .create(name)?
+            .write(&Array1::from_vec(v))?;
+        Ok(())
+    };
     match &col.data {
-        ColumnData::Float(v) => {
-            // NA_real_ is a NaN.
-            let v: Vec<f64> = v
+        ColumnData::Float(v) => write_f64(v.clone())?,
+        // R has no int64: integer when every value fits (NA_integer_ is
+        // taken), else double, which is exact up to 2^53.
+        ColumnData::Int64(v) => {
+            let fits = v
                 .iter()
                 .enumerate()
-                .map(|(i, &x)| if na(i) { f64::NAN } else { x })
-                .collect();
-            grp.new_dataset::<f64>()
-                .shape(v.len())
-                .create(name)?
-                .write(&Array1::from_vec(v))?;
+                .all(|(i, &x)| na(i) || (x > NA_INTEGER as i64 && x <= i32::MAX as i64));
+            if fits {
+                write_i32(
+                    grp,
+                    name,
+                    v.iter()
+                        .enumerate()
+                        .map(|(i, &x)| if na(i) { NA_INTEGER } else { x as i32 })
+                        .collect(),
+                )?;
+            } else {
+                write_f64(v.iter().map(|&x| x as f64).collect())?;
+            }
         }
         ColumnData::Int(v) => {
             write_i32(

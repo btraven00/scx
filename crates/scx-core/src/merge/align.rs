@@ -53,6 +53,12 @@ pub fn reindex_column(col: &Column, reindex: &[Option<usize>]) -> Column {
                 .map(|r| r.map(|i| v[i]).unwrap_or(0))
                 .collect(),
         ),
+        ColumnData::Int64(v) => ColumnData::Int64(
+            reindex
+                .iter()
+                .map(|r| r.map(|i| v[i]).unwrap_or(0))
+                .collect(),
+        ),
         ColumnData::Bool(v) => ColumnData::Bool(
             reindex
                 .iter()

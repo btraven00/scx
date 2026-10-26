@@ -92,6 +92,9 @@ impl Column {
 #[derive(Debug, Clone)]
 pub enum ColumnData {
     Int(Vec<i32>),
+    /// 64-bit integers, as pandas stores them by default. Readers produce
+    /// this only for 64-bit sources; 32-bit and narrower stay `Int`.
+    Int64(Vec<i64>),
     Float(Vec<f64>),
     String(Vec<String>),
     Bool(Vec<bool>),
@@ -105,6 +108,7 @@ impl ColumnData {
     pub fn len(&self) -> usize {
         match self {
             ColumnData::Int(v) => v.len(),
+            ColumnData::Int64(v) => v.len(),
             ColumnData::Float(v) => v.len(),
             ColumnData::String(v) => v.len(),
             ColumnData::Bool(v) => v.len(),
@@ -120,6 +124,7 @@ impl ColumnData {
         match self {
             ColumnData::Float(_) => "float64",
             ColumnData::Int(_) => "int32",
+            ColumnData::Int64(_) => "int64",
             ColumnData::Bool(_) => "bool",
             ColumnData::String(_) => "string",
             ColumnData::Categorical { .. } => "categorical",
@@ -131,6 +136,7 @@ impl ColumnData {
     pub fn value_str(&self, i: usize) -> String {
         match self {
             ColumnData::Int(v) => v[i].to_string(),
+            ColumnData::Int64(v) => v[i].to_string(),
             ColumnData::Float(v) => v[i].to_string(),
             ColumnData::String(v) => v[i].clone(),
             ColumnData::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
@@ -245,8 +251,9 @@ mod tests {
 
     #[test]
     fn columndata_len_is_empty_dtype_str() {
-        let cols: [(ColumnData, usize, &str); 5] = [
+        let cols: [(ColumnData, usize, &str); 6] = [
             (ColumnData::Int(vec![1, 2]), 2, "int32"),
+            (ColumnData::Int64(vec![1 << 40]), 1, "int64"),
             (ColumnData::Float(vec![1.0]), 1, "float64"),
             (ColumnData::Bool(vec![true, false, true]), 3, "bool"),
             (ColumnData::String(vec!["a".into()]), 1, "string"),

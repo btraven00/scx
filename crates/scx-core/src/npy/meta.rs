@@ -127,6 +127,7 @@ pub(super) struct Meta {
 pub(super) fn col_kind(data: &ColumnData) -> &'static str {
     match data {
         ColumnData::Int(_) => "int",
+        ColumnData::Int64(_) => "int64",
         ColumnData::Float(_) => "float",
         ColumnData::Bool(_) => "bool",
         ColumnData::String(_) => "string",

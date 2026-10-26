@@ -298,7 +298,8 @@ impl ColumnAcc {
     fn for_field(name: &str, dtype: &ArrowType) -> Option<Self> {
         let data = match dtype {
             ArrowType::Utf8 | ArrowType::LargeUtf8 => ColumnData::String(Vec::new()),
-            ArrowType::Int64 | ArrowType::Int32 => ColumnData::Int(Vec::new()),
+            ArrowType::Int32 => ColumnData::Int(Vec::new()),
+            ArrowType::Int64 => ColumnData::Int64(Vec::new()),
             ArrowType::Float32 | ArrowType::Float64 => ColumnData::Float(Vec::new()),
             ArrowType::Boolean => ColumnData::Bool(Vec::new()),
             _ => return None,
@@ -327,20 +328,19 @@ impl ColumnAcc {
                 }
             }
             ColumnData::Int(out) => {
-                if let Some(arr) = any.downcast_ref::<Int64Array>() {
-                    for i in 0..arr.len() {
-                        out.push(if arr.is_null(i) {
-                            0
-                        } else {
-                            arr.value(i) as i32
-                        });
-                    }
-                } else if let Some(arr) = any.downcast_ref::<Int32Array>() {
-                    for i in 0..arr.len() {
-                        out.push(if arr.is_null(i) { 0 } else { arr.value(i) });
-                    }
-                } else {
-                    return Err(net_err(format!("`{}` is not an integer column", self.name)));
+                let arr = any
+                    .downcast_ref::<Int32Array>()
+                    .ok_or_else(|| net_err(format!("`{}` is not Int32", self.name)))?;
+                for i in 0..arr.len() {
+                    out.push(if arr.is_null(i) { 0 } else { arr.value(i) });
+                }
+            }
+            ColumnData::Int64(out) => {
+                let arr = any
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| net_err(format!("`{}` is not Int64", self.name)))?;
+                for i in 0..arr.len() {
+                    out.push(if arr.is_null(i) { 0 } else { arr.value(i) });
                 }
             }
             ColumnData::Float(out) => {

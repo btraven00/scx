@@ -224,6 +224,13 @@ pub(super) fn write_1d_i32(path: &Path, data: &[i32]) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn write_1d_i64(path: &Path, data: &[i64]) -> Result<()> {
+    let mut w = BufWriter::new(File::create(path)?);
+    write_npy_header(&mut w, "<i8", &[data.len()])?;
+    w.write_all(as_bytes(data))?;
+    Ok(())
+}
+
 pub(super) fn write_1d_f64(path: &Path, data: &[f64]) -> Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     write_npy_header(&mut w, "<f8", &[data.len()])?;
@@ -316,6 +323,13 @@ pub(super) fn read_1d_i32(path: &Path) -> Result<Vec<i32>> {
     bytes_to_vec::<i32>(&mmap[off..], shape[0])
 }
 
+pub(super) fn read_1d_i64(path: &Path) -> Result<Vec<i64>> {
+    let (descr, shape, mmap, off) = read_npy_raw(path)?;
+    check_1d(&shape, path)?;
+    check_descr(&descr, "<i8", path)?;
+    bytes_to_vec::<i64>(&mmap[off..], shape[0])
+}
+
 pub(super) fn read_1d_f64(path: &Path) -> Result<Vec<f64>> {
     let (descr, shape, mmap, off) = read_npy_raw(path)?;
     check_1d(&shape, path)?;
@@ -396,6 +410,7 @@ pub(super) fn check_descr(got: &str, expected: &str, _path: &Path) -> Result<()>
 pub(super) fn write_col(col_dir: &Path, col: &Column) -> Result<()> {
     match &col.data {
         ColumnData::Int(v) => write_1d_i32(&col_dir.join(format!("{}.npy", col.name)), v)?,
+        ColumnData::Int64(v) => write_1d_i64(&col_dir.join(format!("{}.npy", col.name)), v)?,
         ColumnData::Float(v) => write_1d_f64(&col_dir.join(format!("{}.npy", col.name)), v)?,
         ColumnData::Bool(v) => write_1d_bool(&col_dir.join(format!("{}.npy", col.name)), v)?,
         ColumnData::String(v) => write_txt(&col_dir.join(format!("{}_strings.txt", col.name)), v)?,
@@ -413,6 +428,7 @@ pub(super) fn write_col(col_dir: &Path, col: &Column) -> Result<()> {
 pub(super) fn read_col(col_dir: &Path, name: &str, cm: &ColumnMeta) -> Result<Column> {
     let data = match cm.kind.as_str() {
         "int" => ColumnData::Int(read_1d_i32(&col_dir.join(format!("{name}.npy")))?),
+        "int64" => ColumnData::Int64(read_1d_i64(&col_dir.join(format!("{name}.npy")))?),
         "float" => ColumnData::Float(read_1d_f64(&col_dir.join(format!("{name}.npy")))?),
         "bool" => ColumnData::Bool(read_1d_bool(&col_dir.join(format!("{name}.npy")))?),
         "string" => ColumnData::String(read_txt(&col_dir.join(format!("{name}_strings.txt")))?),

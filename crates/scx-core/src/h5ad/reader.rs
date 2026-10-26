@@ -293,7 +293,7 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
             let v: Vec<i8> = ds.read_1d::<i8>()?.to_vec();
             Ok(ColumnData::Bool(v.into_iter().map(|x| x != 0).collect()))
         }
-        TypeDescriptor::Integer(_) => Ok(ColumnData::Int(ds.read_1d::<i32>()?.to_vec())),
+        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => read_int_column(&ds),
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
             Ok(ColumnData::String(read_strings(file, path)?))
         }
@@ -302,6 +302,17 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
             other
         ))),
     }
+}
+
+/// An integer dataset as `Int64` when its type is 64-bit (or unsigned
+/// 32-bit) and `Int` otherwise, so values beyond i32 are never clamped.
+fn read_int_column(ds: &hdf5::Dataset) -> Result<ColumnData> {
+    Ok(match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::Integer(IntSize::U8)
+        | TypeDescriptor::Unsigned(IntSize::U4)
+        | TypeDescriptor::Unsigned(IntSize::U8) => ColumnData::Int64(ds.read_1d::<i64>()?.to_vec()),
+        _ => ColumnData::Int(ds.read_1d::<i32>()?.to_vec()),
+    })
 }
 
 /// Read a categorical group: codes (i8 or i16) + categories (string-array).
@@ -422,9 +433,7 @@ fn ad_read_nullable(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool
         | TypeDescriptor::FixedUnicode(_)
         | TypeDescriptor::FixedAscii(_) => ColumnData::String(crate::h5_str::read_str_1d(&ds)?),
         TypeDescriptor::Float(_) => ColumnData::Float(ds.read_1d::<f64>()?.to_vec()),
-        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
-            ColumnData::Int(ds.read_1d::<i32>()?.to_vec())
-        }
+        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => read_int_column(&ds)?,
         TypeDescriptor::Boolean => ColumnData::Bool(ds.read_1d::<bool>()?.to_vec()),
         other => {
             return Err(ScxError::InvalidFormat(format!(

@@ -525,6 +525,7 @@ fn build_obs(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Int,
+    Int64,
     Float,
     Bool,
     Str,
@@ -534,6 +535,7 @@ enum Kind {
 fn kind_of(c: &ColumnData) -> Kind {
     match c {
         ColumnData::Int(_) => Kind::Int,
+        ColumnData::Int64(_) => Kind::Int64,
         ColumnData::Float(_) => Kind::Float,
         ColumnData::Bool(_) => Kind::Bool,
         ColumnData::String(_) => Kind::Str,
@@ -544,8 +546,8 @@ fn kind_of(c: &ColumnData) -> Kind {
 /// Stack one obs column across all inputs; returns the data and the
 /// per-value missing flags. Values from an input without the column are
 /// missing, as are values already NA in their input. Mixed dtypes promote:
-/// int+float→float, string+categorical→categorical, anything else→string
-/// (pandas' object fallback).
+/// int32+int64→int64, int+float→float, string+categorical→categorical,
+/// anything else→string (pandas' object fallback).
 fn concat_column(cols: &[Option<&Column>], lens: &[usize]) -> (ColumnData, Vec<bool>) {
     let missing: Vec<bool> = cols
         .iter()
@@ -564,7 +566,12 @@ fn concat_data(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
     }
     let target = if kinds.iter().all(|k| *k == kinds[0]) {
         kinds[0]
-    } else if kinds.iter().all(|k| matches!(k, Kind::Int | Kind::Float)) {
+    } else if kinds.iter().all(|k| matches!(k, Kind::Int | Kind::Int64)) {
+        Kind::Int64
+    } else if kinds
+        .iter()
+        .all(|k| matches!(k, Kind::Int | Kind::Int64 | Kind::Float))
+    {
         Kind::Float
     } else if kinds.iter().all(|k| matches!(k, Kind::Str | Kind::Cat)) {
         Kind::Cat
@@ -582,6 +589,17 @@ fn concat_data(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
                 }
             }
             ColumnData::Int(out)
+        }
+        Kind::Int64 => {
+            let mut out = Vec::new();
+            for (c, &n) in cols.iter().zip(lens) {
+                match c {
+                    Some(ColumnData::Int64(v)) => out.extend_from_slice(v),
+                    Some(ColumnData::Int(v)) => out.extend(v.iter().map(|&x| x as i64)),
+                    _ => out.extend(std::iter::repeat_n(0, n)),
+                }
+            }
+            ColumnData::Int64(out)
         }
         Kind::Float => {
             let mut out = Vec::new();
@@ -666,6 +684,7 @@ fn col_f64(c: &ColumnData) -> Vec<f64> {
     match c {
         ColumnData::Float(v) => v.clone(),
         ColumnData::Int(v) => v.iter().map(|&x| x as f64).collect(),
+        ColumnData::Int64(v) => v.iter().map(|&x| x as f64).collect(),
         ColumnData::Bool(v) => v.iter().map(|&x| x as u8 as f64).collect(),
         other => vec![f64::NAN; other.len()],
     }
@@ -675,6 +694,7 @@ fn col_str(c: &ColumnData) -> Vec<String> {
     match c {
         ColumnData::String(v) => v.clone(),
         ColumnData::Int(v) => v.iter().map(|x| x.to_string()).collect(),
+        ColumnData::Int64(v) => v.iter().map(|x| x.to_string()).collect(),
         ColumnData::Float(v) => v.iter().map(|x| x.to_string()).collect(),
         ColumnData::Bool(v) => v
             .iter()
