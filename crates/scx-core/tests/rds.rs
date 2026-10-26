@@ -203,6 +203,58 @@ fn non_seurat_rds_is_rejected() {
     let err = scx_core::rds::RdsSeuratReader::open(&p, 4, None, None)
         .err()
         .unwrap();
-    assert!(err.to_string().contains("not a Seurat object"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("not a Seurat object; the file holds a integer vector"),
+        "{err}"
+    );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A gzip around the (already gzipped) .rds, as GEO serves `x.rds.gz`, and a
+/// gzip around an uncompressed one: both are detected and read.
+#[test]
+fn gzipped_rds_is_read() {
+    use std::io::{Read, Write};
+    let dir = tempfile::tempdir().unwrap();
+    let rds = std::fs::read(tiny("tiny_v4.rds")).unwrap();
+    let mut plain = Vec::new();
+    flate2::read::MultiGzDecoder::new(&rds[..])
+        .read_to_end(&mut plain)
+        .unwrap();
+    for (name, inner) in [("double.rds.gz", &rds), ("single.rds.gz", &plain)] {
+        let p = dir.path().join(name);
+        let mut enc = flate2::write::GzEncoder::new(
+            std::fs::File::create(&p).unwrap(),
+            flate2::Compression::fast(),
+        );
+        enc.write_all(inner).unwrap();
+        enc.finish().unwrap();
+        assert_eq!(detect(&p), Some(Format::Rds), "{name}");
+        let r = block_on(open(p.to_str().unwrap(), &OpenOptions::new(4))).unwrap();
+        assert_eq!(r.shape(), (6, 5), "{name}");
+    }
+}
+
+/// `rds::tree` shows the object's structure without reading its matrices.
+#[test]
+fn tree_shows_classes_slots_and_lengths() {
+    let t = scx_core::rds::tree(&tiny("tiny_v5_split.rds"), 4).unwrap();
+    assert!(t.starts_with("<root>: S4 <Seurat>"), "{t}");
+    assert!(t.contains("@layers: list[2]"), "{t}");
+    assert!(
+        t.contains("$counts.d0: S4 <dgCMatrix>") || t.contains("$counts.d1: S4 <dgCMatrix>"),
+        "{t}"
+    );
+    assert!(t.contains("@cells: lgl[") && t.contains("<LogMap>"), "{t}");
+}
+
+/// Without the `net` feature a URL says so, instead of "could not detect format".
+#[cfg(not(feature = "net"))]
+#[test]
+fn url_without_net_feature_says_so() {
+    let err = block_on(open("https://example.org/obj.rds", &OpenOptions::new(4)))
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("without network support"), "{err}");
 }

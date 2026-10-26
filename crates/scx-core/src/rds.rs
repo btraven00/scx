@@ -10,35 +10,40 @@
 mod seurat;
 mod xdr;
 
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 pub use seurat::RdsSeuratReader;
 
 use crate::error::{Result, ScxError};
 
-/// The decompressed stream of `path`, positioned at its start.
+/// The decompressed stream of `path`, positioned at its start. Gzip layers
+/// are peeled until the R stream shows: GEO's `x.rds.gz` is often a gzip
+/// around `saveRDS`'s own gzip.
 pub(crate) fn open_stream(path: &Path) -> Result<xdr::Xdr<Box<dyn Read + Send>>> {
-    let mut f = std::fs::File::open(path)?;
-    let mut magic = [0u8; 6];
-    let n = f.read(&mut magic)?;
-    drop(f);
-    let file = BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
-    let r: Box<dyn Read + Send> = match &magic[..n] {
-        [0x1f, 0x8b, ..] => Box::new(BufReader::with_capacity(
-            1 << 20,
-            flate2::read::MultiGzDecoder::new(file),
-        )),
-        [b'B', b'Z', b'h', ..] | [0xfd, b'7', b'z', b'X', b'Z', 0] => {
-            return Err(ScxError::InvalidFormat(format!(
-                "rds: '{}' is bzip2/xz-compressed; re-save it in R with \
-                 saveRDS(obj, file, compress = TRUE) (gzip)",
-                path.display()
-            )));
+    let mut r: Box<dyn BufRead + Send> = Box::new(BufReader::with_capacity(
+        1 << 20,
+        std::fs::File::open(path)?,
+    ));
+    for _ in 0..3 {
+        match r.fill_buf()? {
+            [0x1f, 0x8b, ..] => {
+                r = Box::new(BufReader::with_capacity(
+                    1 << 20,
+                    flate2::read::MultiGzDecoder::new(r),
+                ))
+            }
+            [b'B', b'Z', b'h', ..] | [0xfd, b'7', b'z', b'X', b'Z', 0, ..] => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "rds: '{}' is bzip2/xz-compressed; re-save it in R with \
+                     saveRDS(obj, file, compress = TRUE) (gzip)",
+                    path.display()
+                )));
+            }
+            _ => break,
         }
-        _ => Box::new(file),
-    };
-    Ok(xdr::Xdr::new(r))
+    }
+    Ok(xdr::Xdr::new(Box::new(r)))
 }
 
 /// Whether `path` is an R serialization stream (gzip or plain, `.rds` or `.rda`).
@@ -47,26 +52,57 @@ pub fn sniff(path: &Path) -> bool {
         return false;
     }
     let Ok(mut x) = open_stream(path) else {
-        // bzip2/xz: still R data if the extension says so, so open() can explain.
-        return matches!(
-            path.extension()
-                .and_then(|e| e.to_str())
-                .map(str::to_ascii_lowercase)
-                .as_deref(),
-            Some("rds" | "rda" | "rdata")
-        );
+        // bzip2/xz: still R data if the name says so, so open() can explain.
+        return is_rds_name(&path.to_string_lossy());
     };
     x.header().is_ok()
 }
 
-/// Whether a URL or path names an R data file by its extension.
+/// The object tree of an R data file, as text, without reading its large
+/// vectors: classes, S4 slots (`@name`), list element names, lengths and
+/// `dim`s, to `max_depth` levels and up to 12 children per node.
+pub fn tree(path: &Path, max_depth: usize) -> Result<String> {
+    let mut x = open_stream(path)?;
+    x.header()?;
+    let root = xdr::Parser::new(&mut x).item()?;
+    let mut out = String::new();
+    xdr::write_tree(&root, "<root>", 0, max_depth, &mut out);
+    Ok(out)
+}
+
+/// Whether a URL or path names an R data file by its extension (`.rds`,
+/// `.rda`, `.rdata`, each optionally `.gz`). Percent-escapes are decoded
+/// first: GEO links spell `x.rds.gz` as `x%2Erds%2Egz`.
 pub fn is_rds_name(location: &str) -> bool {
-    let path = location
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    [".rds", ".rda", ".rdata"].iter().any(|e| path.ends_with(e))
+    let path = location.split(['?', '#']).next().unwrap_or_default();
+    let name = percent_decode(path).to_ascii_lowercase();
+    let name = name.strip_suffix(".gz").unwrap_or(&name);
+    [".rds", ".rda", ".rdata"].iter().any(|e| name.ends_with(e))
+}
+
+/// `%XX` escapes decoded; anything malformed is kept as is.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (
+            b[i],
+            b.get(i + 1).copied().and_then(hex),
+            b.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, ..) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A downloaded copy of a remote file, deleted when dropped.
@@ -112,5 +148,10 @@ mod tests {
         assert!(super::is_rds_name("s3://b/k/obj.RDS?versionId=1"));
         assert!(super::is_rds_name("data.RData"));
         assert!(!super::is_rds_name("https://x.org/a.parquet"));
+        assert!(super::is_rds_name(
+            "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE138nnn/GSE138826/suppl/GSE138826%5Fregen%5Fdata%2Erds%2Egz"
+        ));
+        assert!(super::is_rds_name("obj.rda.gz"));
+        assert!(!super::is_rds_name("matrix.mtx.gz"));
     }
 }

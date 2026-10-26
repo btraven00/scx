@@ -612,6 +612,97 @@ fn expand_altrep(class: Option<&str>, state: Node) -> Result<Node> {
     }
 }
 
+/// Append `node` and its children (attributes / S4 slots, list elements) to
+/// `out`, one line each, indented by depth.
+pub(crate) fn write_tree(
+    node: &Node,
+    name: &str,
+    depth: usize,
+    max_depth: usize,
+    out: &mut String,
+) {
+    const MAX_CHILDREN: usize = 12;
+    let kind = match &node.kind {
+        Kind::Null => "NULL".to_string(),
+        Kind::Sym(_) if node.is_null() => "NULL".to_string(),
+        Kind::Sym(s) => format!("symbol {s}"),
+        Kind::Str(v) if v.len() <= 3 => format!(
+            "chr[{}] {:?}",
+            v.len(),
+            v.iter()
+                .map(|s| s.as_deref().unwrap_or("NA"))
+                .collect::<Vec<_>>()
+        ),
+        Kind::Str(v) => format!("chr[{}]", v.len()),
+        Kind::Int(v) if v.len() <= 3 => format!("int[{}] {v:?}", v.len()),
+        Kind::Int(v) => format!("int[{}]", v.len()),
+        Kind::Lgl(v) => format!("lgl[{}]", v.len()),
+        Kind::Real(v) if v.len() <= 3 => format!("num[{}] {v:?}", v.len()),
+        Kind::Real(v) => format!("num[{}]", v.len()),
+        Kind::Lazy { num, len, .. } => format!(
+            "{}[{len}]",
+            match num {
+                Num::Int => "int",
+                Num::Lgl => "lgl",
+                Num::Real => "num",
+            }
+        ),
+        Kind::List(v) => format!("list[{}]", v.len()),
+        Kind::S4 => "S4".to_string(),
+        Kind::Other => "(language object, environment or similar)".to_string(),
+    };
+    let mut line = format!("{}{name}: {kind}", "  ".repeat(depth));
+    let class = node.class();
+    if !class.is_empty() {
+        line += &format!(" <{}>", class.join("/"));
+    }
+    if let Some(Kind::Int(d)) = node.attr("dim").map(|d| &d.kind) {
+        line += &format!(" dim={d:?}");
+    }
+    out.push_str(&line);
+    out.push('\n');
+    if depth >= max_depth {
+        return;
+    }
+    let pad = "  ".repeat(depth + 1);
+    // S4 slots and other attributes; class/dim are on the line already, and
+    // names/row.names are just long label vectors.
+    let attrs: Vec<_> = node
+        .attr
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "class" | "dim" | "names" | "row.names"))
+        .collect();
+    for (k, v) in attrs.iter().take(MAX_CHILDREN) {
+        let label = if matches!(node.kind, Kind::S4) {
+            format!("@{k}")
+        } else {
+            format!("attr({k})")
+        };
+        write_tree(v, &label, depth + 1, max_depth, out);
+    }
+    if attrs.len() > MAX_CHILDREN {
+        out.push_str(&format!(
+            "{pad}... {} more attributes\n",
+            attrs.len() - MAX_CHILDREN
+        ));
+    }
+    let names = node.names();
+    let items = node.items();
+    for (i, (tag, v)) in items.iter().enumerate().take(MAX_CHILDREN) {
+        let label = tag
+            .clone()
+            .or_else(|| names.get(i).cloned())
+            .map_or_else(|| format!("[[{}]]", i + 1), |n| format!("${n}"));
+        write_tree(v, &label, depth + 1, max_depth, out);
+    }
+    if items.len() > MAX_CHILDREN {
+        out.push_str(&format!(
+            "{pad}... {} more elements\n",
+            items.len() - MAX_CHILDREN
+        ));
+    }
+}
+
 /// Big-endian 32-bit integers.
 pub(crate) fn be_i32s(raw: &[u8]) -> Vec<i32> {
     raw.as_chunks::<4>()

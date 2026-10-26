@@ -3612,6 +3612,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "clap",
+ "flate2",
  "futures",
  "owo-colors",
  "parquet",

@@ -76,6 +76,14 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
         return open_parquet(input, opts).await;
     }
 
+    #[cfg(not(feature = "net"))]
+    if input.contains("://") && !Path::new(input).exists() {
+        return Err(ScxError::InvalidFormat(format!(
+            "'{input}' is a URL, but this scx was built without network support; \
+             rebuild with the `net` feature (cargo install scx-cli --features net)"
+        )));
+    }
+
     let path = Path::new(input);
     let fmt = detect::detect(path)
         .ok_or_else(|| ScxError::InvalidFormat(format!("could not detect format of '{input}'")))?;

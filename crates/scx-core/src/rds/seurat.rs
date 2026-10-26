@@ -222,12 +222,62 @@ fn find_seurat(root: &Node) -> Result<&Node> {
         .map(|(_, n)| n)
         .find(|n| n.has_class("Seurat"))
         .ok_or_else(|| {
-            let class = root.class().join("/");
             bad(format!(
-                "not a Seurat object (top-level class: {})",
-                if class.is_empty() { "none" } else { &class }
+                "not a Seurat object; the file holds {}",
+                describe(root)
             ))
         })
+}
+
+/// What a top-level object is, for the "not a Seurat object" error: its
+/// class, or for a plain list its elements' names and classes.
+fn describe(n: &Node) -> String {
+    let class = |n: &Node| match n.class().join("/") {
+        c if c.is_empty() => kind_name(n).to_string(),
+        c => c,
+    };
+    if !n.class().is_empty() || n.items().is_empty() {
+        return format!("a {}", class(n));
+    }
+    let names = n.names();
+    let shown: Vec<String> = n
+        .items()
+        .iter()
+        .enumerate()
+        .take(8)
+        .map(|(i, (tag, v))| {
+            let name = tag
+                .clone()
+                .or_else(|| names.get(i).cloned())
+                .unwrap_or_default();
+            format!("{name}: {}", class(v))
+        })
+        .collect();
+    let more = n.items().len().saturating_sub(shown.len());
+    format!(
+        "a list of {} ({}{})",
+        n.items().len(),
+        shown.join(", "),
+        if more > 0 {
+            format!(", +{more} more")
+        } else {
+            String::new()
+        }
+    )
+}
+
+fn kind_name(n: &Node) -> &'static str {
+    match &n.kind {
+        Kind::Null => "NULL",
+        Kind::Sym(_) => "symbol",
+        Kind::Str(_) => "character vector",
+        Kind::Int(_) | Kind::Lazy { num: Num::Int, .. } => "integer vector",
+        Kind::Lgl(_) | Kind::Lazy { num: Num::Lgl, .. } => "logical vector",
+        Kind::Real(_) | Kind::Lazy { num: Num::Real, .. } => "numeric vector",
+        Kind::List(_) => "list",
+        Kind::S4 => "S4 object",
+        Kind::Other => "R object",
+    }
 }
 
 /// The dgCMatrix layers named `layer`, or split as `layer.<group>`, in stream order.

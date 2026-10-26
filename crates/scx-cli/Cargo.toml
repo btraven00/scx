@@ -39,6 +39,7 @@ polars = { version = "0.46", default-features = false, features = ["csv", "parqu
 
 [dev-dependencies]
 tempfile = "3"
+flate2 = "1"
 # Build a Tahoe-shaped Parquet fixture in the net e2e test (gated by cfg(net)).
 arrow = "59"
 parquet = "59"

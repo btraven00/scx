@@ -526,13 +526,19 @@ async fn run() -> anyhow::Result<()> {
                     inspect(&mut r, &input, "MatrixMarket").await?;
                 }
                 Some(Format::Rds) => {
-                    let mut r = scx_core::rds::RdsSeuratReader::open(
+                    match scx_core::rds::RdsSeuratReader::open(
                         input_path,
                         chunk,
                         None,
                         layer.as_deref(),
-                    )?;
-                    inspect(&mut r, &input, "RDS (Seurat)").await?;
+                    ) {
+                        Ok(mut r) => inspect(&mut r, &input, "RDS (Seurat)").await?,
+                        // Not something scx converts: show what the file holds.
+                        Err(e) => {
+                            println!("File   : {input}\nFormat : RDS\n{e}\n");
+                            print!("{}", scx_core::rds::tree(input_path, 4)?);
+                        }
+                    }
                 }
                 Some(Format::PlainH5) => {
                     let nodes = walk_h5(input_path, 2)?;

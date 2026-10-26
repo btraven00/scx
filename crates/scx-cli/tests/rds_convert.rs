@@ -57,3 +57,23 @@ fn converts_rds_url() {
     convert(&url, &out);
     assert_tiny(&out);
 }
+
+/// GEO's `x.rds.gz`: a gzip around saveRDS's own gzip, named with
+/// percent-escapes in the URL (`x%2Erds%2Egz`).
+#[cfg(feature = "net")]
+#[test]
+fn converts_double_gzipped_rds_url() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let gz = dir.path().join("obj.rds.gz");
+    let mut enc = flate2::write::GzEncoder::new(
+        std::fs::File::create(&gz).unwrap(),
+        flate2::Compression::fast(),
+    );
+    enc.write_all(&std::fs::read(fixture()).unwrap()).unwrap();
+    enc.finish().unwrap();
+    let out = dir.path().join("out.h5ad");
+    let url = format!("file://{}/obj%2Erds%2Egz", dir.path().display());
+    convert(&url, &out);
+    assert_tiny(&out);
+}
