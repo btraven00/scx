@@ -216,6 +216,36 @@ fn plain_tsv_sidecar_keeps_int64_and_rejects_ragged_rows() {
 }
 
 #[test]
+fn tsv_row_with_extra_fields_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let bin = dir.path().join("counts_cells.bin");
+    write_store(&bin, false);
+    write_gz(
+        &dir.path().join("obs.tsv.gz"),
+        "cell_id\tx\na\t1\tEXTRA\nb\t2\nc\t3\nd\t4\n",
+    );
+    let mut reader = BixverseReader::open(&bin, 10, BixverseLayer::Raw).unwrap();
+    assert!(block_on(reader.obs()).is_err());
+}
+
+#[test]
+fn crlf_tsv_sidecar_types_the_last_column() {
+    let dir = TempDir::new().unwrap();
+    let bin = dir.path().join("counts_cells.bin");
+    write_store(&bin, false);
+    std::fs::write(
+        dir.path().join("obs.tsv"),
+        "cell_id\tn_umi\r\na\t1\r\nb\t2\r\nc\t3\r\nd\t4\r\n",
+    )
+    .unwrap();
+
+    let mut reader = BixverseReader::open(&bin, 10, BixverseLayer::Raw).unwrap();
+    let obs = block_on(reader.obs()).unwrap();
+    assert_eq!(obs.columns[0].name, "n_umi");
+    assert!(matches!(&obs.columns[0].data, ColumnData::Int(v) if v == &[1, 2, 3, 4]));
+}
+
+#[test]
 fn sidecar_row_count_must_match_the_store() {
     let dir = TempDir::new().unwrap();
     let bin = dir.path().join("counts_cells.bin");

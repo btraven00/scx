@@ -276,10 +276,9 @@ fn read_tsv_table(path: &Path) -> Result<Table> {
     let mut cols: Vec<Vec<String>> = vec![Vec::new(); names.len()];
     for (i, line) in lines.enumerate() {
         let line = line?;
-        let mut n = 0;
+        let n = line.split('\t').count();
         for (col, field) in cols.iter_mut().zip(line.split('\t')) {
             col.push(field.to_string());
-            n += 1;
         }
         if n != names.len() {
             return Err(bad(format!(
