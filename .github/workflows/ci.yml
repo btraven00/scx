@@ -22,10 +22,11 @@ jobs:
         include:
           # Default build path: vendored static HDF5 + zlib. No system libhdf5
           # needed. This is what cargo install / wheels / source-tree users get.
-          # Also the one job that builds and tests the `net` feature.
+          # Also the one job that builds and tests the `net` and `bixverse`
+          # features; the system job below tests the build without bixverse.
           - os: ubuntu-latest
             hdf5: vendored
-            cargo_flags: "--features scx-cli/net"
+            cargo_flags: "--features scx-cli/net,scx-cli/bixverse-parquet"
             apt_packages: ""
           # Conda + distro packager path: link the system libhdf5.
           - os: ubuntu-latest
@@ -90,7 +91,7 @@ jobs:
       - name: Install system HDF5
         timeout-minutes: 10
         run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libhdf5-dev
-      - run: cargo check --workspace --all-targets --no-default-features --features scx-cli/net
+      - run: cargo check --workspace --all-targets --no-default-features --features scx-cli/net,scx-cli/bixverse-parquet
 
   # Rust coverage → Codecov. Runs against system HDF5 (fast: skips the
   # from-source vendored build). Gating is done by Codecov's project/patch
@@ -112,7 +113,7 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         # Strip the pyo3 bindings crate (exercised via Python, not the Rust
         # suite) so the lcov is just crates/.
-        run: cargo llvm-cov --all --no-default-features --features scx-cli/net --ignore-filename-regex 'python/' --lcov --output-path lcov.info
+        run: cargo llvm-cov --all --no-default-features --features scx-cli/net,scx-cli/bixverse-parquet --ignore-filename-regex 'python/' --lcov --output-path lcov.info
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
