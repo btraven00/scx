@@ -24,4 +24,4 @@ pyo3 = { version = "0.29", features = ["extension-module"] }
 # IntoPyArray (numpy takes ownership of the allocation), avoiding the per-chunk
 # PyBytes memcpy that bottlenecked open_stream (~355 MB/s). Tracks the pyo3 minor.
 numpy = "0.29"
-scx-core = { path = "../../crates/scx-core", default-features = false, features = ["zarr"] }
+scx-core = { path = "../../crates/scx-core", default-features = false, features = ["zarr", "bixverse"] }
