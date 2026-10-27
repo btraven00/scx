@@ -9,9 +9,10 @@ use flate2::Compression;
 use futures::{executor::block_on, StreamExt};
 use scx_core::bixverse::{BixverseLayer, BixverseReader};
 use scx_core::detect::{detect, Format};
-use scx_core::dtype::TypedVec;
+use scx_core::dtype::{DataType, TypedVec};
 use scx_core::ir::ColumnData;
 use scx_core::stream::DatasetReader;
+use scx_core::OpenOptions;
 use tempfile::TempDir;
 
 const N_VARS: usize = 5;
@@ -58,7 +59,7 @@ fn expected_csr() -> (Vec<u64>, Vec<u32>, Vec<f32>) {
 }
 
 /// Stream X and stitch the chunks back into one CSR.
-fn read_x(reader: &mut BixverseReader) -> (Vec<u64>, Vec<u32>, Vec<f32>, usize) {
+fn read_x(reader: &mut dyn DatasetReader) -> (Vec<u64>, Vec<u32>, Vec<f32>, usize) {
     let (mut indptr, mut indices, mut data) = (vec![0u64], Vec::new(), Vec::new());
     let mut n_chunks = 0;
     block_on(async {
@@ -102,6 +103,39 @@ fn streams_v3_and_v4_stores_as_the_source_matrix() {
         assert_eq!(indptr, e_indptr, "v3: {v3}");
         assert_eq!(indices, e_indices, "v3: {v3}");
         assert_eq!(data, e_data, "v3: {v3}");
+    }
+}
+
+#[test]
+fn factory_opens_the_raw_and_the_norm_layer() {
+    let dir = TempDir::new().unwrap();
+    let bin = dir.path().join("counts_cells.bin");
+    write_store(&bin, false);
+    let path = bin.to_str().unwrap();
+    let (e_indptr, e_indices, e_data) = expected_csr();
+
+    let mut raw = block_on(scx_core::open(path, &OpenOptions::new(10))).unwrap();
+    assert_eq!(raw.dtype(), DataType::F32);
+    let (indptr, indices, data, _) = read_x(raw.as_mut());
+    assert_eq!(
+        (indptr, indices, data),
+        (e_indptr.clone(), e_indices.clone(), e_data)
+    );
+
+    let mut opts = OpenOptions::new(10);
+    opts.layer = Some("norm".into());
+    let mut norm = block_on(scx_core::open(path, &opts)).unwrap();
+    let (indptr, indices, data, _) = read_x(norm.as_mut());
+    assert_eq!((indptr, indices), (e_indptr, e_indices));
+    // ln1p(x / library size * 1e4), stored as f16.
+    let expected = DENSE.iter().flat_map(|row| {
+        let sum: u32 = row.iter().sum();
+        row.iter()
+            .filter(|&&v| v > 0)
+            .map(move |&v| (v as f32 / sum as f32 * 1e4).ln_1p())
+    });
+    for (got, want) in data.iter().zip(expected) {
+        assert!((got - want).abs() < 1e-2, "{got} vs {want}");
     }
 }
 
@@ -163,6 +197,25 @@ fn tsv_gz_sidecar_is_typed() {
 }
 
 #[test]
+fn plain_tsv_sidecar_keeps_int64_and_rejects_ragged_rows() {
+    let dir = TempDir::new().unwrap();
+    let bin = dir.path().join("counts_cells.bin");
+    write_store(&bin, false);
+    std::fs::write(
+        dir.path().join("var.tsv"),
+        "gene_id\tid\ng0\t3000000000\ng1\t1\ng2\t2\ng3\t3\ng4\t4\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("obs.tsv"), "cell_id\tx\na\t1\nb\n").unwrap();
+
+    let mut reader = BixverseReader::open(&bin, 10, BixverseLayer::Raw).unwrap();
+    let var = block_on(reader.var()).unwrap();
+    assert!(matches!(&var.columns[0].data, ColumnData::Int64(v) if v[0] == 3_000_000_000));
+    let err = block_on(reader.obs()).unwrap_err().to_string();
+    assert!(err.contains("row 2 has 1 fields"), "{err}");
+}
+
+#[test]
 fn sidecar_row_count_must_match_the_store() {
     let dir = TempDir::new().unwrap();
     let bin = dir.path().join("counts_cells.bin");
@@ -182,12 +235,16 @@ fn rejects_a_gene_based_store() {
         .finalise()
         .unwrap();
     assert!(BixverseReader::open(&bin, 10, BixverseLayer::Raw).is_err());
+    assert!(BixverseReader::open(dir.path().join("missing.bin"), 10, BixverseLayer::Raw).is_err());
 }
 
 #[cfg(feature = "bixverse-parquet")]
 #[test]
 fn parquet_sidecar_matches_the_tsv_sidecar() {
-    use arrow::array::{ArrayRef, DictionaryArray, Float64Array, Int32Array, StringArray};
+    use arrow::array::{
+        ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int32Array, Int64Array, StringArray,
+        UInt64Array,
+    };
     use arrow::datatypes::UInt32Type;
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -218,6 +275,24 @@ fn parquet_sidecar_matches_the_tsv_sidecar() {
                 "x", "x", "y", "y",
             ])),
         ),
+        (
+            "keep",
+            Arc::new(BooleanArray::from(vec![true, false, true, true])),
+        ),
+        (
+            "note",
+            Arc::new(StringArray::from(vec![
+                None,
+                Some("p"),
+                Some("q"),
+                Some("r"),
+            ])),
+        ),
+        (
+            "big",
+            Arc::new(Int64Array::from(vec![3_000_000_000, 1, 2, 3])),
+        ),
+        ("huge", Arc::new(UInt64Array::from(vec![u64::MAX, 1, 2, 3]))),
     ];
     let batch = RecordBatch::try_from_iter(cols).unwrap();
     let mut w = ArrowWriter::try_new(
@@ -239,4 +314,11 @@ fn parquet_sidecar_matches_the_tsv_sidecar() {
         &col("cluster").data,
         ColumnData::Categorical { codes, levels, .. } if codes == &[0, 0, 1, 1] && levels == &["x", "y"]
     ));
+    assert!(matches!(&col("keep").data, ColumnData::Bool(v) if v == &[true, false, true, true]));
+    assert!(matches!(&col("note").data, ColumnData::String(_)));
+    assert!(col("note").is_na(0));
+    assert!(matches!(&col("big").data, ColumnData::Int64(v) if v[0] == 3_000_000_000));
+    // Beyond i64: widened to float rather than read as missing.
+    assert!(matches!(&col("huge").data, ColumnData::Float(v) if v[0] == u64::MAX as f64));
+    assert!(!col("huge").is_na(0));
 }

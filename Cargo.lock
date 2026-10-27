@@ -3702,6 +3702,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "bixverse-sc-data",
  "clap",
  "flate2",
  "futures",
