@@ -1,9 +1,11 @@
 Package: picklerick
 Title: Fast Single-Cell Format Conversion via SCX
 Version: 0.1.0
-Authors@R:
-    person("SCX Authors", role = c("aut", "cre"),
-           email = "placeholder@example.com")
+Authors@R: c(
+    person("ben", role = c("aut", "cre"),
+           email = "ben.uzh@proton.me"),
+    person("Atreya", "Choudhury", role = "aut",
+           email = "atreyachoudhury@hotmail.com"))
 Description: R bindings to the SCX streaming interop engine for single-cell
     genomics. Reads AnnData (.h5ad and Zarr), H5Seurat, 10x HDF5, 10x
     MatrixMarket and BPCells files into SingleCellExperiment or Seurat
@@ -31,9 +33,10 @@ Suggests:
     testthat (>= 3.1.7)
 VignetteBuilder: knitr
 biocViews: SingleCell, DataImport, DataRepresentation, Software
-URL: https://github.com/btraven00/scx
+URL: https://btraven00.github.io/scx/r/, https://github.com/btraven00/scx
 BugReports: https://github.com/btraven00/scx/issues
+Config/Needs/website: pkgdown
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
 SystemRequirements: Cargo (rustup) >= 1.70
+Config/roxygen2/version: 8.1.1

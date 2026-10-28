@@ -4,7 +4,8 @@
 #' supported file. No count data is loaded. Memory usage is minimal regardless
 #' of dataset size.
 #'
-#' @param path       Path to the file (`.h5seurat`, `.h5ad`, or `.h5`).
+#' @param path       Path to a file or directory in any supported format
+#'   (see [read_h5ad()]).
 #' @param chunk_size Cells per internal streaming chunk. Default `5000L`.
 #'   Only affects obs/var metadata reads; does not load the count matrix.
 #'

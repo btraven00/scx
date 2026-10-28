@@ -43,7 +43,7 @@
 #' @keywords internal
 .scx_binary <- function() {
   bin <- .pkg_env$scx_bin %||% .resolve_scx_binary(warn = TRUE)
-  if (is.null(bin)) stop("scx binary not found — see ?picklerick for setup.", call. = FALSE)
+  if (is.null(bin)) stop("scx binary not found; see ?picklerick for setup.", call. = FALSE)
   bin
 }
 

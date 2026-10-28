@@ -1,8 +1,10 @@
 #' Read a single-cell file into an in-memory R object
 #'
-#' Reads `.h5ad`, `.h5seurat`, or SCX `.h5` files and returns a
-#' `SingleCellExperiment` (default), a `Seurat` object, or the raw named list
-#' of pieces (`as = "list"`) for callers that want to assemble something else.
+#' Reads any format picklerick supports (AnnData `.h5ad` files and Zarr
+#' stores, H5Seurat, 10x HDF5 and MatrixMarket, BPCells; detected from the
+#' content, not the extension) and returns a `SingleCellExperiment`
+#' (default), a `Seurat` object, or the raw named list of pieces
+#' (`as = "list"`) for callers that want to assemble something else.
 #'
 #' In a `SingleCellExperiment`, `X` becomes the `counts` assay and each layer
 #' an assay of its own name. When a layer is itself called `counts`, `X` is
@@ -34,6 +36,9 @@
 #'   cells through scx. Only when `as = "SingleCellExperiment"` (Seurat does
 #'   not consume DelayedArray natively). Layers and obsp are not attached in
 #'   lazy mode; see [PicklerickMatrix()] to wrap a layer.
+#' @param parse_uns  When `TRUE`, read all of `uns` into `metadata()`
+#'   (SingleCellExperiment) or `@misc` (Seurat). The default `FALSE` stores
+#'   only the source path there, and [uns()] reads keys on demand.
 #'
 #' @param constructor How to build the Seurat object when `as = "Seurat"`.
 #'   `"standard"` (default) calls `SeuratObject::CreateSeuratObject()`.
@@ -110,6 +115,7 @@ read_h5ad <- function(path,
 #'   `lazy = TRUE` the matrix is a [PicklerickMatrix()]. For Zarr stores
 #'   `uns` is only available through `parse_uns = TRUE` (the on-demand
 #'   `uns()` accessor reads HDF5).
+#' @param ... Passed on to `read_h5ad()`.
 #' @export
 read_zarr <- function(path, ...) {
   read_h5ad(path, ...)

@@ -6,9 +6,9 @@ S3method(as_seurat,picklerick_anndata)
 S3method(dim,picklerick_anndata)
 S3method(dimnames,picklerick_anndata)
 S3method(print,picklerick_anndata)
-export(as_sce)
 export(PicklerickMatrix)
 export(PicklerickMatrixSeed)
+export(as_sce)
 export(as_seurat)
 export(convert)
 export(inspect)
@@ -25,10 +25,14 @@ exportMethods(extract_sparse_array)
 exportMethods(is_sparse)
 exportMethods(show)
 importFrom(DelayedArray,chunkdim)
-importFrom(S4Arrays,extract_array)
-importFrom(S4Arrays,is_sparse)
+importFrom(S4Arrays,
+  extract_array,
+  is_sparse
+)
 importFrom(SparseArray,extract_sparse_array)
-importFrom(methods,setClass)
-importFrom(methods,setMethod)
-importFrom(methods,show)
+importFrom(methods,
+  setClass,
+  setMethod,
+  show
+)
 useDynLib(picklerick, .registration = TRUE)
