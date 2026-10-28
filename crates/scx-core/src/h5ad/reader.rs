@@ -620,6 +620,10 @@ impl DatasetReader for H5AdReader {
         self.indptr.as_deref().unwrap_or(&[])
     }
 
+    fn x_col_ptr(&self) -> &[u64] {
+        self.col_ptr.as_deref().unwrap_or(&[])
+    }
+
     fn shape(&self) -> (usize, usize) {
         (self.n_obs, self.n_vars)
     }
@@ -798,7 +802,7 @@ impl DatasetReader for H5AdReader {
         let this = &*self;
         let Some(col_ptr) = this.col_ptr.as_deref() else {
             return error_stream(format!(
-                "{} is stored by cell; write a gene-major copy with `scx convert --csc`",
+                "{} is stored by cell; write a gene-major copy with `scx convert --gene-major`",
                 this.x_path
             ));
         };
