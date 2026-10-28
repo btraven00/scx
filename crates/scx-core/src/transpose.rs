@@ -11,6 +11,7 @@ use futures::StreamExt;
 
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
+use crate::h5ad::writer::cast;
 use crate::ir::SparseMatrixCSR;
 use crate::stream::{DatasetReader, DatasetWriter};
 
@@ -114,6 +115,20 @@ async fn read_columns(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         let csr = &chunk.data;
+        // A reader's chunks needn't have its declared dtype (BPCells h5seurat
+        // declares f64 and streams u32): bring them to the block's.
+        let converted;
+        let values = if csr.data.dtype() == dtype {
+            &csr.data
+        } else {
+            converted = match dtype {
+                DataType::F32 => TypedVec::F32(cast(&csr.data, |x| x as f32)),
+                DataType::F64 => TypedVec::F64(cast(&csr.data, |x| x)),
+                DataType::I32 => TypedVec::I32(cast(&csr.data, |x| x as i32)),
+                DataType::U32 => TypedVec::U32(cast(&csr.data, |x| x as u32)),
+            };
+            &converted
+        };
         let mut place = |dst: &mut dyn FnMut(usize, usize)| {
             for r in 0..chunk.nrows {
                 for k in csr.indptr[r] as usize..csr.indptr[r + 1] as usize {
@@ -127,17 +142,12 @@ async fn read_columns(
                 }
             }
         };
-        match (&mut data, &csr.data) {
+        match (&mut data, values) {
             (TypedVec::F32(d), TypedVec::F32(s)) => place(&mut |k, i| d[i] = s[k]),
             (TypedVec::F64(d), TypedVec::F64(s)) => place(&mut |k, i| d[i] = s[k]),
             (TypedVec::I32(d), TypedVec::I32(s)) => place(&mut |k, i| d[i] = s[k]),
             (TypedVec::U32(d), TypedVec::U32(s)) => place(&mut |k, i| d[i] = s[k]),
-            (_, s) => {
-                return Err(ScxError::DtypeMismatch {
-                    expected: dtype.to_string(),
-                    got: s.dtype().to_string(),
-                })
-            }
+            _ => unreachable!("values were converted to the block's dtype"),
         }
     }
 

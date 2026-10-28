@@ -432,6 +432,12 @@ fn scx_open_stream(
         })
     });
     let stream_n_obs = genes.is_some().then_some(n_obs);
+    if genes.is_none() && !reader.x_col_ptr().is_empty() {
+        return Err(py_err(
+            "X is gene-major (CSC): stream it by gene with open_stream(axis=\"var\"), \
+             or convert it to CSR to stream by cell",
+        ));
+    }
     let ranges = match (rows, r#where) {
         (None, None) => None,
         (rows, filters) => {

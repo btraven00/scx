@@ -897,6 +897,7 @@ async fn convert_with_reader(
     {
         anyhow::bail!("--gene-major only applies to .h5ad output");
     }
+    scx_core::stream::require_cell_major(reader)?;
 
     if compress.is_some() && is_h5seurat {
         tracing::warn!("--compress only applies to .h5ad output; ignored for .h5seurat");

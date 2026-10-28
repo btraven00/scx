@@ -72,6 +72,21 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         run: cargo test --all ${{ matrix.cargo_flags }}
 
+      # anndata oracle tests (tests/python) against the scx binary `cargo test`
+      # just built. Tests that need the golden files skip; the self-contained
+      # ones (concat, gene-major) run.
+      - uses: actions/setup-python@v5
+        if: matrix.hdf5 == 'system'
+        with:
+          python-version: "3.12"
+      - name: anndata oracle
+        if: matrix.hdf5 == 'system'
+        env:
+          SCX_BIN: target/debug/scx
+        run: |
+          python -m pip install anndata pytest scipy
+          python -m pytest tests/python -q -rs
+
       # A workspace build unifies features across members, so a default feature
       # of one crate can paper over a missing one in scx-core (zarrs used to
       # switch on bytemuck's alloc feature for it). Downstream crates take

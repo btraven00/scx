@@ -10,7 +10,7 @@ use ndarray::s;
 use crate::h5::{read_csr_rows, read_u32_range, read_u64, read_values, value_dtype};
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
 use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows};
-use crate::stream::{error_stream, row_chunks, row_range_chunks, ChunkStream};
+use crate::stream::{error_stream, row_chunks, row_range_chunks, ChunkStream, GENE_MAJOR_X};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -742,11 +742,7 @@ impl DatasetReader for H5AdReader {
 
     fn x_stream_rows(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
         if self.col_ptr.is_some() {
-            return error_stream(format!(
-                "{} is stored by gene (CSC); stream it by gene (x_stream_cols, \
-                 or open_stream(axis=\"var\") in picklerick)",
-                self.x_path
-            ));
+            return error_stream(GENE_MAJOR_X.into());
         }
         let this = &*self;
         let indptr = this.indptr.as_deref().unwrap_or(&[]);

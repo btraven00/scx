@@ -99,6 +99,23 @@ fn no_such_matrix<'a>(what: &str) -> ChunkStream<'a> {
     error_stream(format!("this format has no {what} matrices"))
 }
 
+/// Fails when the reader's X is gene-major (CSC), which streams only by
+/// gene. Callers that stream X by cell after writing other output (convert,
+/// concat, snapshot) call this first, so a gene-major input fails before
+/// anything is written.
+pub fn require_cell_major(reader: &dyn DatasetReader) -> Result<()> {
+    if reader.x_col_ptr().is_empty() {
+        Ok(())
+    } else {
+        Err(ScxError::InvalidFormat(GENE_MAJOR_X.into()))
+    }
+}
+
+/// Why gene-major X can't stream by cell, and what to do about it.
+pub(crate) const GENE_MAJOR_X: &str = "X is gene-major (CSC), which can only be streamed \
+    by gene. To read it by cell, convert it to CSR first, e.g. \
+    adata.X = adata.X.tocsr(); adata.write_h5ad(path)";
+
 /// A stream that yields one error.
 pub(crate) fn error_stream<'a>(msg: String) -> ChunkStream<'a> {
     Box::pin(stream::once(
