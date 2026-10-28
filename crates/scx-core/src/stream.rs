@@ -96,7 +96,11 @@ pub(crate) fn select_rows(chunk: &MatrixChunk, ranges: &[Range<usize>]) -> Vec<M
 }
 
 fn no_such_matrix<'a>(what: &str) -> ChunkStream<'a> {
-    let msg = format!("this format has no {what} matrices");
+    error_stream(format!("this format has no {what} matrices"))
+}
+
+/// A stream that yields one error.
+pub(crate) fn error_stream<'a>(msg: String) -> ChunkStream<'a> {
     Box::pin(stream::once(
         async move { Err(ScxError::InvalidFormat(msg)) },
     ))
@@ -180,6 +184,21 @@ pub trait DatasetReader: Send {
 
     /// Stream the count matrix as row-chunks.
     fn x_stream(&mut self) -> ChunkStream<'_>;
+
+    /// Stream X by gene: the columns in `ranges` (normalized like
+    /// [`x_stream_rows`](Self::x_stream_rows)), as chunks of up to the
+    /// reader's chunk size in genes. Each chunk holds whole genes as the CSR
+    /// of its block's transpose (genes × cells), and `row_offset` is its
+    /// first gene. That is the CSC of the block, with cells ascending.
+    ///
+    /// Only gene-major (CSC) X reads this way, a block at a time. Other
+    /// storage refuses rather than reading all of X per block; write a
+    /// gene-major copy with `scx convert --csc`.
+    fn x_stream_cols(&mut self, _ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
+        error_stream(
+            "X is not stored by gene; write a gene-major copy with `scx convert --csc`".into(),
+        )
+    }
 
     /// Stream only the rows in `ranges` (any order; overlaps are merged), as
     /// chunks of up to the reader's chunk size that never span two ranges.

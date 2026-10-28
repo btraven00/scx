@@ -138,8 +138,11 @@ def open_stream(
     layer: str = "counts",
     rows: Rows | None = None,
     where: Mapping[str, object] | None = None,
+    axis: str = "obs",
+    genes: Rows | None = None,
 ) -> Iterator[MatrixChunk]:
-    """Iterate over the matrix X in chunks of ``chunk_size`` rows.
+    """Iterate over the matrix X in chunks of ``chunk_size`` rows, or of
+    ``chunk_size`` genes with ``axis="var"``.
 
     Decoding runs on a background thread a few chunks ahead of the
     consumer, so peak memory is bounded by the chunk size, not the file.
@@ -151,6 +154,14 @@ def open_stream(
     selection, and ``chunk.row_offset`` is each chunk's first row in the
     full matrix.
 
+    ``axis="var"`` streams blocks of whole genes over every cell, for
+    per-gene work such as one GLM per gene. It needs X stored by gene: an
+    h5ad with CSC X, as ``scx convert --csc`` writes. Other files raise
+    rather than reading all of X per block. Each chunk's ``to_scipy()`` is a
+    ``csc_array`` of shape ``(n_obs, chunk.ncols)``, and
+    ``chunk.var_offset`` is its first gene. ``genes`` selects genes the way
+    ``rows`` selects rows, so jobs can split the genes between them.
+
     Parameters
     ----------
     rows
@@ -161,13 +172,27 @@ def open_stream(
         is kept when every column's value is one of the given ones. Values
         are compared as text (``str(v)``, booleans as ``True``/``False``);
         NA never matches.
+    axis
+        ``"obs"`` (default) to stream rows, ``"var"`` to stream genes.
+    genes
+        With ``axis="var"``: like ``rows``, over genes. Default: all genes.
 
     Examples
     --------
     >>> for chunk in pk.open_stream("atlas.h5ad", chunk_size=5000):
     ...     X = chunk.to_scipy()  # csr_array sharing chunk.data / chunk.indices
     >>> a549 = pk.open_stream("emt.h5ad", where={"CellLine": "A549", "Time": ["3d", "7d"]})
+    >>> # job i of 4 over a gene-major copy (scx convert atlas.h5ad atlas_csc.h5ad --csc)
+    >>> lo, hi = i * n_vars // 4, (i + 1) * n_vars // 4
+    >>> for chunk in pk.open_stream("atlas_csc.h5ad", axis="var", genes=[(lo, hi)], chunk_size=512):
+    ...     Y = chunk.to_scipy()  # csc_array: cells x genes var_offset .. var_offset + ncols
     """
+    if axis not in ("obs", "var"):
+        raise ValueError(f'axis must be "obs" or "var", got {axis!r}')
+    if axis == "var" and (rows is not None or where is not None):
+        raise ValueError('rows= and where= select cells; they do not apply with axis="var"')
+    if axis == "obs" and genes is not None:
+        raise ValueError('genes= applies only with axis="var"')
     filters = None
     if where is not None:
         filters = [
@@ -175,7 +200,8 @@ def open_stream(
             for col, vals in where.items()
         ]
     return _native.scx_open_stream(
-        _path(path), chunk_size, assay, layer, _ranges(rows), filters
+        _path(path), chunk_size, assay, layer, _ranges(rows), filters,
+        axis == "var", _ranges(genes),
     )
 
 

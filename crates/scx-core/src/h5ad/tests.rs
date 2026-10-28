@@ -1736,10 +1736,12 @@ fn file_with_x(path: &std::path::Path) -> File {
     f
 }
 
-/// CSC X is refused at open: X streams by row range from the file, and
-/// reading CSC storage that way would transpose it silently.
-#[test]
-fn csc_x_is_refused() {
+/// CSC X opens but refuses to stream by cell: reading its column pointer as
+/// a row pointer would transpose it silently. CSR X refuses to stream by
+/// gene rather than reading all of X per block.
+#[tokio::test]
+async fn csc_x_streams_by_gene_only() {
+    use futures::StreamExt;
     let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
     {
         let f = File::create(tmp.path()).unwrap();
@@ -1747,8 +1749,33 @@ fn csc_x_is_refused() {
         crate::h5_str::write_str_attr(&f.group("X").unwrap(), "encoding-type", "csc_matrix")
             .unwrap();
     }
-    let err = H5AdReader::open(tmp.path(), 2).err().expect("CSC X opened");
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+    assert!(
+        r.x_indptr().is_empty(),
+        "a column pointer is not a row pointer"
+    );
+    let err = r
+        .x_stream()
+        .next()
+        .await
+        .unwrap()
+        .expect_err("CSC X streamed by cell");
     assert!(err.to_string().contains("CSC"), "{err}");
+    assert!(r.x_stream_cols(vec![0..2]).next().await.unwrap().is_ok());
+
+    let csr = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(csr.path()).unwrap();
+        write_csr_group(&f, "X", (2, 2), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+    }
+    let mut r = H5AdReader::open(csr.path(), 2).unwrap();
+    let err = r
+        .x_stream_cols(vec![0..2])
+        .next()
+        .await
+        .unwrap()
+        .expect_err("CSR X streamed by gene");
+    assert!(err.to_string().contains("--csc"), "{err}");
 }
 
 /// Regression: a CSC layer or obsp matrix was first read as CSR (silently

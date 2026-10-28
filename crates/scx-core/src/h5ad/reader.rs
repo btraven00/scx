@@ -10,7 +10,7 @@ use ndarray::s;
 use crate::h5::{read_csr_rows, read_u32_range, read_u64, read_values, value_dtype};
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
 use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows};
-use crate::stream::{row_chunks, row_range_chunks, ChunkStream};
+use crate::stream::{error_stream, row_chunks, row_range_chunks, ChunkStream};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -26,15 +26,17 @@ use crate::{
 ///
 /// Spec: <https://anndata.readthedocs.io/en/latest/fileformat-prose.html>
 ///
-/// Supports both sparse (CSR) and dense X storage.
-/// Files with CSC X must be converted first:
-///   `adata.X = adata.X.tocsr(); adata.write_h5ad(path)`
+/// Supports sparse (CSR) and dense X storage, which stream by cell, and
+/// gene-major (CSC) X, which streams only by gene
+/// ([`x_stream_cols`](DatasetReader::x_stream_cols)).
 pub struct H5AdReader {
     path: PathBuf,
     n_obs: usize,
     n_vars: usize,
-    /// CSR row pointer array (n_obs + 1 entries). None when X is dense.
+    /// CSR row pointer array (n_obs + 1 entries). None when X is dense or CSC.
     indptr: Option<Vec<u64>>,
+    /// CSC column pointer array (n_vars + 1 entries) when X is gene-major.
+    col_ptr: Option<Vec<u64>>,
     chunk_size: usize,
     dtype: DataType,
     /// Base HDF5 path the matrix is read from: `"X"`, or `"layers/<name>"` when
@@ -75,6 +77,7 @@ impl H5AdReader {
         // The matrix can be stored as a dense 2-D dataset or a sparse CSR group.
         let is_dense = file.dataset(&base).is_ok() && file.group(&base).is_err();
 
+        let mut col_ptr = None;
         let (n_obs, n_vars, indptr, dtype) = if is_dense {
             let ds = file.dataset(&base)?;
             let sh = ds.shape();
@@ -83,17 +86,26 @@ impl H5AdReader {
             }
             (sh[0], sh[1], None, value_dtype(&ds)?)
         } else {
-            // X streams by row range straight from the file, so CSC (which
-            // layers and obsp read whole and transpose) is refused here.
-            if is_csc(&file.group(&base)?) {
-                return Err(ScxError::InvalidFormat(format!(
-                    "{base} is stored as CSC. Convert to CSR first, e.g. \
-                     adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
-                )));
-            }
-            let meta = ad_read_sparse_meta(&file, &base, &base)?;
+            let grp = file.group(&base)?;
             let dtype = value_dtype(&file.dataset(&format!("{base}/data"))?)?;
-            (meta.shape.0, meta.shape.1, Some(meta.indptr), dtype)
+            if is_csc(&grp) {
+                // Gene-major: streams by gene only, so the column pointer is
+                // kept apart from the (absent) row pointer.
+                let shape = read_shape(&grp)?;
+                let ptr = read_u64(&file.dataset(&format!("{base}/indptr"))?)?;
+                if ptr.len() != shape.1 + 1 {
+                    return Err(ScxError::InvalidFormat(format!(
+                        "{base}/indptr has {} entries, expected n_vars + 1 = {}",
+                        ptr.len(),
+                        shape.1 + 1
+                    )));
+                }
+                col_ptr = Some(ptr);
+                (shape.0, shape.1, None, dtype)
+            } else {
+                let meta = ad_read_sparse_meta(&file, &base, &base)?;
+                (meta.shape.0, meta.shape.1, Some(meta.indptr), dtype)
+            }
         };
 
         Ok(Self {
@@ -101,6 +113,7 @@ impl H5AdReader {
             n_obs,
             n_vars,
             indptr,
+            col_ptr,
             chunk_size,
             dtype,
             x_path: base,
@@ -724,10 +737,31 @@ impl DatasetReader for H5AdReader {
     }
 
     fn x_stream_rows(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
+        if self.col_ptr.is_some() {
+            return error_stream(format!(
+                "{} is stored by gene (CSC); stream it by gene (x_stream_cols, \
+                 or open_stream(axis=\"var\") in picklerick)",
+                self.x_path
+            ));
+        }
         let this = &*self;
         let indptr = this.indptr.as_deref().unwrap_or(&[]);
         row_range_chunks(this.n_obs, ranges, this.chunk_size, move |rows| {
             read_rows(&this.path, &this.x_path, indptr, rows, this.n_vars)
+        })
+    }
+
+    fn x_stream_cols(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
+        let this = &*self;
+        let Some(col_ptr) = this.col_ptr.as_deref() else {
+            return error_stream(format!(
+                "{} is stored by cell; write a gene-major copy with `scx convert --csc`",
+                this.x_path
+            ));
+        };
+        // CSC on disk is the CSR of the transpose: read genes as its rows.
+        row_range_chunks(this.n_vars, ranges, this.chunk_size, move |cols| {
+            read_rows(&this.path, &this.x_path, col_ptr, cols, this.n_obs)
         })
     }
 }
