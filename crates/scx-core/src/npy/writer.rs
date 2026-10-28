@@ -159,6 +159,9 @@ impl NpyIrWriter {
         filter: &SlotFilter,
         chunk_size: usize,
     ) -> Result<()> {
+        if filter.includes("X") {
+            crate::stream::require_cell_major(reader)?;
+        }
         fs::create_dir_all(dir)?;
         let (n_obs, n_vars) = reader.shape();
         let x_dtype = reader.dtype();
