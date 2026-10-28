@@ -231,5 +231,33 @@ mod tests {
         assert_eq!(indptr, want_ptr);
         assert_eq!(indices, csc.indices());
         assert_eq!(data, csc.data());
+
+        // Read back by gene: genes 1..4 in blocks of 2 are those genes' slices
+        // of the CSC, with `row_offset` the first gene.
+        let mut back = H5AdReader::open(&dst, 2).unwrap();
+        let chunks: Vec<_> = back
+            .x_stream_cols(vec![1..4])
+            .map(|c| c.unwrap())
+            .collect()
+            .await;
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| (c.row_offset, c.nrows))
+                .collect::<Vec<_>>(),
+            [(1, 2), (3, 1)]
+        );
+        for c in &chunks {
+            for g in 0..c.nrows {
+                let col = csc.outer_view(c.row_offset + g).unwrap();
+                let nz = c.data.indptr[g] as usize..c.data.indptr[g + 1] as usize;
+                assert_eq!(c.data.shape.1, n_obs);
+                assert_eq!(&c.data.indices[nz.clone()], col.indices());
+                let TypedVec::F32(v) = &c.data.data else {
+                    panic!("f32")
+                };
+                assert_eq!(&v[nz], col.data());
+            }
+        }
     }
 }
