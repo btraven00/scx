@@ -15,7 +15,12 @@ use scx_core::{
     zarr_ad::ZarrAdWriter,
 };
 
-pyo3::create_exception!(picklerick, PickleRickError, pyo3::exceptions::PyException);
+pyo3::create_exception!(
+    picklerick,
+    PickleRickError,
+    pyo3::exceptions::PyException,
+    "Raised when the SCX engine cannot read, convert or write a dataset."
+);
 
 fn py_err<E: std::fmt::Display>(e: E) -> PyErr {
     PickleRickError::new_err(e.to_string())

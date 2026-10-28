@@ -1,0 +1,84 @@
+---
+title: "Stream a matrix in Python"
+description: "Process a matrix chunk by chunk with `open_stream`, and read only the cells you select."
+jupyter: python3
+---
+
+```{python}
+#| include: false
+# scripts/render_docs.sh copies tests/fixtures/tiny into SCX_DOCS_WORK.
+import os
+
+os.chdir(os.environ["SCX_DOCS_WORK"])
+```
+
+`picklerick.open_stream` hands you the count matrix as a sequence of CSR row
+blocks instead of one object in memory. Decoding runs on a background thread
+a few chunks ahead of your loop, so peak memory is set by the chunk size,
+not the file. This page is Python-only; the R package reaches the same
+engine through `PicklerickMatrix()`, a DelayedArray backend.
+
+The example file, `tiny.h5ad`, has 6 cells and 5 genes. A chunk size of 2 is
+used so that the loop has several chunks to show; the default is 5000.
+
+## Chunks
+
+Each chunk is a `MatrixChunk`: NumPy arrays for the CSR row pointer, column
+indices and values, plus `row_offset`, the position of its first row in the
+full matrix.
+
+```{python}
+import picklerick as pk
+
+for chunk in pk.open_stream("tiny.h5ad", chunk_size=2):
+    print(chunk.row_offset, chunk.nrows, chunk.dtype, chunk.indptr.tolist())
+```
+
+## Per-cell totals without loading the matrix
+
+`chunk.to_scipy()` wraps a chunk as a `scipy.sparse.csr_array` that shares
+its arrays, so any sparse operation works on it. Here the totals per cell are
+filled in chunk by chunk; `inspect(..., names=True)` gives the cell names
+without opening the file with anndata.
+
+```{python}
+import numpy as np
+
+info = pk.inspect("tiny.h5ad", names=True)
+totals = np.zeros(info["n_obs"])
+for chunk in pk.open_stream("tiny.h5ad", chunk_size=2):
+    rows = slice(chunk.row_offset, chunk.row_offset + chunk.nrows)
+    totals[rows] = chunk.to_scipy().sum(axis=1)
+
+dict(zip(info["obs_names"], totals.tolist()))
+```
+
+The same totals from the whole matrix in memory:
+
+```{python}
+import anndata as ad
+
+adata = ad.read_h5ad("tiny.h5ad")
+np.allclose(totals, np.asarray(adata.X.sum(axis=1)).ravel())
+```
+
+## Reading only some cells
+
+`where` selects cells by their `obs` values and `rows` by position. On h5ad
+and Zarr files only the selected rows are read from disk, so a filter costs
+what the matching cells cost. A chunk never spans a gap in the selection, and
+`row_offset` still refers to the full matrix.
+
+```{python}
+for chunk in pk.open_stream("tiny.h5ad", where={"cell_type": "T"}):
+    print(chunk.row_offset, chunk.nrows)
+
+np.flatnonzero(adata.obs["cell_type"] == "T").tolist()
+```
+
+```{python}
+for chunk in pk.open_stream("tiny.h5ad", rows=[0, 1, 4]):
+    print(chunk.row_offset, chunk.nrows)
+```
+
+See [`open_stream`](../reference/python/open_stream.qmd) for every option.

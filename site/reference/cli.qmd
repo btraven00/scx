@@ -1,0 +1,62 @@
+---
+title: "Command line"
+description: "`scx --help` for every subcommand, captured from the binary when the site is built."
+engine: knitr
+---
+
+Each section below is the output of `scx <command> --help`, run when this
+page is built, so it always matches the released binary.
+
+```{bash}
+scx --version
+```
+
+```{bash}
+scx --help
+```
+
+## convert
+
+```{bash}
+scx convert --help
+```
+
+## inspect
+
+```{bash}
+scx inspect --help
+```
+
+## validate
+
+```{bash}
+scx validate --help
+```
+
+## export
+
+```{bash}
+scx export --help
+```
+
+## concat
+
+```{bash}
+scx concat --help
+```
+
+## merge
+
+```{bash}
+scx merge --help
+```
+
+## Internal tooling
+
+`snapshot` dumps SCX's internal representation of a file as a directory of
+NPY arrays. `scx convert` can read the snapshot back, which isolates write
+cost from read cost in benchmarks. It is not a format to exchange data in.
+
+```{bash}
+scx snapshot --help
+```

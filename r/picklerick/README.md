@@ -1,53 +1,22 @@
 # picklerick
 
-R bindings to the SCX single-cell format conversion engine.
-
-Converts between H5Seurat, H5AD, and SCX formats via a memory-bounded pipeline
-written in Rust. Returns `anndataR::InMemoryAnnData` objects. No Python dependency.
+R bindings to [SCX](https://github.com/btraven00/scx), a Rust engine that
+converts single-cell data between formats in bounded memory. Reads AnnData
+(`.h5ad` and Zarr), H5Seurat, 10x and BPCells files into
+`SingleCellExperiment` or `Seurat` objects, converts file to file, and
+inspects files without loading the matrix. No Python dependency.
 
 ## Install
 
 ```r
-# from source (requires Cargo >= 1.70)
-pak::pkg_install("local::r/picklerick")
+pak::pak("btraven00/scx/r/picklerick")
 ```
 
-### System requirements
-
-A system HDF5 library is required at both build and run time:
-
-- Debian/Ubuntu: `apt install libhdf5-dev`
-- macOS: `brew install hdf5`
-- conda: `conda install -c conda-forge hdf5`
-
-`Makevars` resolves it via `pkg-config --libs hdf5` with a Debian fallback
-to `/usr/lib/x86_64-linux-gnu/hdf5/serial`.
-
-### Note: no vendored HDF5 (unlike the Rust CLI / Python wheel)
-
-The workspace `scx-cli` binary and the `picklerick` Python wheel default to
-a vendored static HDF5 (see the top-level README), so end users do not need
-to install `libhdf5` separately. **The R package is the exception** — it
-always links dynamically.
-
-Two reasons:
-
-1. **Builds outside the cargo workspace.** For r-universe compatibility,
-   `r/picklerick/src/rust/` is its own crate with a vendored copy of
-   `scx-core` under `r/picklerick/src/rust/scx-core/` (synced via
-   `r/picklerick/sync-scx-core.sh`). The workspace-level `vendored-hdf5`
-   cargo feature does not reach it.
-2. **`rhdf5` / `hdf5r` coexistence risk.** Loading two distinct `libhdf5`
-   builds in the same R session corrupts HDF5 property-list IDs. See
-   `docs/roadmap.md` §0.0.6. Until that interaction is re-validated under
-   a vendored static `libhdf5`, the safe default is to share the system
-   `libhdf5` with `rhdf5` / Bioconductor.
-
-Known limitation regardless of vendoring: do **not** load `hdf5r` in the
-same R session as `picklerick` native mode — `hdf5r` links against a
-different `libhdf5.so` build and property-list IDs may corrupt. `rhdf5`
-coexistence has been empirically confirmed safe for simple
-open-read-close conversions.
+The package is compiled from source. You need a Rust toolchain (`cargo`),
+CMake and a C/C++ compiler. HDF5 is built from source and linked
+statically into the package, so no system `libhdf5` is needed, and
+picklerick's HDF5 stays separate from the one `rhdf5` or `hdf5r` load in
+the same session.
 
 ## Quick start
 
@@ -80,8 +49,9 @@ One reader for every format, detected by content:
 
 Two vignettes: `vignette("overview")` says what the package is and indexes
 its functions; `vignette("picklerick")` walks through each target object and
-format on a dataset shipped with the package. Reference pages are tracked in
-[issue #88](https://github.com/btraven00/scx/issues/88).
+format on a dataset shipped with the package. Every exported function has a
+help page (`?read_h5ad`, `?convert`, ...); all of it is also on the
+[documentation site](https://btraven00.github.io/scx/r/).
 
 ## Lazy matrices (DelayedArray)
 

@@ -1,0 +1,14 @@
+# Python side of the docs build (scripts/render_docs.sh). picklerick itself
+# is built into this environment with `maturin develop --release`.
+maturin>=1.9,<2
+# What Quarto's Jupyter engine needs (`quarto check jupyter`).
+ipykernel
+nbclient
+nbformat
+pyyaml
+# Python API reference from the numpy docstrings. quartodoc 0.11.1 passes
+# griffe a numpy-parser option that griffe 2 no longer accepts.
+quartodoc
+griffe<2
+# MatrixChunk.to_scipy() in the streaming tutorial.
+scipy

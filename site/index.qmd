@@ -1,0 +1,44 @@
+---
+title: "SCX"
+subtitle: "Single-cell format conversion, designed for reproducible benchmarks"
+toc: false
+---
+
+SCX converts single-cell datasets between formats. It reads the count matrix
+as a stream of cell chunks and writes it out in another layout, so memory is
+bounded by the chunk size rather than the dataset. The engine is written in
+Rust and has three front ends that share its conversion semantics and
+defaults:
+
+| | Install | Start with |
+|---|---|---|
+| **Command line** | `cargo install scx-cli` | `scx convert in.h5seurat out.h5ad` |
+| **Python** | `pip install scx-picklerick` | `import picklerick as pk` |
+| **R** | `pak::pak("btraven00/scx/r/picklerick")` (needs Rust) | `library(picklerick)` |
+
+## Formats
+
+| Format | Read | Write |
+|---|:-:|:-:|
+| AnnData `.h5ad` | ✓ | ✓ |
+| AnnData Zarr (v2, v3; directory) | ✓ | ✓ (v3) |
+| Seurat `.h5seurat` (dgCMatrix or BPCells-backed) | ✓ | ✓ |
+| BPCells matrix directory | ✓ | ✓ X only |
+| 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
+| MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
+| Parquet, local or S3/GCS/HTTP (CLI built with `--features net`) | ✓ | |
+| Seurat `.rds` / `.rda` | ✓ | |
+
+The input format is detected from the content; the output format from the
+extension (`.h5ad`, `.h5seurat`, `.zarr`, `.bpcells`).
+
+## Where to go next
+
+- [Convert between formats](tutorials/convert.qmd): the same conversion from
+  the command line, Python and R, side by side.
+- [Stream a matrix in Python](tutorials/stream.qmd): process a matrix chunk
+  by chunk, and read only the cells you select.
+- [Reading single-cell files in R](r/articles/picklerick.html): every format
+  into a `SingleCellExperiment`, a `Seurat` object or a lazy `DelayedMatrix`.
+- Reference: [command line](reference/cli.qmd),
+  [Python](reference/python/index.qmd), [R](r/reference/index.html).

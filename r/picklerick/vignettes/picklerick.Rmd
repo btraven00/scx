@@ -37,8 +37,9 @@ a `Seurat` object, a light AnnData-like handle, or the raw pieces as a list.
 Large matrices can stay on disk as a `DelayedMatrix`.
 
 This vignette uses a 6-cell by 5-gene dataset shipped with the package in
-every input format. Row 1 has no counts and one gene is expressed in a single
-cell, so empty cells and sparse genes are part of every example.
+every input format. The second cell has no counts and two genes are each
+expressed in a single cell, so empty cells and sparse genes are part of every
+example.
 
 ```{r}
 library(picklerick)

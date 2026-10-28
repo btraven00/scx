@@ -1,0 +1,35 @@
+---
+title: "Convert between formats: Python cells"
+jupyter: python3
+---
+
+The Python tab of [Convert between formats](convert.qmd). Its cells are
+embedded there by label; this file is rendered by Jupyter in its own process,
+separate from the R and shell chunks.
+
+```{python}
+#| include: false
+import os
+
+os.chdir(os.environ["SCX_DOCS_WORK"])
+```
+
+```{python}
+#| label: py-inspect
+import picklerick as pk
+
+info = pk.inspect("tiny_v4.h5seurat")
+{key: info[key] for key in ("format", "n_obs", "n_vars", "obs_cols")}
+```
+
+```{python}
+#| label: py-convert
+pk.convert("tiny_v4.h5seurat", "tiny_py.h5ad")
+```
+
+```{python}
+#| label: py-check
+import anndata as ad
+
+ad.read_h5ad("tiny_py.h5ad")
+```

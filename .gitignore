@@ -22,3 +22,12 @@ r/picklerick/src/rust/target/
 .coverage
 *.profraw
 r/picklerick/.cargo/
+
+# docs build (scripts/render_docs.sh)
+/.venv-docs/
+/site/_site/
+/site/.quarto/
+/site/_work/
+/site/reference/python/
+/site/objects.json
+r/picklerick/docs/
