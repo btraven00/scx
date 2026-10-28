@@ -155,12 +155,17 @@ enum Cli {
         #[arg(long, num_args = 0..=1, default_missing_value = "6")]
         compress: Option<u8>,
 
-        /// Write X gene-major (`csc_matrix`, `.h5ad` output only), for
-        /// per-gene consumers. `--csc` holds up to 4 GB of transposed
-        /// nonzeros at a time, `--csc N` up to N GB. X is read once to count,
-        /// then once per block of genes that fits the budget.
-        #[arg(long, value_name = "GB", num_args = 0..=1, default_missing_value = "4")]
-        csc: Option<f64>,
+        /// Write X gene-major (each gene's cells contiguous, stored as
+        /// anndata `csc_matrix`; `.h5ad` output only), for per-gene
+        /// consumers. X is read once to count, then once per block of genes
+        /// that fits --transpose-mem.
+        #[arg(long)]
+        gene_major: bool,
+
+        /// Memory budget in GB for the transposed nonzeros --gene-major holds
+        /// at a time. Less memory means more reads of X.
+        #[arg(long, value_name = "GB", default_value = "4", requires = "gene_major")]
+        transpose_mem: f64,
 
         /// Write only these comma-separated auxiliary slots (e.g.
         /// `--only obsp` or `--only obsm:X_pca,layers`). Applies to
@@ -609,17 +614,15 @@ async fn run() -> anyhow::Result<()> {
             source_url,
             source_sha256: source_sha256_arg,
             compress,
-            csc,
+            gene_major,
+            transpose_mem,
             only,
             exclude,
         } => {
-            let csc_mem = match csc {
-                Some(gb) if gb.is_nan() || gb <= 0.0 => {
-                    anyhow::bail!("--csc must be a positive GB budget")
-                }
-                Some(gb) => Some((gb * 1e9) as usize),
-                None => None,
-            };
+            if transpose_mem.is_nan() || transpose_mem <= 0.0 {
+                anyhow::bail!("--transpose-mem must be a positive GB budget");
+            }
+            let csc_mem = gene_major.then_some((transpose_mem * 1e9) as usize);
             let filter = match (only.as_deref(), exclude.as_deref()) {
                 (Some(o), _) => SlotFilter::from_only(o),
                 (_, Some(e)) => SlotFilter::from_exclude(e),
@@ -892,7 +895,7 @@ async fn convert_with_reader(
             Some("h5seurat" | "zarr" | "bpcells")
         )
     {
-        anyhow::bail!("--csc only applies to .h5ad output");
+        anyhow::bail!("--gene-major only applies to .h5ad output");
     }
 
     if compress.is_some() && is_h5seurat {
@@ -1174,7 +1177,8 @@ fn fmt_stat(v: f64) -> String {
     }
 }
 
-fn indptr_row_stats(indptr: &[u64], n_rows: usize, n_cols: usize) -> String {
+/// nnz and sparsity, plus quartiles of nnz per `unit` (each `indptr` entry).
+fn indptr_row_stats(indptr: &[u64], n_rows: usize, n_cols: usize, unit: &str) -> String {
     if indptr.len() < 2 || n_rows == 0 || n_cols == 0 {
         return String::new();
     }
@@ -1185,7 +1189,7 @@ fn indptr_row_stats(indptr: &[u64], n_rows: usize, n_cols: usize) -> String {
     let n = per_row.len();
     let q = |p: f64| per_row[(p * (n - 1) as f64).round() as usize];
     format!(
-        "nnz={}  sparse={:.1}%  nnz/cell Q1={}  med={}  Q3={}  max={}",
+        "nnz={}  sparse={:.1}%  nnz/{unit} Q1={}  med={}  Q3={}  max={}",
         nnz,
         sparsity,
         q(0.25),
@@ -1323,7 +1327,16 @@ async fn inspect(
     );
     let dtype_str = reader.dtype().to_string();
     println!("{} {}", bold!("X dtype:"), cyan!(&dtype_str));
-    let x_stats = indptr_row_stats(reader.x_indptr(), n_obs, n_vars);
+    let x_stats = if reader.x_col_ptr().is_empty() {
+        indptr_row_stats(reader.x_indptr(), n_obs, n_vars, "cell")
+    } else {
+        println!(
+            "{} {}",
+            bold!("X layout:"),
+            cyan!("gene-major (CSC): stream by gene, open_stream(axis=\"var\")")
+        );
+        indptr_row_stats(reader.x_col_ptr(), n_vars, n_obs, "gene")
+    };
     if !x_stats.is_empty() {
         println!("{} {}", bold!("X      :"), dim!(&x_stats));
     }
@@ -1424,7 +1437,7 @@ async fn inspect(
         let stats = if m.indptr.is_empty() {
             "(dense)".to_string()
         } else {
-            indptr_row_stats(&m.indptr, m.shape.0, m.shape.1)
+            indptr_row_stats(&m.indptr, m.shape.0, m.shape.1, "cell")
         };
         println!(
             "  {:<30} {} × {}  {}",
@@ -1448,7 +1461,7 @@ async fn inspect(
         let stats = if m.indptr.is_empty() {
             "(dense)".to_string()
         } else {
-            indptr_row_stats(&m.indptr, m.shape.0, m.shape.1)
+            indptr_row_stats(&m.indptr, m.shape.0, m.shape.1, "cell")
         };
         println!(
             "  {:<30} {} × {}  {}",

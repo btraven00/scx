@@ -165,8 +165,17 @@ def test_stream_by_gene_selects_gene_ranges(norman, norman_csc_path) -> None:
     np.testing.assert_array_equal(got, dense(norman.X)[:, 3:9])
 
 
+def test_inspect_reports_gene_major_x(norman, norman_path, norman_csc_path) -> None:
+    assert pk.inspect(norman_path)["x_axis"] == "obs"
+    info = pk.inspect(norman_csc_path)
+    assert info["x_axis"] == "var"
+    x = dense(norman.X)
+    assert info["x_stats"]["nnz"] == np.count_nonzero(x)
+    assert info["x_stats"]["nnz_max"] == np.count_nonzero(x, axis=0).max()
+
+
 def test_stream_axis_must_match_storage(norman_path, norman_csc_path) -> None:
-    with pytest.raises(pk.PickleRickError, match="--csc"):
+    with pytest.raises(pk.PickleRickError, match="--gene-major"):
         list(pk.open_stream(norman_path, axis="var"))
     with pytest.raises(pk.PickleRickError, match="CSC"):
         list(pk.open_stream(norman_csc_path))

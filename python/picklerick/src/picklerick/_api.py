@@ -119,8 +119,10 @@ def inspect(path: Pathish, *, names: bool = False) -> dict:
     Returns a dict with ``format``, ``n_obs``, ``n_vars``, ``obs_cols``,
     ``obs_dtypes``, ``var_cols``, ``var_dtypes``, ``obsm_keys``,
     ``varm_keys``, ``uns_keys``, ``layers`` and ``obsp`` (lists of dicts
-    with name, shape and per-row nnz quartiles), and ``x_stats`` when X is
-    stored as CSR. With ``names=True`` it also has ``obs_names`` and
+    with name, shape and per-row nnz quartiles), and ``x_axis``: ``"obs"``
+    when X is cell-major, ``"var"`` when it is gene-major (stream it with
+    ``open_stream(axis="var")``). ``x_stats`` holds nnz quartiles per cell,
+    or per gene for gene-major X, when X is sparse. With ``names=True`` it also has ``obs_names`` and
     ``var_names`` (lists of str), e.g. to key per-cell results from
     :func:`open_stream` without opening the file with anndata.
     """
@@ -156,7 +158,7 @@ def open_stream(
 
     ``axis="var"`` streams blocks of whole genes over every cell, for
     per-gene work such as one GLM per gene. It needs X stored by gene: an
-    h5ad with CSC X, as ``scx convert --csc`` writes. Other files raise
+    h5ad with CSC X, as ``scx convert --gene-major`` writes. Other files raise
     rather than reading all of X per block. Each chunk's ``to_scipy()`` is a
     ``csc_array`` of shape ``(n_obs, chunk.ncols)``, and
     ``chunk.var_offset`` is its first gene. ``genes`` selects genes the way
@@ -182,9 +184,9 @@ def open_stream(
     >>> for chunk in pk.open_stream("atlas.h5ad", chunk_size=5000):
     ...     X = chunk.to_scipy()  # csr_array sharing chunk.data / chunk.indices
     >>> a549 = pk.open_stream("emt.h5ad", where={"CellLine": "A549", "Time": ["3d", "7d"]})
-    >>> # job i of 4 over a gene-major copy (scx convert atlas.h5ad atlas_csc.h5ad --csc)
+    >>> # job i of 4 over a gene-major copy (scx convert atlas.h5ad atlas_by_gene.h5ad --gene-major)
     >>> lo, hi = i * n_vars // 4, (i + 1) * n_vars // 4
-    >>> for chunk in pk.open_stream("atlas_csc.h5ad", axis="var", genes=[(lo, hi)], chunk_size=512):
+    >>> for chunk in pk.open_stream("atlas_by_gene.h5ad", axis="var", genes=[(lo, hi)], chunk_size=512):
     ...     Y = chunk.to_scipy()  # csc_array: cells x genes var_offset .. var_offset + ncols
     """
     if axis not in ("obs", "var"):

@@ -182,6 +182,12 @@ pub trait DatasetReader: Send {
         &[]
     }
 
+    /// CSC column-pointer array (n_vars+1 entries) when X is stored by gene,
+    /// as [`x_stream_cols`](Self::x_stream_cols) reads it. Empty otherwise.
+    fn x_col_ptr(&self) -> &[u64] {
+        &[]
+    }
+
     /// Stream the count matrix as row-chunks.
     fn x_stream(&mut self) -> ChunkStream<'_>;
 
@@ -193,10 +199,11 @@ pub trait DatasetReader: Send {
     ///
     /// Only gene-major (CSC) X reads this way, a block at a time. Other
     /// storage refuses rather than reading all of X per block; write a
-    /// gene-major copy with `scx convert --csc`.
+    /// gene-major copy with `scx convert --gene-major`.
     fn x_stream_cols(&mut self, _ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
         error_stream(
-            "X is not stored by gene; write a gene-major copy with `scx convert --csc`".into(),
+            "X is not stored by gene; write a gene-major copy with `scx convert --gene-major`"
+                .into(),
         )
     }
 

@@ -230,8 +230,14 @@ fn scx_inspect(py: Python<'_>, input: &str, with_names: bool) -> PyResult<Py<PyA
     d.set_item("format", format)?;
     d.set_item("n_obs", n_obs)?;
     d.set_item("n_vars", n_vars)?;
-    if x_indptr.len() > 1 {
-        d.set_item("x_stats", nnz_stats(py, x_indptr)?)?;
+    // The axis X streams along: per-gene stats for gene-major X.
+    let (x_axis, x_ptr) = match reader.x_col_ptr() {
+        [] => ("obs", x_indptr),
+        col_ptr => ("var", col_ptr),
+    };
+    d.set_item("x_axis", x_axis)?;
+    if x_ptr.len() > 1 {
+        d.set_item("x_stats", nnz_stats(py, x_ptr)?)?;
     }
     let names = |cols: &[Column]| -> Vec<String> { cols.iter().map(|c| c.name.clone()).collect() };
     let dtypes = |cols: &[Column]| -> Vec<&'static str> {
