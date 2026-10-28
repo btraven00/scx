@@ -1,3 +1,5 @@
 ^\.cargo$
 ^docs$
 ^vignettes/.*\.html$
+^_pkgdown\.yml$
+^src/rust/target$

@@ -58,22 +58,17 @@ the package.
 
 # Function index
 
-Reference pages are being generated from the roxygen sources; until then
-the help topics below are marked TODO and the two vignettes are the
-documentation. Progress is tracked in
-[scx issue #88](https://github.com/btraven00/scx/issues/88).
-
 | Function | Does | Help page |
 |---|---|---|
-| `read_h5ad(path, as, lazy, ...)` | Read any supported file into a `SingleCellExperiment` (default), `Seurat`, AnnData handle or list | TODO |
-| `read_zarr(path, ...)` | Same, named for Zarr stores | TODO |
-| `inspect(path)` | Shape, column names, embedding keys and per-layer sparsity, without reading the matrix | TODO |
-| `convert(input, output)` | Stream one file into another format, chosen by the output extension | TODO |
-| `write_h5ad(sce, path)` | Write a `SingleCellExperiment` as `.h5ad` | TODO |
-| `uns(x, key)` | Read one key of `uns` on demand | TODO |
-| `as_sce(x)`, `as_seurat(x)` | Turn the AnnData handle from `as = "AnnData"` into an S4 object | TODO |
-| `PicklerickMatrix(path, layer)` | A `DelayedMatrix` whose blocks are read through SCX | TODO |
-| `PicklerickMatrixSeed` | The seed class behind it, with `dim`, `dimnames`, `extract_array`, `extract_sparse_array`, `chunkdim` | TODO |
+| `read_h5ad(path, as, lazy, ...)` | Read any supported file into a `SingleCellExperiment` (default), `Seurat`, AnnData handle or list | `?read_h5ad` |
+| `read_zarr(path, ...)` | Same, named for Zarr stores | `?read_zarr` |
+| `inspect(path)` | Shape, column names, embedding keys and per-layer sparsity, without reading the matrix | `?inspect` |
+| `convert(input, output)` | Stream one file into another format, chosen by the output extension | `?convert` |
+| `write_h5ad(sce, path)` | Write a `SingleCellExperiment` as `.h5ad` | `?write_h5ad` |
+| `uns(x, key)` | Read one key of `uns` on demand | `?uns` |
+| `as_sce(x)`, `as_seurat(x)` | Turn the AnnData handle from `as = "AnnData"` into an S4 object | `?as_sce`, `?AnnDataLight` |
+| `PicklerickMatrix(path, layer)` | A `DelayedMatrix` whose blocks are read through SCX | `?PicklerickMatrix` |
+| `PicklerickMatrixSeed` | The seed class behind it, with `dim`, `dimnames`, `extract_array`, `extract_sparse_array`, `chunkdim` | `?PicklerickMatrixSeed` |
 
 # Where it fits
 

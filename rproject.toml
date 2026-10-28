@@ -4,12 +4,31 @@ r_version = "4.5"
 
 repositories = [
     {alias = "CRAN",            url = "https://cloud.r-project.org/"},
-    {alias = "Bioc",            url = "https://bioconductor.org/packages/3.20/bioc"},
-    {alias = "BiocAnnotation",  url = "https://bioconductor.org/packages/3.20/data/annotation"},
-    {alias = "BiocExperiment",  url = "https://bioconductor.org/packages/3.20/data/experiment"},
+    {alias = "Bioc",            url = "https://bioconductor.org/packages/3.22/bioc"},
+    {alias = "BiocAnnotation",  url = "https://bioconductor.org/packages/3.22/data/annotation"},
+    {alias = "BiocExperiment",  url = "https://bioconductor.org/packages/3.22/data/experiment"},
 ]
 
 dependencies = [
     {name = "anndataR", git = "https://github.com/scverse/anndataR.git", commit = "e065626d8863a1923ab6b322fb7a14b95d0e9c6e"},
     "rhdf5",
+    # r/picklerick's Imports and Suggests, so the package can be installed,
+    # tested and documented against this library.
+    "Matrix",
+    "jsonlite",
+    "DelayedArray",
+    "S4Arrays",
+    "S4Vectors",
+    "SparseArray",
+    "SingleCellExperiment",
+    "SummarizedExperiment",
+    "HDF5Array",
+    "Seurat",
+    "SeuratObject",
+    "testthat",
+    # Docs: vignettes, man pages and the pkgdown site (scripts/render_docs.sh).
+    "knitr",
+    "rmarkdown",
+    "roxygen2",
+    "pkgdown",
 ]
