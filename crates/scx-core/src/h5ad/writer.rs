@@ -66,6 +66,8 @@ pub struct H5AdWriter {
     mode: WriterMode,
     /// HDF5 group the streamed matrix goes to: `"X"` or `"layers/<name>"`.
     x_path: String,
+    /// X is being written by column (`csc_matrix`): `x_indptr` is over columns.
+    x_csc: bool,
 }
 
 impl H5AdWriter {
@@ -151,6 +153,7 @@ impl H5AdWriter {
             sparse_state: None,
             mode: WriterMode::Create,
             x_path: x_slot.to_string(),
+            x_csc: false,
         })
     }
 
@@ -180,6 +183,7 @@ impl H5AdWriter {
             sparse_state: None,
             mode: WriterMode::Append,
             x_path: "X".to_string(),
+            x_csc: false,
         })
     }
 
@@ -746,10 +750,40 @@ impl DatasetWriter for H5AdWriter {
                 "write_x_chunk must not be called on an append-mode H5AdWriter".into(),
             ));
         }
+        if self.x_csc {
+            return Err(ScxError::InvalidFormat(
+                "write_x_chunk after write_x_columns: X is already being written by column".into(),
+            ));
+        }
         append_csr(&self.file.group(&self.x_path)?, &chunk.data, self.dtype)?;
         let base = *self.x_indptr.last().unwrap();
         self.x_indptr
             .extend(chunk.data.indptr[1..=chunk.nrows].iter().map(|&p| base + p));
+        Ok(())
+    }
+
+    async fn write_x_columns(&mut self, cols: &SparseMatrixCSR) -> Result<()> {
+        if self.mode == WriterMode::Append {
+            return Err(ScxError::InvalidFormat(
+                "write_x_columns must not be called on an append-mode H5AdWriter".into(),
+            ));
+        }
+        let grp = self.file.group(&self.x_path)?;
+        if !self.x_csc {
+            if self.x_indptr.len() > 1 {
+                return Err(ScxError::InvalidFormat(
+                    "write_x_columns after write_x_chunk: X is already being written by row".into(),
+                ));
+            }
+            // CSC on disk is the CSR of the transpose under another name; the
+            // shape attr stays (n_obs, n_vars).
+            write_str_attr(&grp, "encoding-type", "csc_matrix")?;
+            self.x_csc = true;
+        }
+        append_csr(&grp, cols, self.dtype)?;
+        let base = *self.x_indptr.last().unwrap();
+        self.x_indptr
+            .extend(cols.indptr[1..].iter().map(|&p| base + p));
         Ok(())
     }
 
