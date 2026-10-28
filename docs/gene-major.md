@@ -12,14 +12,14 @@ scx splits the job into two steps, each with bounded memory:
 
 ```sh
 # 1. Once per dataset: write a gene-major copy, holding at most 8 GB.
-scx convert atlas.h5ad atlas_csc.h5ad --csc 8
+scx convert atlas.h5ad atlas_by_gene.h5ad --gene-major --transpose-mem 8
 ```
 
 ```python
 # 2. Every fit: stream blocks of whole genes.
 import picklerick as pk
 
-for chunk in pk.open_stream("atlas_csc.h5ad", axis="var", chunk_size=512):
+for chunk in pk.open_stream("atlas_by_gene.h5ad", axis="var", chunk_size=512):
     Y = chunk.to_scipy()   # csc_array, cells x genes [var_offset, var_offset + ncols)
     fit(Y)                 # the next block decodes on a background thread meanwhile
 ```
@@ -29,9 +29,9 @@ own range:
 
 ```python
 i, n_jobs = int(os.environ["SLURM_ARRAY_TASK_ID"]), 16
-n_vars = pk.inspect("atlas_csc.h5ad")["n_vars"]
+n_vars = pk.inspect("atlas_by_gene.h5ad")["n_vars"]
 lo, hi = i * n_vars // n_jobs, (i + 1) * n_vars // n_jobs
-for chunk in pk.open_stream("atlas_csc.h5ad", axis="var", genes=[(lo, hi)]):
+for chunk in pk.open_stream("atlas_by_gene.h5ad", axis="var", genes=[(lo, hi)]):
     ...
 ```
 
@@ -46,12 +46,17 @@ The gene-major copy is a plain h5ad (`csc_matrix` X), so other tools read it
 too. `anndata.read_h5ad` returns a `csc_matrix`, backed `adata.X[:, genes]`
 reads only those genes, and HDF5Array reads it by column in R.
 
-## Step 1: `scx convert --csc`
+## Step 1: `scx convert --gene-major`
 
 ```sh
-scx convert atlas.h5ad atlas_csc.h5ad --csc        # 4 GB budget
-scx convert atlas.h5ad atlas_csc.h5ad --csc 0.5    # 0.5 GB budget
+scx convert atlas.h5ad atlas_by_gene.h5ad --gene-major                       # 4 GB budget
+scx convert atlas.h5ad atlas_by_gene.h5ad --gene-major --transpose-mem 0.5   # 0.5 GB budget
 ```
+
+The flag says gene-major rather than CSC on purpose: whether CSC is
+gene-major depends on orientation. h5ad is cells × genes, so its gene-major
+X is anndata's `csc_matrix`. 10x and Seurat are genes × cells, so their CSC
+is cell-major.
 
 Any input scx reads works, and the output must be `.h5ad`. obs, var and the
 other slots are written as usual. Layers and obsp stay CSR. From Rust, it's
@@ -80,10 +85,10 @@ Cost on a synthetic 200,000 × 2,000 f32 matrix, 5% dense (20M nonzeros,
 | run                                | blocks | reads | wall   | peak RSS |
 |------------------------------------|-------:|------:|-------:|---------:|
 | `scx convert` (CSR, baseline)      |      — |     1 | 0.55 s |    56 MB |
-| `scx convert --csc 4`              |      1 |     2 | 0.69 s |   295 MB |
-| `scx convert --csc 0.1`            |      3 |     4 | 0.93 s |   158 MB |
-| `scx convert --csc 0.04`           |      7 |     8 | 1.13 s |   100 MB |
-| `scx convert --csc 0.01`           |     25 |    26 | 2.71 s |    61 MB |
+| `--gene-major --transpose-mem 4`    |      1 |     2 | 0.69 s |   295 MB |
+| `--gene-major --transpose-mem 0.1`  |      3 |     4 | 0.93 s |   158 MB |
+| `--gene-major --transpose-mem 0.04` |      7 |     8 | 1.13 s |   100 MB |
+| `--gene-major --transpose-mem 0.01` |     25 |    26 | 2.71 s |    61 MB |
 | anndata `read` → `tocsc` → `write` |      — |     — | 1.13 s |   453 MB |
 
 Peak RSS above the CSR baseline tracks the budget. Halving the budget
@@ -104,11 +109,16 @@ in-memory route.
 - `rows=` and `where=` select cells, so they're refused with `axis="var"`.
   Subset cells inside the fit, or write a filtered copy first.
 
+To tell which axis a file streams along, run `scx inspect`, which prints
+`X layout: gene-major` and per-gene nnz quartiles. In Python,
+`pk.inspect(path)["x_axis"]` is `"var"` for gene-major X and `"obs"`
+otherwise.
+
 The storage has to match the axis, and the mismatch is an error, not a slow
 path:
 
 - **`axis="var"` on X stored by cell:** an error pointing to `scx convert
-  --csc`. Reading all of X for every gene block would be a full pass per
+  --gene-major`. Reading all of X for every gene block would be a full pass per
   block.
 - **`axis="obs"` (the default) on CSC X:** an error. Reading the gene
   pointer as a row pointer would transpose the matrix silently.
@@ -120,7 +130,7 @@ on CSC X implements it, and every other reader returns the error above.
 
 - Gene-axis streaming reads h5ad CSC X only. Zarr CSC X and the R binding
   aren't wired; in R, HDF5Array already reads CSC h5ad by column.
-- `.h5ad` output only. Zarr, h5seurat and BPCells output refuse `--csc`.
+- `.h5ad` output only. Zarr, h5seurat and BPCells output refuse `--gene-major`.
 - `scx convert` from a CSC h5ad fails at X, because it streams by cell.
   Convert to CSR with anndata first.
 - Every read in step 1 decodes all of X. A single-read alternative would

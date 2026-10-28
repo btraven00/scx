@@ -1775,7 +1775,7 @@ async fn csc_x_streams_by_gene_only() {
         .await
         .unwrap()
         .expect_err("CSR X streamed by gene");
-    assert!(err.to_string().contains("--csc"), "{err}");
+    assert!(err.to_string().contains("--gene-major"), "{err}");
 }
 
 /// Regression: a CSC layer or obsp matrix was first read as CSR (silently

@@ -12,7 +12,7 @@ Status: **spec / draft** (2026-10-10), reviewed against the code 2026-10-11.
 | 3 | row ranges | deferred until sharding is actually needed |
 
 Streaming by gene (`open_stream(axis="var", genes=...)` over a `scx convert
---csc` copy) is documented in [csc.md](csc.md).
+--gene-major` copy) is documented in [gene-major.md](gene-major.md).
 
 ## Why this exists
 
