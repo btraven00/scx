@@ -177,7 +177,7 @@ def test_inspect_reports_gene_major_x(norman, norman_path, norman_csc_path) -> N
 def test_stream_axis_must_match_storage(norman_path, norman_csc_path) -> None:
     with pytest.raises(pk.PickleRickError, match="--gene-major"):
         list(pk.open_stream(norman_path, axis="var"))
-    with pytest.raises(pk.PickleRickError, match="CSC"):
+    with pytest.raises(pk.PickleRickError, match="axis=\"var\""):
         list(pk.open_stream(norman_csc_path))
     with pytest.raises(ValueError, match="axis"):
         pk.open_stream(norman_csc_path, axis="genes")
