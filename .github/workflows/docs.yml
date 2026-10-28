@@ -1,0 +1,78 @@
+name: Docs
+
+# Renders the docs site with scripts/render_docs.sh, which runs every code
+# chunk, so a broken example fails this check. Pushes to main also deploy it
+# to GitHub Pages (Settings -> Pages -> Source must be "GitHub Actions").
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "r/picklerick/**"
+      - "python/picklerick/**"
+      - "crates/**"
+      - "tests/fixtures/**"
+      - "Cargo.lock"
+      - "scripts/render_docs.sh"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            r/picklerick/src/rust -> target
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      # The package's Imports and Suggests (Seurat, knitr, ...) plus
+      # Config/Needs/website (pkgdown). render_docs.sh installs picklerick
+      # itself, built against the in-tree scx-core.
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: r/picklerick
+          needs: website
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Docs venv
+        run: |
+          python -m venv .venv-docs
+          .venv-docs/bin/pip install -r site/requirements.txt
+      - uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          version: 1.10.19
+      - name: Render
+        run: scripts/render_docs.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/_site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

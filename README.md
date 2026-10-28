@@ -81,6 +81,10 @@ reproducibility is preserved.
 
 ## Docs
 
+Tutorials and the command-line, Python and R references are at
+<https://btraven00.github.io/scx/>. The site is built from [`site/`](site/)
+with `scripts/render_docs.sh`.
+
 Design notes, scope, formats, and developer workflows live in [`docs/`](docs/).
 
 ## Coverage

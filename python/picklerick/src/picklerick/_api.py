@@ -81,6 +81,23 @@ def read(
     H5AD files are read with :func:`anndata.read_h5ad` directly and the
     other arguments are ignored. Other formats are first converted to a
     temporary H5AD (see :func:`convert`).
+
+    Parameters
+    ----------
+    path
+        File or directory in any format :func:`convert` reads.
+    assay, layer
+        Seurat assay and layer to read from H5Seurat input.
+    dtype
+        Value type of the matrix: ``"f32"``, ``"f64"``, ``"i32"`` or
+        ``"u32"``.
+    chunk_size
+        Cells per streamed chunk of the conversion.
+
+    Returns
+    -------
+    anndata.AnnData
+        The whole dataset, in memory.
     """
     if Path(path).suffix.lower() == ".h5ad":
         return ad.read_h5ad(_path(path))
@@ -106,6 +123,22 @@ def write_h5seurat(
     """Write an AnnData object to H5Seurat (SeuratDisk layout).
 
     The object is written to a temporary H5AD first and then converted.
+
+    Parameters
+    ----------
+    adata
+        The object to write.
+    path
+        Destination ``.h5seurat`` path.
+    assay
+        Seurat assay name to write the matrix under.
+    chunk_size
+        Cells per streamed chunk of the conversion.
+
+    Returns
+    -------
+    Path
+        ``path``.
     """
     with TemporaryDirectory(prefix="picklerick-") as tmp:
         h5ad = Path(tmp) / "write.h5ad"
@@ -116,13 +149,23 @@ def write_h5seurat(
 def inspect(path: Pathish, *, names: bool = False) -> dict:
     """Describe a dataset without reading its matrix.
 
-    Returns a dict with ``format``, ``n_obs``, ``n_vars``, ``obs_cols``,
-    ``obs_dtypes``, ``var_cols``, ``var_dtypes``, ``obsm_keys``,
-    ``varm_keys``, ``uns_keys``, ``layers`` and ``obsp`` (lists of dicts
-    with name, shape and per-row nnz quartiles), and ``x_stats`` when X is
-    stored as CSR. With ``names=True`` it also has ``obs_names`` and
-    ``var_names`` (lists of str), e.g. to key per-cell results from
-    :func:`open_stream` without opening the file with anndata.
+    Parameters
+    ----------
+    path
+        File or directory in any format :func:`convert` reads.
+    names
+        Also return the cell and feature names.
+
+    Returns
+    -------
+    dict
+        ``format``, ``n_obs``, ``n_vars``, ``obs_cols``, ``obs_dtypes``,
+        ``var_cols``, ``var_dtypes``, ``obsm_keys``, ``varm_keys``,
+        ``uns_keys``, ``layers`` and ``obsp`` (lists of dicts with name,
+        shape and per-row nnz quartiles), and ``x_stats`` when X is stored
+        as CSR. With ``names=True`` it also has ``obs_names`` and
+        ``var_names`` (lists of str), e.g. to key per-cell results from
+        :func:`open_stream` without opening the file with anndata.
     """
     return _native.scx_inspect(_path(path), names)
 
@@ -153,6 +196,12 @@ def open_stream(
 
     Parameters
     ----------
+    path
+        File or directory in any format :func:`convert` reads.
+    chunk_size
+        Maximum rows (cells) per chunk.
+    assay, layer
+        Seurat assay and layer to read from H5Seurat input.
     rows
         A boolean mask over all rows, a sequence of row indices, or a
         sequence of ``(start, stop)`` half-open ranges.
@@ -161,6 +210,11 @@ def open_stream(
         is kept when every column's value is one of the given ones. Values
         are compared as text (``str(v)``, booleans as ``True``/``False``);
         NA never matches.
+
+    Returns
+    -------
+    Iterator[MatrixChunk]
+        CSR row blocks, in row order.
 
     Examples
     --------

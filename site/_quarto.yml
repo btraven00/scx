@@ -1,0 +1,72 @@
+# The SCX docs site. Build it with scripts/render_docs.sh, which installs the
+# CLI, the R package and the Python package first and points Quarto at the R
+# and Python environments. Every code chunk runs on every render; there is no
+# freeze, so a broken example fails the build.
+project:
+  type: website
+  output-dir: _site
+  render:
+    - index.qmd
+    - tutorials/convert.qmd
+    - tutorials/stream.qmd
+    - reference/cli.qmd
+    - reference/python/*.qmd
+
+website:
+  title: "SCX"
+  site-url: https://btraven00.github.io/scx/
+  repo-url: https://github.com/btraven00/scx
+  repo-actions: [issue]
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - text: Tutorials
+        menu:
+          - tutorials/convert.qmd
+          - tutorials/stream.qmd
+          - text: "Reading single-cell files in R"
+            href: r/articles/picklerick.html
+      - text: Reference
+        menu:
+          - text: Command line
+            href: reference/cli.qmd
+          - text: Python
+            href: reference/python/index.qmd
+          - text: R
+            href: r/reference/index.html
+    right:
+      - icon: github
+        href: https://github.com/btraven00/scx
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    toc: true
+    code-copy: true
+    # Embedded Python cells come from tutorials/_*-py.qmd companions, which
+    # are not pages of their own; don't link to them.
+    notebook-links: false
+
+# Python API reference, generated into reference/python/ (git-ignored) by
+# `quartodoc build`. MatrixChunk and PickleRickError live in the compiled
+# module; their docs come from its stub, picklerick_py_native.pyi.
+quartodoc:
+  package: picklerick
+  title: Python reference
+  dir: reference/python
+  parser: numpy
+  renderer:
+    style: markdown
+    display_name: relative
+  sections:
+    - title: Converting
+      contents: [convert]
+    - title: Reading and writing
+      contents: [read, write_h5seurat]
+    - title: Inspecting and streaming
+      contents: [inspect, open_stream, MatrixChunk]
+    - title: Errors
+      contents: [PickleRickError]

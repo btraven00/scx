@@ -1,0 +1,118 @@
+---
+title: "Convert between formats"
+description: "Inspect a file, convert it, and check the result, from the command line, Python and R."
+engine: knitr
+---
+
+```{r}
+#| include: false
+# scripts/render_docs.sh copies tests/fixtures/tiny into SCX_DOCS_WORK, so
+# the code below can name the files directly. Python cells come from
+# _convert-py.qmd, rendered by Jupyter in its own process.
+work <- Sys.getenv("SCX_DOCS_WORK")
+if (!nzchar(work)) stop("SCX_DOCS_WORK is not set: render with scripts/render_docs.sh")
+knitr::opts_knit$set(root.dir = work)
+```
+
+This page takes one small H5Seurat file, looks inside it, converts it to
+AnnData `.h5ad`, and checks the result. Each step is shown three ways: with
+the `scx` command line, with the Python package and with the R package. All
+three call the same engine, so they detect the same formats and use the same
+defaults.
+
+The example file, `tiny_v4.h5seurat`, is a 6-cell by 5-gene dataset from the
+SCX test fixtures. The second cell has no counts and two genes are each
+expressed in a single cell, so empty cells and sparse genes are part of the
+example.
+
+## Look before converting
+
+`inspect` reads only metadata: the format, the shape, the column names and
+the embedding keys. The count matrix is not loaded, whatever the file size.
+
+::: {.panel-tabset group="language"}
+
+## CLI
+
+```{bash}
+scx inspect tiny_v4.h5seurat
+```
+
+## Python
+
+{{< embed _convert-py.qmd#py-inspect echo=true >}}
+
+## R
+
+```{r}
+library(picklerick)
+
+info <- inspect("tiny_v4.h5seurat")
+info[c("format", "n_obs", "n_vars", "obs_cols")]
+```
+
+:::
+
+## Convert
+
+The input format is detected from the file's content; the output format is
+chosen by the extension of the output path. The matrix is streamed in chunks
+of 5000 cells by default, so peak memory does not grow with the number of
+cells.
+
+::: {.panel-tabset group="language"}
+
+## CLI
+
+```{bash}
+scx convert tiny_v4.h5seurat tiny_cli.h5ad
+```
+
+## Python
+
+{{< embed _convert-py.qmd#py-convert echo=true >}}
+
+## R
+
+```{r}
+convert("tiny_v4.h5seurat", "tiny_r.h5ad")
+```
+
+:::
+
+## Check the result
+
+The converted file has the same shape and cell metadata as the source.
+
+::: {.panel-tabset group="language"}
+
+## CLI
+
+```{bash}
+scx inspect tiny_cli.h5ad
+```
+
+## Python
+
+{{< embed _convert-py.qmd#py-check echo=true >}}
+
+## R
+
+```{r}
+sce <- read_h5ad("tiny_r.h5ad")
+sce
+```
+
+:::
+
+## Options shared by all three
+
+| Option | CLI | Python | R | Default |
+|---|---|---|---|---|
+| Cells per streamed chunk | `--chunk-size` | `chunk_size=` | `chunk_size =` | 5000 |
+| Output matrix type | `--dtype` | `dtype=` | `dtype =` | `f32` |
+| Seurat assay to read (H5Seurat input) | `--assay` | `assay=` | `assay =` | `RNA` |
+| Seurat layer to read (H5Seurat input) | `--layer` | `layer=` | `layer =` | `counts` |
+
+The full lists are in each reference: `scx convert --help`,
+`picklerick.convert` and `?picklerick::convert`.

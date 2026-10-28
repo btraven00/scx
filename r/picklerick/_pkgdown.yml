@@ -1,0 +1,39 @@
+# The R part of the SCX docs site, built into site/_site/r by
+# scripts/render_docs.sh.
+url: https://btraven00.github.io/scx/r/
+
+template:
+  bootstrap: 5
+
+navbar:
+  structure:
+    left: [intro, reference, articles]
+    right: [search, scx, github]
+  components:
+    scx:
+      text: SCX docs
+      href: https://btraven00.github.io/scx/
+
+reference:
+  - title: Reading
+    contents:
+      - read_h5ad
+      - uns
+  - title: The light AnnData handle
+    contents:
+      - AnnDataLight
+      - as_sce
+  - title: Inspecting, converting and writing
+    contents:
+      - inspect
+      - convert
+      - write_h5ad
+  - title: Lazy matrices
+    contents:
+      - PicklerickMatrix
+
+articles:
+  - title: Articles
+    contents:
+      - picklerick
+      - overview
