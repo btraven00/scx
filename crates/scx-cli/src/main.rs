@@ -155,6 +155,13 @@ enum Cli {
         #[arg(long, num_args = 0..=1, default_missing_value = "6")]
         compress: Option<u8>,
 
+        /// Write X gene-major (`csc_matrix`, `.h5ad` output only), for
+        /// per-gene consumers. `--csc` holds up to 4 GB of transposed
+        /// nonzeros at a time, `--csc N` up to N GB. X is read once to count,
+        /// then once per block of genes that fits the budget.
+        #[arg(long, value_name = "GB", num_args = 0..=1, default_missing_value = "4")]
+        csc: Option<f64>,
+
         /// Write only these comma-separated auxiliary slots (e.g.
         /// `--only obsp` or `--only obsm:X_pca,layers`). Applies to
         /// obsm/varm/uns/layers/obsp; X/obs/var are always written.
@@ -602,9 +609,17 @@ async fn run() -> anyhow::Result<()> {
             source_url,
             source_sha256: source_sha256_arg,
             compress,
+            csc,
             only,
             exclude,
         } => {
+            let csc_mem = match csc {
+                Some(gb) if gb.is_nan() || gb <= 0.0 => {
+                    anyhow::bail!("--csc must be a positive GB budget")
+                }
+                Some(gb) => Some((gb * 1e9) as usize),
+                None => None,
+            };
             let filter = match (only.as_deref(), exclude.as_deref()) {
                 (Some(o), _) => SlotFilter::from_only(o),
                 (_, Some(e)) => SlotFilter::from_exclude(e),
@@ -676,6 +691,7 @@ async fn run() -> anyhow::Result<()> {
                 source_url.as_deref(),
                 source_sha256.clone(),
                 compress,
+                csc_mem,
                 &filter,
             )
             .await;
@@ -863,12 +879,21 @@ async fn convert_with_reader(
     source_url: Option<&str>,
     source_sha256: Option<String>,
     compress: Option<u8>,
+    csc_mem: Option<usize>,
     filter: &SlotFilter,
 ) -> anyhow::Result<(usize, usize)> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
 
     let is_h5seurat = output.extension().and_then(|e| e.to_str()) == Some("h5seurat");
+    if csc_mem.is_some()
+        && matches!(
+            output.extension().and_then(|e| e.to_str()),
+            Some("h5seurat" | "zarr" | "bpcells")
+        )
+    {
+        anyhow::bail!("--csc only applies to .h5ad output");
+    }
 
     if compress.is_some() && is_h5seurat {
         tracing::warn!("--compress only applies to .h5ad output; ignored for .h5seurat");
@@ -1089,24 +1114,34 @@ async fn convert_with_reader(
     }
 
     let t_x = std::time::Instant::now();
-    let mut stream = reader.x_stream();
-    let mut total_nnz = 0usize;
-    let mut n_chunks = 0usize;
+    if let Some(mem) = csc_mem {
+        let blocks = scx_core::transpose::write_x_csc(reader, &mut *writer, mem).await?;
+        tracing::info!(
+            blocks,
+            reads = blocks + 1,
+            "matrix transposed to CSC in {:.2?}",
+            t_x.elapsed()
+        );
+    } else {
+        let mut stream = reader.x_stream();
+        let mut total_nnz = 0usize;
+        let mut n_chunks = 0usize;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        total_nnz += chunk.data.indices.len();
-        n_chunks += 1;
-        writer.write_x_chunk(&chunk).await?;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            total_nnz += chunk.data.indices.len();
+            n_chunks += 1;
+            writer.write_x_chunk(&chunk).await?;
+        }
+
+        tracing::info!(
+            n_chunks,
+            total_nnz,
+            throughput_cells_s = (n_obs as f64 / t_x.elapsed().as_secs_f64()) as u64,
+            "matrix streamed in {:.2?}",
+            t_x.elapsed()
+        );
     }
-
-    tracing::info!(
-        n_chunks,
-        total_nnz,
-        throughput_cells_s = (n_obs as f64 / t_x.elapsed().as_secs_f64()) as u64,
-        "matrix streamed in {:.2?}",
-        t_x.elapsed()
-    );
 
     writer.finalize().await?;
 

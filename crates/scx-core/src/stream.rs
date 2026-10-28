@@ -6,7 +6,9 @@ use futures::{stream, Stream, StreamExt};
 
 use crate::dtype::DataType;
 use crate::error::{Result, ScxError};
-use crate::ir::{Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
+use crate::ir::{
+    Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
+};
 
 /// A boxed stream of row chunks, as every reader returns.
 pub type ChunkStream<'a> = Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>>;
@@ -252,6 +254,16 @@ pub trait DatasetWriter: Send {
 
     /// Write a chunk of the count matrix. Chunks must arrive in row order.
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()>;
+
+    /// Write a block of X's columns, given as the CSR of their transpose
+    /// (columns × cells), to X stored by column (CSC). Blocks must arrive in
+    /// column order and replace `write_x_chunk`. See
+    /// [`write_x_csc`](crate::transpose::write_x_csc).
+    async fn write_x_columns(&mut self, _cols: &SparseMatrixCSR) -> Result<()> {
+        Err(ScxError::InvalidFormat(
+            "this output format cannot store X by column (CSC); use .h5ad".into(),
+        ))
+    }
 
     /// Finalize the output (flush, write footers, etc.).
     async fn finalize(&mut self) -> Result<()>;
