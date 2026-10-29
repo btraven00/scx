@@ -61,7 +61,7 @@ jobs:
   # the checkout, which is cleaned on every run. Skipped for pull requests
   # from forks, which shouldn't run code on a shared lab machine.
   check:
-    runs-on: [self-hosted, omnibenchmark]
+    runs-on: self-hosted
     if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
     env:
       CARGO_HOME: /opt/cache/runner/scx/cargo
