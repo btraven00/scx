@@ -30,10 +30,11 @@ concurrency:
 
 jobs:
   # Runs on the self-hosted omnibenchmark machine, set up by the lab's
-  # github_runner Ansible play: system R 4.5, plus cmake, Quarto and rv. R
-  # packages come from rproject.toml and rv.lock, as locally. The caches live
-  # outside the checkout, which is cleaned on every run. Skipped for pull
-  # requests from forks, which shouldn't run code on a shared lab machine.
+  # github_runner Ansible play: Posit's R 4.5.3 in /opt/R, plus cmake, Quarto
+  # and rv. R packages come from rproject.toml and rv.lock, as locally. The
+  # caches live outside the checkout, which is cleaned on every run. Skipped
+  # for pull requests from forks, which shouldn't run code on a shared lab
+  # machine.
   build:
     runs-on: self-hosted
     if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
@@ -44,6 +45,9 @@ jobs:
       PIP_CACHE_DIR: /opt/cache/runner/scx/pip
     steps:
       - uses: actions/checkout@v7
+      # Ahead of the host's /usr/local R, which has no graphics devices for
+      # knitr to render the R chunks with.
+      - run: echo "/opt/R/4.5.3/bin" >> "$GITHUB_PATH"
       # So rust-toolchain finds the rustup an earlier run installed.
       - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
