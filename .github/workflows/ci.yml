@@ -31,6 +31,15 @@ jobs:
     env:
       CARGO_HOME: /opt/cache/runner/scx/cargo
       RUSTUP_HOME: /opt/cache/runner/scx/rustup
+      # Compile cache for Rust and for HDF5's C build (sccache from the play).
+      RUSTC_WRAPPER: sccache
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      SCCACHE_DIR: /opt/cache/runner/scx/sccache
+      SCCACHE_CACHE_SIZE: 20G
+      # sccache can't cache incremental builds (the workspace crates in dev
+      # profiles, e.g. clippy and test).
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
 
@@ -51,6 +60,10 @@ jobs:
         env:
           HDF5_USE_FILE_LOCKING: "FALSE"
         run: cargo test --all --features scx-cli/net,scx-cli/bixverse-parquet
+
+      - name: sccache hit rate
+        if: always()
+        run: sccache --show-stats
 
   test:
     name: Test & Lint (${{ matrix.os }}, ${{ matrix.hdf5 }})
