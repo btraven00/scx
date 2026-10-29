@@ -42,7 +42,7 @@ Useful links:
 Authors:
 \itemize{
   \item ben \email{ben.uzh@proton.me}
-  \item Atreya Choudhury \email{atreyachoudhury12@gmail.com}
+  \item Atreya Choudhury \email{atreyachoudhury@hotmail.com}
 }
 
 }
