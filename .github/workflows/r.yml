@@ -6,6 +6,8 @@ on:
       - "r/picklerick/**"
       - "crates/scx-core/**"
       - "tests/fixtures/**"
+      - "rproject.toml"
+      - "rv.lock"
       - ".github/workflows/r.yml"
   push:
     branches: [main]
@@ -20,7 +22,7 @@ jobs:
     env:
       SCX_ROOT: ${{ github.workspace }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # Build the R crate against the in-tree scx-core rather than the
       # crates.io release it names, so core changes are tested here before a tag.
@@ -42,7 +44,7 @@ jobs:
           print(cov)
           covr::to_cobertura(cov, "r-coverage.xml")
         shell: Rscript {0}
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./r-coverage.xml
@@ -52,27 +54,47 @@ jobs:
 
   # R CMD check, then a guard that the committed man/ and NAMESPACE are what
   # roxygen generates from the comments in R/.
+  #
+  # Runs on the self-hosted omnibenchmark machine, set up by the lab's
+  # github_runner Ansible play: system R 4.5, plus cmake and rv. R packages
+  # come from rproject.toml and rv.lock, as locally. The caches live outside
+  # the checkout, which is cleaned on every run. Skipped for pull requests
+  # from forks, which shouldn't run code on a shared lab machine.
   check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, omnibenchmark]
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+    env:
+      CARGO_HOME: /opt/cache/runner/scx/cargo
+      RUSTUP_HOME: /opt/cache/runner/scx/rustup
+      RV_GLOBAL_CACHE_DIR: /opt/cache/runner/scx/rv
+      # What r-lib/actions sets for R CMD check on GitHub's runners.
+      NOT_CRAN: "true"
+      TZ: UTC
+      _R_CHECK_CRAN_INCOMING_: "false"
+      _R_CHECK_SYSTEM_CLOCK_: "FALSE"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      # So rust-toolchain finds the rustup an earlier run installed.
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
+      # Overwritten, not appended to: CARGO_HOME persists between runs.
       - name: Patch scx-core to the checkout
         run: |
-          printf '[patch.crates-io]\nscx-core = { path = "%s/crates/scx-core" }\n' "$GITHUB_WORKSPACE" >> ~/.cargo/config.toml
-      - uses: r-lib/actions/setup-r@v2
+          printf '[patch.crates-io]\nscx-core = { path = "%s/crates/scx-core" }\n' "$GITHUB_WORKSPACE" > "$CARGO_HOME/config.toml"
+      - name: R packages
+        run: |
+          rv sync
+          echo "R_LIBS=$GITHUB_WORKSPACE/$(rv library)" >> "$GITHUB_ENV"
+      - name: R CMD check
+        working-directory: ${{ runner.temp }}
+        run: |
+          R CMD build "$GITHUB_WORKSPACE/r/picklerick"
+          R CMD check --no-manual --as-cran picklerick_*.tar.gz
+      - uses: actions/upload-artifact@v7
+        if: failure()
         with:
-          use-public-rspm: true
-      - uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          working-directory: r/picklerick
-          extra-packages: any::rcmdcheck, any::roxygen2
-          needs: check
-      - uses: r-lib/actions/check-r-package@v2
-        with:
-          working-directory: r/picklerick
-          args: 'c("--no-manual", "--as-cran")'
-          error-on: '"error"'
+          name: picklerick-Rcheck
+          path: ${{ runner.temp }}/picklerick.Rcheck
       # After the check, so the in-place build roxygen triggers is not
       # bundled into the package tarball the check builds.
       - name: man/ and NAMESPACE match the roxygen comments
