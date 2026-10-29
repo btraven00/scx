@@ -506,6 +506,7 @@ fn test_merge_create_uns() {
 /// A patch can come from any format scx reads, not only h5ad: here obsm
 /// from an AnnData Zarr store (merge used to open every non-BPCells,
 /// non-H5Seurat patch as h5ad).
+#[cfg(feature = "zarr")]
 #[test]
 fn test_merge_patch_from_zarr() {
     let dir = TempDir::new().unwrap();
