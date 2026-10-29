@@ -4,8 +4,6 @@ Self-contained — builds its own two-sample fixtures, so it needs no golden
 files, only the scx binary and anndata.
 """
 
-import os
-import shutil
 import subprocess
 
 import anndata as ad
@@ -13,13 +11,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy import sparse
-
-SCX = os.environ.get("SCX_BIN") or shutil.which("scx") or "target/release/scx"
-
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(SCX) and shutil.which(SCX) is None,
-    reason=f"scx binary not found at {SCX} — run `pixi run -e test install-scx`",
-)
 
 
 def _adata(cells, genes, rows, batch):
@@ -45,11 +36,11 @@ def inputs(tmp_path_factory):
 
 
 @pytest.mark.parametrize("join", ["inner", "outer"])
-def test_matches_anndata_concat(inputs, join):
+def test_matches_anndata_concat(inputs, join, scx):
     a, b, pa, pb, d = inputs
     out = str(d / f"scx_{join}.h5ad")
     subprocess.run(
-        [SCX, "concat", pa, pb, "-o", out,
+        [scx, "concat", pa, pb, "-o", out,
          "--join", join, "--label", "sample", "--index-unique", "-"],
         check=True, capture_output=True,
     )
