@@ -41,6 +41,15 @@ jobs:
     env:
       CARGO_HOME: /opt/cache/runner/scx/cargo
       RUSTUP_HOME: /opt/cache/runner/scx/rustup
+      # Compile cache for Rust and for HDF5's C build (sccache from the play).
+      RUSTC_WRAPPER: sccache
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      SCCACHE_DIR: /opt/cache/runner/scx/sccache
+      SCCACHE_CACHE_SIZE: 20G
+      # sccache can't cache incremental builds (the workspace crates in dev
+      # profiles, e.g. clippy and test).
+      CARGO_INCREMENTAL: "0"
       RV_GLOBAL_CACHE_DIR: /opt/cache/runner/scx/rv
       PIP_CACHE_DIR: /opt/cache/runner/scx/pip
     steps:
@@ -67,6 +76,9 @@ jobs:
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site/_site
+      - name: sccache hit rate
+        if: always()
+        run: sccache --show-stats
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
