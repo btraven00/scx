@@ -31,7 +31,7 @@ jobs:
           # Conda + distro packager path: link the system libhdf5.
           - os: ubuntu-latest
             hdf5: system
-            cargo_flags: "--no-default-features"
+            cargo_flags: "--workspace --exclude picklerick-py-native --no-default-features"
             apt_packages: "libhdf5-dev"
           # The PyO3 crate needs maturin's link flags on macOS; its wheel is
           # built and tested in python.yml instead.
