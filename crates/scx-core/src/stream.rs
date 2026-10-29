@@ -6,7 +6,9 @@ use futures::{stream, Stream, StreamExt};
 
 use crate::dtype::DataType;
 use crate::error::{Result, ScxError};
-use crate::ir::{Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable, VarTable, Varm};
+use crate::ir::{
+    Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
+};
 
 /// A boxed stream of row chunks, as every reader returns.
 pub type ChunkStream<'a> = Pin<Box<dyn Stream<Item = Result<MatrixChunk>> + Send + 'a>>;
@@ -94,7 +96,28 @@ pub(crate) fn select_rows(chunk: &MatrixChunk, ranges: &[Range<usize>]) -> Vec<M
 }
 
 fn no_such_matrix<'a>(what: &str) -> ChunkStream<'a> {
-    let msg = format!("this format has no {what} matrices");
+    error_stream(format!("this format has no {what} matrices"))
+}
+
+/// Fails when the reader's X is gene-major (CSC), which streams only by
+/// gene. Callers that stream X by cell after writing other output (convert,
+/// concat, snapshot) call this first, so a gene-major input fails before
+/// anything is written.
+pub fn require_cell_major(reader: &dyn DatasetReader) -> Result<()> {
+    if reader.x_col_ptr().is_empty() {
+        Ok(())
+    } else {
+        Err(ScxError::InvalidFormat(GENE_MAJOR_X.into()))
+    }
+}
+
+/// Why gene-major X can't stream by cell, and what to do about it.
+pub(crate) const GENE_MAJOR_X: &str = "X is gene-major (CSC), which can only be streamed \
+    by gene. To read it by cell, convert it to CSR first, e.g. \
+    adata.X = adata.X.tocsr(); adata.write_h5ad(path)";
+
+/// A stream that yields one error.
+pub(crate) fn error_stream<'a>(msg: String) -> ChunkStream<'a> {
     Box::pin(stream::once(
         async move { Err(ScxError::InvalidFormat(msg)) },
     ))
@@ -176,8 +199,30 @@ pub trait DatasetReader: Send {
         &[]
     }
 
+    /// CSC column-pointer array (n_vars+1 entries) when X is stored by gene,
+    /// as [`x_stream_cols`](Self::x_stream_cols) reads it. Empty otherwise.
+    fn x_col_ptr(&self) -> &[u64] {
+        &[]
+    }
+
     /// Stream the count matrix as row-chunks.
     fn x_stream(&mut self) -> ChunkStream<'_>;
+
+    /// Stream X by gene: the columns in `ranges` (normalized like
+    /// [`x_stream_rows`](Self::x_stream_rows)), as chunks of up to the
+    /// reader's chunk size in genes. Each chunk holds whole genes as the CSR
+    /// of its block's transpose (genes × cells), and `row_offset` is its
+    /// first gene. That is the CSC of the block, with cells ascending.
+    ///
+    /// Only gene-major (CSC) X reads this way, a block at a time. Other
+    /// storage refuses rather than reading all of X per block; write a
+    /// gene-major copy with `scx convert --gene-major`.
+    fn x_stream_cols(&mut self, _ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
+        error_stream(
+            "X is not stored by gene; write a gene-major copy with `scx convert --gene-major`"
+                .into(),
+        )
+    }
 
     /// Stream only the rows in `ranges` (any order; overlaps are merged), as
     /// chunks of up to the reader's chunk size that never span two ranges.
@@ -252,6 +297,16 @@ pub trait DatasetWriter: Send {
 
     /// Write a chunk of the count matrix. Chunks must arrive in row order.
     async fn write_x_chunk(&mut self, chunk: &MatrixChunk) -> Result<()>;
+
+    /// Write a block of X's columns, given as the CSR of their transpose
+    /// (columns × cells), to X stored by column (CSC). Blocks must arrive in
+    /// column order and replace `write_x_chunk`. See
+    /// [`write_x_csc`](crate::transpose::write_x_csc).
+    async fn write_x_columns(&mut self, _cols: &SparseMatrixCSR) -> Result<()> {
+        Err(ScxError::InvalidFormat(
+            "this output format cannot store X by column (CSC); use .h5ad".into(),
+        ))
+    }
 
     /// Finalize the output (flush, write footers, etc.).
     async fn finalize(&mut self) -> Result<()>;

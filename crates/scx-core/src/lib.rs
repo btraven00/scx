@@ -35,6 +35,7 @@ pub mod rds;
 pub mod sparse;
 pub mod stream;
 pub mod tenx;
+pub mod transpose;
 pub mod validate;
 #[cfg(feature = "zarr")]
 pub mod zarr_ad;

@@ -135,11 +135,13 @@ pub async fn concat(
     let open_opts = OpenOptions::new(opts.chunk_size);
     let mut readers = Vec::with_capacity(inputs.len());
     for input in inputs {
-        readers.push(
-            crate::open(input, &open_opts)
-                .await
-                .map_err(|e| ScxError::InvalidFormat(format!("cannot open '{input}': {e}")))?,
-        );
+        let reader = crate::open(input, &open_opts)
+            .await
+            .map_err(|e| ScxError::InvalidFormat(format!("cannot open '{input}': {e}")))?;
+        // X streams by cell after obs/var are written: refuse now, not halfway.
+        crate::stream::require_cell_major(&*reader)
+            .map_err(|e| ScxError::InvalidFormat(format!("'{input}': {e}")))?;
+        readers.push(reader);
     }
 
     // --- axis metadata ---------------------------------------------------

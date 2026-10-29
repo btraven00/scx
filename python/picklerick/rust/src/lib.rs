@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::Path;
 
 use futures::executor::block_on;
@@ -229,8 +230,14 @@ fn scx_inspect(py: Python<'_>, input: &str, with_names: bool) -> PyResult<Py<PyA
     d.set_item("format", format)?;
     d.set_item("n_obs", n_obs)?;
     d.set_item("n_vars", n_vars)?;
-    if x_indptr.len() > 1 {
-        d.set_item("x_stats", nnz_stats(py, x_indptr)?)?;
+    // The axis X streams along: per-gene stats for gene-major X.
+    let (x_axis, x_ptr) = match reader.x_col_ptr() {
+        [] => ("obs", x_indptr),
+        col_ptr => ("var", col_ptr),
+    };
+    d.set_item("x_axis", x_axis)?;
+    if x_ptr.len() > 1 {
+        d.set_item("x_stats", nnz_stats(py, x_ptr)?)?;
     }
     let names = |cols: &[Column]| -> Vec<String> { cols.iter().map(|c| c.name.clone()).collect() };
     let dtypes = |cols: &[Column]| -> Vec<&'static str> {
@@ -257,28 +264,42 @@ fn scx_inspect(py: Python<'_>, input: &str, with_names: bool) -> PyResult<Py<PyA
     Ok(d.into_any().unbind())
 }
 
-/// A chunk of consecutive rows of the matrix, as CSR numpy arrays.
+/// A block of the matrix, as compressed numpy arrays: consecutive rows
+/// (``axis == "obs"``, CSR, every column) or consecutive genes
+/// (``axis == "var"``, CSC, every row). The block is rows
+/// ``row_offset:row_offset + nrows`` by columns
+/// ``var_offset:var_offset + ncols``.
 ///
 /// The arrays take ownership of the buffers the reader decoded into, so
 /// there is no per-chunk copy. They are writable and outlive the chunk.
 #[pyclass(name = "MatrixChunk", module = "picklerick")]
 pub struct PyMatrixChunk {
+    /// ``"obs"`` for a block of rows (CSR), ``"var"`` for a block of genes (CSC).
+    #[pyo3(get)]
+    pub axis: &'static str,
     /// Index of the first row of this chunk in the full matrix.
     #[pyo3(get)]
     pub row_offset: usize,
     /// Number of rows in this chunk.
     #[pyo3(get)]
     pub nrows: usize,
+    /// Index of the first column of this chunk in the full matrix.
+    #[pyo3(get)]
+    pub var_offset: usize,
+    /// Number of columns in this chunk.
+    #[pyo3(get)]
+    pub ncols: usize,
     /// Number of columns (features) of the full matrix.
     #[pyo3(get)]
     pub n_vars: usize,
     /// NumPy dtype name of `data`, e.g. ``"float32"``.
     #[pyo3(get)]
     pub dtype: String,
-    /// ``(nrows + 1,)`` uint64 row pointers.
+    /// uint64 pointers: ``(nrows + 1,)`` per row for ``"obs"``,
+    /// ``(ncols + 1,)`` per gene for ``"var"``.
     #[pyo3(get)]
     pub indptr: Py<PyAny>,
-    /// ``(nnz,)`` uint32 column indices.
+    /// ``(nnz,)`` uint32 column indices (``"obs"``) or row indices (``"var"``).
     #[pyo3(get)]
     pub indices: Py<PyAny>,
     /// ``(nnz,)`` values.
@@ -288,16 +309,21 @@ pub struct PyMatrixChunk {
 
 #[pymethods]
 impl PyMatrixChunk {
-    /// The chunk as a ``scipy.sparse.csr_array`` that shares ``data`` and
-    /// ``indices`` with this chunk. scipy wants signed indices of one dtype:
-    /// ``indices`` is viewed as int32 (same bits, never negative) and
-    /// ``indptr`` is cast to int32, a copy of only nrows + 1 entries. Given an
-    /// int64 indptr, scipy would upcast, and so copy, ``indices``.
+    /// The chunk as a ``scipy.sparse.csr_array`` (``"obs"``) or
+    /// ``csc_array`` (``"var"``) of shape ``(nrows, ncols)`` that shares
+    /// ``data`` and ``indices`` with this chunk. scipy wants signed indices
+    /// of one dtype: ``indices`` is viewed as int32 (same bits, never
+    /// negative) and ``indptr`` is cast to int32, a copy of only its few
+    /// entries. Given an int64 indptr, scipy would upcast, and so copy,
+    /// ``indices``.
     fn to_scipy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        if self.n_vars > i32::MAX as usize {
+        let (minor, what, class) = match self.axis {
+            "var" => (self.nrows, "rows", "csc_array"),
+            _ => (self.ncols, "columns", "csr_array"),
+        };
+        if minor > i32::MAX as usize {
             return Err(PickleRickError::new_err(format!(
-                "to_scipy: {} columns don't fit int32 indices",
-                self.n_vars
+                "to_scipy: {minor} {what} don't fit int32 indices"
             )));
         }
         let indices = self.indices.bind(py).call_method1("view", ("int32",))?;
@@ -308,20 +334,32 @@ impl PyMatrixChunk {
             self.indptr.bind(py).call_method1("view", ("int64",))?
         };
         let kwargs = PyDict::new(py);
-        kwargs.set_item("shape", (self.nrows, self.n_vars))?;
+        kwargs.set_item("shape", (self.nrows, self.ncols))?;
         kwargs.set_item("copy", false)?;
         py.import("scipy.sparse")?
-            .getattr("csr_array")?
+            .getattr(class)?
             .call(((self.data.bind(py), indices, indptr),), Some(&kwargs))
     }
 }
 
-fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyMatrixChunk {
+/// `n_obs` is set for a gene-axis stream, whose chunks span every row.
+fn chunk_to_py(
+    py: Python<'_>,
+    chunk: MatrixChunk,
+    n_vars: usize,
+    n_obs: Option<usize>,
+) -> PyMatrixChunk {
     let MatrixChunk {
-        row_offset,
-        nrows,
+        row_offset: offset,
+        nrows: n,
         data: csr,
     } = chunk;
+    // A gene-axis chunk is the CSR of its block's transpose: n genes from
+    // `offset`, over every row.
+    let (axis, row_offset, nrows, var_offset, ncols) = match n_obs {
+        Some(n_obs) => ("var", 0, n_obs, offset, n),
+        None => ("obs", offset, n, 0, n_vars),
+    };
     let dtype = csr.data.dtype().to_string();
     let data = match csr.data {
         TypedVec::F32(v) => v.into_pyarray(py).into_any().unbind(),
@@ -330,8 +368,11 @@ fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyMatrixChu
         TypedVec::U32(v) => v.into_pyarray(py).into_any().unbind(),
     };
     PyMatrixChunk {
+        axis,
         row_offset,
         nrows,
+        var_offset,
+        ncols,
         n_vars,
         dtype,
         indptr: csr.indptr.into_pyarray(py).into_any().unbind(),
@@ -345,6 +386,8 @@ fn chunk_to_py(py: Python<'_>, chunk: MatrixChunk, n_vars: usize) -> PyMatrixChu
 pub struct PyMatrixStream {
     rx: std::sync::Mutex<std::sync::mpsc::Receiver<Result<MatrixChunk, String>>>,
     n_vars: usize,
+    /// Set when streaming by gene: every chunk spans these rows.
+    n_obs: Option<usize>,
 }
 
 #[pymethods]
@@ -356,7 +399,7 @@ impl PyMatrixStream {
     fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyMatrixChunk>> {
         let received = py.detach(|| self.rx.lock().unwrap().recv());
         match received {
-            Ok(Ok(chunk)) => Ok(Some(chunk_to_py(py, chunk, self.n_vars))),
+            Ok(Ok(chunk)) => Ok(Some(chunk_to_py(py, chunk, self.n_vars, self.n_obs))),
             Ok(Err(msg)) => Err(PickleRickError::new_err(msg)),
             Err(_) => Ok(None), // reader thread finished
         }
@@ -365,9 +408,12 @@ impl PyMatrixStream {
 
 /// `rows` are (start, stop) half-open row ranges; `where` maps obs columns to
 /// the accepted values, all of which must hold. Both are turned into row
-/// ranges; `rows` and `where` together take their intersection.
+/// ranges; `rows` and `where` together take their intersection. `by_gene`
+/// streams by gene instead, over the (start, stop) ranges in `genes`, or
+/// every gene when that is `None`.
 #[pyfunction]
-#[pyo3(signature = (path, chunk_size, assay, layer, rows = None, r#where = None))]
+#[pyo3(signature = (path, chunk_size, assay, layer, rows = None, r#where = None, by_gene = false, genes = None))]
+#[allow(clippy::too_many_arguments)]
 fn scx_open_stream(
     path: &str,
     chunk_size: usize,
@@ -375,9 +421,23 @@ fn scx_open_stream(
     layer: &str,
     rows: Option<Vec<(usize, usize)>>,
     r#where: Option<Vec<(String, Vec<String>)>>,
+    by_gene: bool,
+    genes: Option<Vec<(usize, usize)>>,
 ) -> PyResult<PyMatrixStream> {
     let mut reader = open_reader(path, stream_opts(chunk_size, assay, layer)).map_err(py_err)?;
     let (n_obs, n_vars) = reader.shape();
+    let genes: Option<Vec<Range<usize>>> = by_gene.then(|| {
+        genes.map_or(std::iter::once(0..n_vars).collect(), |g| {
+            g.into_iter().map(|(a, b)| a..b).collect()
+        })
+    });
+    let stream_n_obs = genes.is_some().then_some(n_obs);
+    if genes.is_none() && !reader.x_col_ptr().is_empty() {
+        return Err(py_err(
+            "X is gene-major (CSC): stream it by gene with open_stream(axis=\"var\"), \
+             or convert it to CSR to stream by cell",
+        ));
+    }
     let ranges = match (rows, r#where) {
         (None, None) => None,
         (rows, filters) => {
@@ -406,9 +466,10 @@ fn scx_open_stream(
 
     std::thread::spawn(move || {
         block_on(async move {
-            let mut stream = match ranges {
-                Some(ranges) => reader.x_stream_rows(ranges),
-                None => reader.x_stream(),
+            let mut stream = match (genes, ranges) {
+                (Some(genes), _) => reader.x_stream_cols(genes),
+                (None, Some(ranges)) => reader.x_stream_rows(ranges),
+                (None, None) => reader.x_stream(),
             };
             while let Some(chunk) = stream.next().await {
                 if tx.send(chunk.map_err(|e| e.to_string())).is_err() {
@@ -421,6 +482,7 @@ fn scx_open_stream(
     Ok(PyMatrixStream {
         rx: std::sync::Mutex::new(rx),
         n_vars,
+        n_obs: stream_n_obs,
     })
 }
 

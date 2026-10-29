@@ -130,3 +130,58 @@ def test_stream_rows_accepts_mask_indices_and_ranges(norman, norman_path) -> Non
     np.testing.assert_array_equal(_stack(chunks), x[mask & train])
     with pytest.raises(pk.PickleRickError, match="beyond"):
         list(pk.open_stream(norman_path, rows=[(0, norman.n_obs + 1)]))
+
+
+@pytest.fixture(scope="module")
+def norman_csc_path(norman, tmp_path_factory):
+    """norman with X stored by gene, as anndata writes CSC (scx convert --csc
+    writes the same encoding)."""
+    a = norman.copy()
+    a.X = sparse.csc_matrix(a.X)
+    path = tmp_path_factory.mktemp("csc") / "norman_csc.h5ad"
+    a.write_h5ad(path)
+    return path
+
+
+def test_stream_by_gene_reassembles_x(norman, norman_csc_path) -> None:
+    chunks = list(pk.open_stream(norman_csc_path, axis="var", chunk_size=7))
+    assert [c.var_offset for c in chunks] == list(range(0, norman.n_vars, 7))
+    blocks = [c.to_scipy() for c in chunks]
+    for c, m in zip(chunks, blocks):
+        assert c.axis == "var"
+        assert (c.row_offset, c.nrows) == (0, norman.n_obs)
+        assert isinstance(m, sparse.csc_array)
+        assert m.shape == (norman.n_obs, c.ncols)
+        if c.data.size:  # an all-zero block has empty arrays, which share nothing
+            assert np.shares_memory(m.data, c.data)
+            assert np.shares_memory(m.indices, c.indices)
+    np.testing.assert_array_equal(sparse.hstack(blocks).toarray(), dense(norman.X))
+
+
+def test_stream_by_gene_selects_gene_ranges(norman, norman_csc_path) -> None:
+    chunks = list(pk.open_stream(norman_csc_path, axis="var", genes=[(3, 9)], chunk_size=4))
+    assert [(c.var_offset, c.ncols) for c in chunks] == [(3, 4), (7, 2)]
+    got = sparse.hstack([c.to_scipy() for c in chunks]).toarray()
+    np.testing.assert_array_equal(got, dense(norman.X)[:, 3:9])
+
+
+def test_inspect_reports_gene_major_x(norman, norman_path, norman_csc_path) -> None:
+    assert pk.inspect(norman_path)["x_axis"] == "obs"
+    info = pk.inspect(norman_csc_path)
+    assert info["x_axis"] == "var"
+    x = dense(norman.X)
+    assert info["x_stats"]["nnz"] == np.count_nonzero(x)
+    assert info["x_stats"]["nnz_max"] == np.count_nonzero(x, axis=0).max()
+
+
+def test_stream_axis_must_match_storage(norman_path, norman_csc_path) -> None:
+    with pytest.raises(pk.PickleRickError, match="--gene-major"):
+        list(pk.open_stream(norman_path, axis="var"))
+    with pytest.raises(pk.PickleRickError, match="axis=\"var\""):
+        list(pk.open_stream(norman_csc_path))
+    with pytest.raises(ValueError, match="axis"):
+        pk.open_stream(norman_csc_path, axis="genes")
+    with pytest.raises(ValueError, match="cells"):
+        pk.open_stream(norman_csc_path, axis="var", rows=[0])
+    with pytest.raises(ValueError, match="genes="):
+        pk.open_stream(norman_path, genes=[(0, 1)])

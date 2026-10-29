@@ -11,6 +11,9 @@ Status: **spec / draft** (2026-10-10), reviewed against the code 2026-10-11.
 | 1, 7 | dense output, threads | gated on the measurement plan (arms A/B first) |
 | 3 | row ranges | deferred until sharding is actually needed |
 
+Streaming by gene (`open_stream(axis="var", genes=...)` over a `scx convert
+--gene-major` copy) is documented in [gene-major.md](gene-major.md).
+
 ## Why this exists
 
 `pk.open_stream` was designed for per-gene reductions: gene sums, conversion. Its first numerical consumer is a streaming PCA in brrr-gve (`~/phd/brrr-gve/stream.py`), a single-cell clustering pipeline benchmarked in sc-brrr. That PCA reads X twice in row blocks:
