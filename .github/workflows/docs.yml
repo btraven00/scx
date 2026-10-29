@@ -52,7 +52,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       # Per R build: packages compiled against one R don't load in another,
       # and rv keys its cache by R version only. Change with /opt/R/<version>.
-      RV_GLOBAL_CACHE_DIR: /opt/cache/runner/scx/rv/posit-4.5.3
+      RV_CACHE_DIR: /opt/cache/runner/scx/rv/posit-4.5.3
       PIP_CACHE_DIR: /opt/cache/runner/scx/pip
     steps:
       - uses: actions/checkout@v7
@@ -63,12 +63,9 @@ jobs:
       - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       # render_docs.sh uses this library, and installs picklerick into it
-      # built against the in-tree scx-core. rv ignores RV_GLOBAL_CACHE_DIR
-      # unless the directory exists.
+      # built against the in-tree scx-core.
       - name: R packages
-        run: |
-          mkdir -p "$RV_GLOBAL_CACHE_DIR"
-          rv sync
+        run: rv sync
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"

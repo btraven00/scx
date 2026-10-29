@@ -77,7 +77,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       # Per R build: packages compiled against one R don't load in another,
       # and rv keys its cache by R version only. Change with /opt/R/<version>.
-      RV_GLOBAL_CACHE_DIR: /opt/cache/runner/scx/rv/posit-4.5.3
+      RV_CACHE_DIR: /opt/cache/runner/scx/rv/posit-4.5.3
       # What r-lib/actions sets for R CMD check on GitHub's runners.
       NOT_CRAN: "true"
       TZ: UTC
@@ -95,10 +95,8 @@ jobs:
       - name: Patch scx-core to the checkout
         run: |
           printf '[patch.crates-io]\nscx-core = { path = "%s/crates/scx-core" }\n' "$GITHUB_WORKSPACE" > "$CARGO_HOME/config.toml"
-      # rv ignores RV_GLOBAL_CACHE_DIR unless the directory exists.
       - name: R packages
         run: |
-          mkdir -p "$RV_GLOBAL_CACHE_DIR"
           rv sync
           echo "R_LIBS=$GITHUB_WORKSPACE/$(rv library)" >> "$GITHUB_ENV"
       - name: R CMD check
