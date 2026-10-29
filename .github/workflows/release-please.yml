@@ -21,7 +21,7 @@ jobs:
       tag_name: ${{ steps.release.outputs['crates/scx-cli--tag_name'] }}
       py_tag_name: ${{ steps.release.outputs['python/picklerick--tag_name'] }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -60,7 +60,7 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -80,7 +80,7 @@ jobs:
           cp target/release/scx scx
           tar -czf scx-${{ matrix.target }}.tar.gz scx
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: scx-${{ matrix.target }}
           path: scx-${{ matrix.target }}.tar.gz
@@ -94,12 +94,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
           files: artifacts/*

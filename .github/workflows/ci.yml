@@ -40,7 +40,7 @@ jobs:
             cargo_flags: "--workspace --exclude picklerick-py-native"
             apt_packages: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,7 +52,7 @@ jobs:
         run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y ${{ matrix.apt_packages }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -86,7 +86,7 @@ jobs:
     name: MSRV (1.91)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.91
       - name: Install system HDF5
         timeout-minutes: 10
@@ -100,7 +100,7 @@ jobs:
     name: Coverage (system HDF5)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -115,7 +115,7 @@ jobs:
         # suite) so the lcov is just crates/.
         run: cargo llvm-cov --all --no-default-features --features scx-cli/net,scx-cli/bixverse-parquet --ignore-filename-regex 'python/' --lcov --output-path lcov.info
       - name: Upload Rust coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./lcov.info

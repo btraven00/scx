@@ -13,6 +13,8 @@ on:
       - "crates/**"
       - "tests/fixtures/**"
       - "Cargo.lock"
+      - "rproject.toml"
+      - "rv.lock"
       - "scripts/render_docs.sh"
       - ".github/workflows/docs.yml"
   push:
@@ -27,39 +29,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Runs on the self-hosted omnibenchmark machine, set up by the lab's
+  # github_runner Ansible play: system R 4.5, plus cmake, Quarto and rv. R
+  # packages come from rproject.toml and rv.lock, as locally. The caches live
+  # outside the checkout, which is cleaned on every run. Skipped for pull
+  # requests from forks, which shouldn't run code on a shared lab machine.
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, omnibenchmark]
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+    env:
+      CARGO_HOME: /opt/cache/runner/scx/cargo
+      RUSTUP_HOME: /opt/cache/runner/scx/rustup
+      RV_GLOBAL_CACHE_DIR: /opt/cache/runner/scx/rv
+      PIP_CACHE_DIR: /opt/cache/runner/scx/pip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      # So rust-toolchain finds the rustup an earlier run installed.
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            r/picklerick/src/rust -> target
-      - uses: r-lib/actions/setup-r@v2
-        with:
-          use-public-rspm: true
-      # The package's Imports and Suggests (Seurat, knitr, ...) plus
-      # Config/Needs/website (pkgdown). render_docs.sh installs picklerick
-      # itself, built against the in-tree scx-core.
-      - uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          working-directory: r/picklerick
-          needs: website
-      - uses: actions/setup-python@v5
+      # render_docs.sh uses this library, and installs picklerick into it
+      # built against the in-tree scx-core.
+      - name: R packages
+        run: rv sync
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Docs venv
         run: |
           python -m venv .venv-docs
           .venv-docs/bin/pip install -r site/requirements.txt
-      - uses: quarto-dev/quarto-actions/setup@v2
-        with:
-          version: 1.10.19
       - name: Render
         run: scripts/render_docs.sh
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site/_site
 
@@ -75,4 +76,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
