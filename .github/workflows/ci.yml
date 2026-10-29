@@ -13,6 +13,45 @@ env:
   APT_OPTS: -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3
 
 jobs:
+  # Default build path on Linux: vendored static HDF5 + zlib. No system
+  # libhdf5 needed. This is what cargo install / wheels / source-tree users
+  # get. Also the one job that builds and tests the `net` and `bixverse`
+  # features (the system job below tests the build without bixverse), and the
+  # one that checks formatting.
+  #
+  # Runs on the self-hosted omnibenchmark machine (set up by the lab's
+  # github_runner Ansible play), with the cargo and rustup caches outside the
+  # checkout, which is cleaned on every run. Skipped for pull requests from
+  # forks, which shouldn't run code on a shared lab machine; the macOS job
+  # below still builds the vendored path for them.
+  test-vendored:
+    name: Test & Lint (omnibenchmark, vendored)
+    runs-on: self-hosted
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+    env:
+      CARGO_HOME: /opt/cache/runner/scx/cargo
+      RUSTUP_HOME: /opt/cache/runner/scx/rustup
+    steps:
+      - uses: actions/checkout@v7
+
+      # So rust-toolchain finds the rustup an earlier run installed.
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --features scx-cli/net,scx-cli/bixverse-parquet -- -D warnings
+
+      - name: test
+        env:
+          HDF5_USE_FILE_LOCKING: "FALSE"
+        run: cargo test --all --features scx-cli/net,scx-cli/bixverse-parquet
+
   test:
     name: Test & Lint (${{ matrix.os }}, ${{ matrix.hdf5 }})
     runs-on: ${{ matrix.os }}
@@ -20,14 +59,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Default build path: vendored static HDF5 + zlib. No system libhdf5
-          # needed. This is what cargo install / wheels / source-tree users get.
-          # Also the one job that builds and tests the `net` and `bixverse`
-          # features; the system job below tests the build without bixverse.
-          - os: ubuntu-latest
-            hdf5: vendored
-            cargo_flags: "--features scx-cli/net,scx-cli/bixverse-parquet"
-            apt_packages: ""
           # Conda + distro packager path: link the system libhdf5.
           - os: ubuntu-latest
             hdf5: system
@@ -60,10 +91,6 @@ jobs:
             target/
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-
-
-      - name: fmt
-        if: matrix.hdf5 == 'vendored' && runner.os == 'Linux'
-        run: cargo fmt --all -- --check
 
       - name: clippy
         run: cargo clippy --all-targets ${{ matrix.cargo_flags }} -- -D warnings
