@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.6.0](https://github.com/btraven00/scx/compare/scx-cli-v0.5.0...scx-cli-v0.6.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** ColumnData::Categorical has a new `ordered` field. Constructors must set it, and patterns that name fields must add `..`. In bixverse: add `..` to the Categorical pattern in src/rust/src/single_cell/r_sc_h5ad_arrow.rs, and set `ordered` in src/rust/src/single_cell/r_sc_h5ad.rs (factor_to_categorical), e.g.
+* **core:** ColumnData has a new Int64 variant, so exhaustive matches on it need an extra arm. In bixverse that is one edit: src/rust/src/single_cell/r_sc_h5ad_arrow.rs needs a `ColumnData::Int64(v) => Arc::new(Int64Array::try_new(v.into(), nulls)?)` arm.
+
+### Features
+
+* AnnData Zarr v3 output and row-range reads (open_stream rows=/where=) ([0b78f11](https://github.com/btraven00/scx/commit/0b78f114364201e3be68b0f099609d8c9a4d8420))
+* bixverse store reader (v3 and v4) behind the bixverse feature ([41aadd1](https://github.com/btraven00/scx/commit/41aadd1968803d01427b9c57189c6b6608948c84))
+* **cli:** scx --version, naming the net and zarr features ([4135bb9](https://github.com/btraven00/scx/commit/4135bb9ae112123620a6299bfbc1efb149f63ca4))
+* **core:** read gzipped .rds.gz, and show what a non-Seurat .rds holds ([e76647c](https://github.com/btraven00/scx/commit/e76647cd87c076fdbc82c0d6031158fa3ec350f0))
+* **core:** read per-cell-list Parquet beyond Tahoe's column names and arrow widths ([53cc756](https://github.com/btraven00/scx/commit/53cc756358ead47f4374a05c9045fa69da307969))
+* **core:** read Seurat objects from .rds/.rda files ([3798c8b](https://github.com/btraven00/scx/commit/3798c8b490e2d34832c3bfed358079055a7bf981))
+* write the matrix to layers/&lt;name&gt; instead of /X (--x-slot for h5ad) ([bcfc791](https://github.com/btraven00/scx/commit/bcfc791ec63ad59b95a13c89ec0bb6a78717fd10))
+
+
+### Bug Fixes
+
+* **cli:** inspect .rds URLs instead of failing to detect them ([8250c90](https://github.com/btraven00/scx/commit/8250c908e44d4e8578065d68a6ebf87a3b29adce))
+* **core:** keep int64 obs/var columns instead of clamping to i32 ([4f5d30a](https://github.com/btraven00/scx/commit/4f5d30afd2f832437f2b0f6c8e2fca7e74380799))
+* **core:** keep the ordered flag on categoricals ([ab1f93b](https://github.com/btraven00/scx/commit/ab1f93b9a91a6be06cab5ba860c7a2ff53bd6c20))
+* **core:** read CSC layers and obsp instead of failing the whole file ([e9133bf](https://github.com/btraven00/scx/commit/e9133bfb3f9a3eda6f108f851b7b74cc276fb319))
+* gate the zarr merge test on the zarr feature ([ba16452](https://github.com/btraven00/scx/commit/ba1645243ff5ab673e8515d273cb6c7e2115dc04))
+* scx-cli bixverse-parquet enables bixverse; test the factory, sidecars and CLI ([a103372](https://github.com/btraven00/scx/commit/a1033721abbf682931d8c05295a90bbf68b39084))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.5.0 to 0.6.0
+
 ## [0.5.0](https://github.com/btraven00/scx/compare/scx-cli-v0.4.1...scx-cli-v0.5.0) (2026-10-07)
 
 
