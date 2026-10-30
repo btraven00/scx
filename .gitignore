@@ -29,5 +29,7 @@ r/picklerick/.cargo/
 /site/.quarto/
 /site/_work/
 /site/reference/python/
+/site/reference/r/
+/site/tutorials/r/
 /site/objects.json
 r/picklerick/docs/

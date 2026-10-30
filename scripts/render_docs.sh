@@ -53,6 +53,13 @@ VIRTUAL_ENV="$venv" PATH="$venv/bin:$PATH" \
 echo "==> Python reference"
 (cd site && "$venv/bin/quartodoc" build)
 
+echo "==> R reference and articles"
+"$rscript" scripts/rd2qmd.R r/picklerick site
+# The vignettes stay package vignettes; copies render as pages of the site.
+rm -rf site/tutorials/r
+mkdir -p site/tutorials/r
+cp r/picklerick/vignettes/*.Rmd site/tutorials/r/
+
 echo "==> Example files"
 export SCX_DOCS_WORK="$root/site/_work"
 rm -rf "$SCX_DOCS_WORK"
