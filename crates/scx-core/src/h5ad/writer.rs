@@ -121,7 +121,7 @@ impl H5AdWriter {
             )));
         }
 
-        let file = File::create(path.as_ref())?;
+        let file = crate::h5::create_file(path.as_ref())?;
 
         // Root attrs
         let root = file.group("/")?;
@@ -130,8 +130,8 @@ impl H5AdWriter {
 
         // Matrix group — encoding attrs; resizable datasets created here
         let x_grp = match layer {
-            Some(name) => dict_group(&file, "layers")?.create_group(name)?,
-            None => file.create_group("X")?,
+            Some(name) => crate::h5::create_group(&dict_group(&file, "layers")?, name)?,
+            None => crate::h5::create_group(&file, "X")?,
         };
         write_str_attr(&x_grp, "encoding-type", "csr_matrix")?;
         write_str_attr(&x_grp, "encoding-version", "0.1.0")?;
@@ -327,7 +327,7 @@ fn dict_group(file: &File, name: &str) -> Result<Group> {
     if let Ok(g) = file.group(name) {
         return Ok(g);
     }
-    let g = file.create_group(name)?;
+    let g = crate::h5::create_group(file, name)?;
     write_encoding_on_group(&g, "dict", "0.1.0")?;
     Ok(g)
 }
@@ -450,7 +450,7 @@ fn write_dataframe(
     columns: &[Column],
     compression: Option<u8>,
 ) -> Result<()> {
-    let grp = file.create_group(group_name)?;
+    let grp = crate::h5::create_group(file, group_name)?;
     write_encoding_on_group(&grp, "dataframe", "0.2.0")?;
     // anndata's canonical name for an unnamed index. scx has no named-index
     // concept, so always emit "_index": anndata resolves the index via this
@@ -505,7 +505,7 @@ fn write_nullable<T: hdf5::H5Type>(
     mask: &[bool],
     compression: Option<u8>,
 ) -> Result<Group> {
-    let g = grp.create_group(name)?;
+    let g = crate::h5::create_group(grp, name)?;
     write_encoding_on_group(&g, encoding, "0.1.0")?;
     let ds = write_1d(&g, "values", values, compression)?;
     write_encoding_on_ds(&ds, "array", "0.2.0")?;
@@ -557,7 +557,7 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
             )?;
         }
         (ColumnData::String(v), Some(m)) => {
-            let g = grp.create_group(name)?;
+            let g = crate::h5::create_group(grp, name)?;
             write_encoding_on_group(&g, "nullable-string-array", "0.1.0")?;
             let ds = write_strings(&g, "values", v)?;
             write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
@@ -603,7 +603,7 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
             },
             _,
         ) => {
-            let cat_grp = grp.create_group(name)?;
+            let cat_grp = crate::h5::create_group(grp, name)?;
             write_encoding_on_group(&cat_grp, "categorical", "0.2.0")?;
             // Stored as a uint8 0/1, which anndata reads with bool().
             let attr = cat_grp.new_attr::<u8>().create("ordered")?;
@@ -668,7 +668,7 @@ impl DatasetWriter for H5AdWriter {
     }
 
     async fn write_uns(&mut self, uns: &UnsTable) -> Result<()> {
-        let grp = self.file.create_group("uns")?;
+        let grp = crate::h5::create_group(&self.file, "uns")?;
         write_encoding_on_group(&grp, "dict", "0.1.0")?;
         if let Some(obj) = uns.raw.as_object() {
             for (key, val) in obj {
@@ -684,7 +684,7 @@ impl DatasetWriter for H5AdWriter {
         name: &str,
         meta: &SparseMatrixMeta,
     ) -> Result<()> {
-        let mat_grp = dict_group(&self.file, group_prefix)?.create_group(name)?;
+        let mat_grp = crate::h5::create_group(&dict_group(&self.file, group_prefix)?, name)?;
         write_encoding_on_group(&mat_grp, "csr_matrix", "0.1.0")?;
         // `data` waits for the first chunk, which fixes its type.
         let ds = init_resizable_1d::<i32>(&mat_grp, "indices", self.compression)?;
