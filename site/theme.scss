@@ -1,0 +1,131 @@
+/*-- scss:defaults --*/
+
+$border-radius: 0.5rem;
+
+/*-- scss:rules --*/
+
+// One faint rule colour for both themes. Bootstrap's dark theme keeps its
+// light border colour, which is glaring on a dark page.
+$hairline: rgba($body-color, 0.14);
+
+:root {
+  --bs-border-color: #{$hairline};
+}
+
+// A quiet navbar: the page background (set in _brand.yml) with a hairline
+// under it. Sass variables, not CSS ones: Quarto marks the navbar
+// data-bs-theme="dark", so var(--bs-*) inside it are the dark values even in
+// the light theme.
+.navbar {
+  border-bottom: 1px solid $hairline;
+  .nav-link:hover,
+  .nav-link.active {
+    color: $primary !important;
+  }
+  // No focus ring on the navbar's links and menus: a click leaves one behind.
+  // Keyboard focus shows as the accent colour instead.
+  .nav-link,
+  .navbar-brand,
+  .dropdown-item,
+  .quarto-navigation-tool,
+  .navbar-toggler {
+    &:focus,
+    &:focus-visible {
+      outline: none;
+      box-shadow: none;
+    }
+    &:focus-visible {
+      color: $primary !important;
+    }
+  }
+}
+
+// Navbar menus: the page background, a faint tint on hover and an accent tint
+// for the current page. Bootstrap's defaults are light-theme colours, which
+// the dark build keeps (a near-white hover under light text).
+.navbar .dropdown-menu,
+.dropdown-menu {
+  --bs-dropdown-bg: #{$body-bg};
+  --bs-dropdown-border-color: #{$hairline};
+  --bs-dropdown-link-color: #{$body-color};
+  --bs-dropdown-link-hover-color: #{$body-color};
+  --bs-dropdown-link-hover-bg: #{rgba($body-color, 0.08)};
+  --bs-dropdown-link-active-color: #{$primary};
+  --bs-dropdown-link-active-bg: #{rgba($primary, 0.12)};
+}
+
+.navbar-title {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.015em;
+}
+
+h2,
+.quarto-title-block .quarto-title-banner,
+hr {
+  border-color: $hairline !important;
+}
+
+// Code blocks: rounded, with a hairline border rather than a grey slab. On
+// the outer div only: it is what scrolls sideways, while the pre inside is
+// as wide as the box and would slide off with its border.
+div.sourceCode {
+  border: 1px solid $hairline;
+  border-radius: $border-radius;
+}
+
+// Cell output (CLI logs, printed objects): its own faint box under the code,
+// a little smaller, scrolling sideways rather than cutting long lines off.
+.cell-output pre,
+.cell-output-stdout pre,
+.cell-output-stderr pre {
+  background-color: rgba($body-color, 0.03);
+  border: 1px solid $hairline;
+  border-radius: $border-radius;
+  padding: 0.75rem 1rem;
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  overflow-x: auto;
+  code {
+    white-space: pre;
+  }
+}
+
+// Tabs (CLI / Python / R): hairline borders and a readable active tab in
+// both themes; Bootstrap's dark build keeps the light theme's tab colours.
+.panel-tabset {
+  .nav-tabs {
+    border-bottom-color: $hairline;
+    .nav-link {
+      color: rgba($body-color, 0.7);
+      border-color: transparent;
+      &:hover {
+        color: $primary;
+        border-color: transparent;
+      }
+      &.active {
+        color: $body-color;
+        background-color: $body-bg;
+        border-color: $hairline $hairline $body-bg;
+        font-weight: 600;
+      }
+    }
+  }
+  .tab-content {
+    border: 1px solid $hairline;
+    border-top: none;
+    border-radius: 0 0 $border-radius $border-radius;
+  }
+}
+
+// Tables: hairline rules, no heavy header border.
+table.table {
+  --bs-table-border-color: #{$hairline};
+  thead th {
+    border-bottom: 1px solid $hairline;
+    font-weight: 600;
+  }
+}

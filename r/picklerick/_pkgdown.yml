@@ -4,11 +4,25 @@ url: https://btraven00.github.io/scx/r/
 
 template:
   bootstrap: 5
+  light-switch: true
+  # The colours and fonts of site/_brand.yml (keep the two in step). The
+  # *-dark variables are Bootstrap's dark-mode values, for the light switch.
+  bslib:
+    primary: "#0f766e"
+    body-bg-dark: "#0b1220"
+    body-color-dark: "#e2e8f0"
+    body-tertiary-bg-dark: "#0b1220"
+    border-color-dark: "#1e293b"
+    link-color-dark: "#2dd4bf"
+    code-color-dark: "#e2e8f0"
+    base_font: {google: "Inter"}
+    heading_font: {google: "Inter"}
+    code_font: {google: "JetBrains Mono"}
 
 navbar:
   structure:
     left: [intro, reference, articles]
-    right: [search, scx, github]
+    right: [search, scx, github, lightswitch]
   components:
     scx:
       text: SCX docs

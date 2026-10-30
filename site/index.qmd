@@ -10,11 +10,56 @@ bounded by the chunk size rather than the dataset. The engine is written in
 Rust and has three front ends that share its conversion semantics and
 defaults:
 
-| | Install | Start with |
-|---|---|---|
-| **Command line** | `cargo install scx-cli` | `scx convert in.h5seurat out.h5ad` |
-| **Python** | `pip install scx-picklerick` | `import picklerick as pk` |
-| **R** | `pak::pak("btraven00/scx/r/picklerick")` (needs Rust) | `library(picklerick)` |
+::: {.panel-tabset group="language"}
+
+## CLI
+
+Install:
+
+```bash
+cargo install scx-cli
+```
+
+Start with:
+
+```bash
+scx convert in.h5seurat out.h5ad
+```
+
+## Python
+
+Install:
+
+```bash
+pip install scx-picklerick
+```
+
+Start with:
+
+```python
+import picklerick as pk
+
+pk.convert("in.h5seurat", "out.h5ad")
+```
+
+## R
+
+Install (builds the engine from source, so it needs Rust's `cargo`, CMake
+and a C/C++ compiler):
+
+```r
+pak::pak("btraven00/scx/r/picklerick")
+```
+
+Start with:
+
+```r
+library(picklerick)
+
+convert("in.h5seurat", "out.h5ad")
+```
+
+:::
 
 ## Formats
 
