@@ -1236,4 +1236,71 @@ mod tests {
         // Finalize successfully; the writer doesn't validate index bounds.
         b.finalize().unwrap();
     }
+
+    /// Write the same dataset twice, a second apart, and require identical
+    /// bytes. HDF5 group timestamps have one-second resolution, and each fresh
+    /// `HashMap` iterates its eight obsm/varm keys in its own order, so either
+    /// leak makes the files differ.
+    fn assert_byte_reproducible(ext: &str, write: impl Fn(&Path, Embeddings, Varm)) {
+        let dir = tempfile::tempdir().unwrap();
+        let write_once = |i: u32| {
+            let path = dir.path().join(format!("{i}.{ext}"));
+            let mat = |j: usize, rows: usize| DenseMatrix {
+                shape: (rows, 2),
+                data: vec![j as f64; rows * 2],
+            };
+            let obsm = Embeddings {
+                map: (0..8).map(|j| (format!("X_e{j}"), mat(j, 4))).collect(),
+            };
+            let varm = Varm {
+                map: (0..8).map(|j| (format!("e{j}"), mat(j, 3))).collect(),
+            };
+            write(&path, obsm, varm);
+            std::fs::read(path).unwrap()
+        };
+        let first = write_once(1);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(
+            first == write_once(2),
+            "two writes of the same .{ext} differ"
+        );
+    }
+
+    macro_rules! byte_reproducible_test {
+        ($name:ident, $ext:literal, $builder:ident, $opts:expr) => {
+            #[test]
+            fn $name() {
+                assert_byte_reproducible($ext, |path, obsm, varm| {
+                    let mut b = $builder::new(path, 4, 3, &$opts).unwrap();
+                    let (obs, var) = obs_var(4, 3);
+                    b.obs(obs).unwrap().var(var).unwrap();
+                    b.add_obsm(obsm).unwrap().add_varm(varm).unwrap();
+                    for r in 0..4 {
+                        b.push_x_csr_chunk(r, [0, 1], [r as u32 % 3], [1.0])
+                            .unwrap();
+                    }
+                    b.finalize().unwrap();
+                });
+            }
+        };
+    }
+
+    byte_reproducible_test!(
+        h5ad_is_byte_reproducible,
+        "h5ad",
+        H5AdBuilder,
+        H5AdOptions::default()
+    );
+    byte_reproducible_test!(
+        h5seurat_is_byte_reproducible,
+        "h5seurat",
+        H5SeuratBuilder,
+        BpcellsOptions::default()
+    );
+    byte_reproducible_test!(
+        bpcells_h5seurat_is_byte_reproducible,
+        "h5seurat",
+        BpcellsH5SeuratBuilder,
+        BpcellsOptions::default()
+    );
 }

@@ -90,7 +90,7 @@ impl H5SeuratWriter {
         let layer = layer.unwrap_or("counts").to_string();
         let project = project.unwrap_or("SeuratProject");
 
-        let file = File::create(path.as_ref())?;
+        let file = crate::h5::create_file(path.as_ref())?;
 
         if seuratdisk_compat {
             // Root-level attributes and empty groups required by SeuratDisk::LoadH5Seurat.
@@ -114,12 +114,12 @@ impl H5SeuratWriter {
                 "reductions",
                 "tools",
             ] {
-                file.create_group(grp)?;
+                crate::h5::create_group(&file, grp)?;
             }
         }
 
-        file.create_group("assays")?;
-        let assay_grp = file.create_group(&format!("assays/{assay}"))?;
+        crate::h5::create_group(&file, "assays")?;
+        let assay_grp = crate::h5::create_group(&file, &format!("assays/{assay}"))?;
         if seuratdisk_compat {
             let key =
                 VarLenUnicode::from_str(&format!("{}_", assay.to_lowercase())).unwrap_or_default();
@@ -128,7 +128,7 @@ impl H5SeuratWriter {
                 .create("key")?
                 .write_scalar(&key)?;
         }
-        file.create_group(&format!("assays/{assay}/{layer}"))?;
+        crate::h5::create_group(&file, &format!("assays/{assay}/{layer}"))?;
 
         // Resizable datasets for streaming x-chunk writes.
         let data_path = format!("assays/{assay}/{layer}/data");
@@ -301,7 +301,7 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
         // SeuratDisk saves any factor as values + levels; `ordered` has no
         // H5Seurat encoding and is dropped.
         ColumnData::Categorical { codes, levels, .. } => {
-            let col_grp = grp.create_group(name)?;
+            let col_grp = crate::h5::create_group(grp, name)?;
             // 1-based codes, NA_integer_ for missing.
             let values = codes
                 .iter()
@@ -323,7 +323,7 @@ pub(crate) fn seurat_write_uns(file: &File, uns: &UnsTable) -> Result<()> {
     };
     let misc = match file.group("misc") {
         Ok(g) => g,
-        Err(_) => file.create_group("misc")?,
+        Err(_) => crate::h5::create_group(file, "misc")?,
     };
     for (k, v) in map {
         if misc.link_exists(k) {
@@ -346,7 +346,7 @@ impl DatasetWriter for H5SeuratWriter {
         write_strings(&root, "cell.names", &obs.index)?;
 
         // /meta.data/ — always created even when obs.columns is empty
-        let meta_grp = self.file.create_group("meta.data")?;
+        let meta_grp = crate::h5::create_group(&self.file, "meta.data")?;
         seurat_write_meta_cols(&meta_grp, &obs.columns)?;
 
         Ok(())
@@ -359,7 +359,7 @@ impl DatasetWriter for H5SeuratWriter {
 
         // /assays/{assay}/meta.features/ — only when var has columns
         if !var.columns.is_empty() {
-            let mf_grp = assay_grp.create_group("meta.features")?;
+            let mf_grp = crate::h5::create_group(&assay_grp, "meta.features")?;
             seurat_write_meta_cols(&mf_grp, &var.columns)?;
         }
 
@@ -370,14 +370,17 @@ impl DatasetWriter for H5SeuratWriter {
         // reductions is pre-created in create(); open or create defensively.
         let reds_grp = match self.file.group("reductions") {
             Ok(g) => g,
-            Err(_) => self.file.create_group("reductions")?,
+            Err(_) => crate::h5::create_group(&self.file, "reductions")?,
         };
         if obsm.map.is_empty() {
             return Ok(());
         }
-        for (key, mat) in &obsm.map {
+        // Sorted: HashMap order changes between runs, and so would the file bytes.
+        let mut entries: Vec<_> = obsm.map.iter().collect();
+        entries.sort_by_key(|(k, _)| *k);
+        for (key, mat) in entries {
             let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
-            let red_grp = reds_grp.create_group(red_name)?;
+            let red_grp = crate::h5::create_group(&reds_grp, red_name)?;
             self.attr_reduction(&red_grp, red_name)?;
 
             let (n_obs, n_comps) = mat.shape;
@@ -416,20 +419,20 @@ impl DatasetWriter for H5SeuratWriter {
             "layers" => {
                 // Ensure parent exists.
                 if self.file.group(&format!("assays/{}", self.assay)).is_err() {
-                    self.file.create_group(&format!("assays/{}", self.assay))?;
+                    crate::h5::create_group(&self.file, &format!("assays/{}", self.assay))?;
                 }
                 format!("assays/{}/{}", self.assay, name)
             }
             "obsp" => {
                 if self.file.group("graphs").is_err() {
-                    self.file.create_group("graphs")?;
+                    crate::h5::create_group(&self.file, "graphs")?;
                 }
                 format!("graphs/{name}")
             }
             other => format!("{other}/{name}"),
         };
 
-        self.file.create_group(&group_path)?;
+        crate::h5::create_group(&self.file, &group_path)?;
 
         // Pre-create resizable data/indices datasets so chunks can be appended.
         seurat_init_resizable::<f64>(&self.file, &format!("{group_path}/data"))?;
@@ -512,15 +515,18 @@ impl DatasetWriter for H5SeuratWriter {
         // reductions/ may already exist (write_obsm creates it)
         let reds_grp = match self.file.group("reductions") {
             Ok(g) => g,
-            Err(_) => self.file.create_group("reductions")?,
+            Err(_) => crate::h5::create_group(&self.file, "reductions")?,
         };
-        for (key, mat) in &varm.map {
+        // Sorted: HashMap order changes between runs, and so would the file bytes.
+        let mut entries: Vec<_> = varm.map.iter().collect();
+        entries.sort_by_key(|(k, _)| *k);
+        for (key, mat) in entries {
             let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
             // reduction sub-group may already exist from write_obsm
             let red_grp = match reds_grp.group(red_name) {
                 Ok(g) => g,
                 Err(_) => {
-                    let g = reds_grp.create_group(red_name)?;
+                    let g = crate::h5::create_group(&reds_grp, red_name)?;
                     self.attr_reduction(&g, red_name)?;
                     g
                 }

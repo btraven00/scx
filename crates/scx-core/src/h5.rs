@@ -15,6 +15,30 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Untimed object creation shared by the HDF5 writers
+// ---------------------------------------------------------------------------
+
+// HDF5 stamps each group's object header with its creation time by default,
+// so converting the same input twice gives different bytes. hdf5-metno
+// already turns this off for datasets; these two cover the root group and
+// every other group. Writers must create files and groups through them.
+
+/// `File::create` with no timestamp on the root group.
+pub(crate) fn create_file(path: impl AsRef<Path>) -> hdf5::Result<File> {
+    File::with_options()
+        .with_fcpl(|p| p.obj_track_times(false))
+        .create(path)
+}
+
+/// `parent.create_group(name)` with no timestamp on the group.
+pub(crate) fn create_group(parent: &hdf5::Group, name: &str) -> hdf5::Result<hdf5::Group> {
+    parent
+        .create_group_builder()
+        .with_gcpl(|p| p.obj_track_times(false))
+        .create(name)
+}
+
+// ---------------------------------------------------------------------------
 // Typed reads shared by the HDF5 readers (h5ad, H5Seurat, 10x)
 // ---------------------------------------------------------------------------
 
