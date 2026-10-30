@@ -3,7 +3,8 @@
 #' `Seurat` object, [inspect()] to look at a file without reading its
 #' matrix, and [convert()] to stream one format into another.
 #' `vignette("picklerick")` runs each of them on the files shipped in
-#' `inst/extdata`.
+#' `inst/extdata`, and `vignette("overview")` sums up what the package does
+#' and lists every function.
 #'
 #' @section The scx binary:
 #' The engine is compiled into the package, so no external program is

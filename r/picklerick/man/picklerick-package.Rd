@@ -13,7 +13,8 @@ Start with \code{\link[=read_h5ad]{read_h5ad()}} to read a file into a \code{Sin
 \code{Seurat} object, \code{\link[=inspect]{inspect()}} to look at a file without reading its
 matrix, and \code{\link[=convert]{convert()}} to stream one format into another.
 \code{vignette("picklerick")} runs each of them on the files shipped in
-\code{inst/extdata}.
+\code{inst/extdata}, and \code{vignette("overview")} sums up what the package does
+and lists every function.
 }
 \section{The scx binary}{
 

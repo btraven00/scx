@@ -16,6 +16,16 @@
 #' `$X`, `$obs`, `$var`, `$obsm`, `$layers`, `$obs_names`, `$var_names`,
 #' `$n_obs`, `$n_vars`. Convert with [as_sce()] or [as_seurat()].
 #'
+#' `dim()` and `dimnames()` answer from what the reader already returned,
+#' genes by cells as in a `SingleCellExperiment`, without building anything.
+#' `print()` lists the components and which of them have been built so far.
+#'
+#' @param x A light AnnData handle, from `read_h5ad(as = "AnnData")`.
+#' @param name The field to get; see Details.
+#' @param ... Unused.
+#' @return `$` returns the field; `dim()` the number of genes and cells;
+#'   `dimnames()` a list of gene and cell names; `print()` returns `x`
+#'   invisibly.
 #' @name AnnDataLight
 #' @examples
 #' \dontrun{
@@ -45,6 +55,7 @@ NULL
   get(key, envir = cache, inherits = FALSE)
 }
 
+#' @rdname AnnDataLight
 #' @export
 `$.picklerick_anndata` <- function(x, name) {
   raw <- get(".raw", envir = x)
@@ -75,18 +86,21 @@ NULL
   )
 }
 
+#' @rdname AnnDataLight
 #' @export
 dim.picklerick_anndata <- function(x) {
   raw <- get(".raw", envir = x)
   c(raw$n_vars, raw$n_obs)   # genes x cells, matching SingleCellExperiment
 }
 
+#' @rdname AnnDataLight
 #' @export
 dimnames.picklerick_anndata <- function(x) {
   raw <- get(".raw", envir = x)
   list(raw$var_index, raw$obs_index)
 }
 
+#' @rdname AnnDataLight
 #' @export
 print.picklerick_anndata <- function(x, ...) {
   raw <- get(".raw", envir = x)

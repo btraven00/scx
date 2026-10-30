@@ -2,7 +2,32 @@
 % Please edit documentation in R/anndata_light.R
 \name{AnnDataLight}
 \alias{AnnDataLight}
+\alias{$.picklerick_anndata}
+\alias{dim.picklerick_anndata}
+\alias{dimnames.picklerick_anndata}
+\alias{print.picklerick_anndata}
 \title{A light AnnData handle}
+\usage{
+\method{$}{picklerick_anndata}(x, name)
+
+\method{dim}{picklerick_anndata}(x)
+
+\method{dimnames}{picklerick_anndata}(x)
+
+\method{print}{picklerick_anndata}(x, ...)
+}
+\arguments{
+\item{x}{A light AnnData handle, from \code{read_h5ad(as = "AnnData")}.}
+
+\item{name}{The field to get; see Details.}
+
+\item{...}{Unused.}
+}
+\value{
+\code{$} returns the field; \code{dim()} the number of genes and cells;
+\code{dimnames()} a list of gene and cell names; \code{print()} returns \code{x}
+invisibly.
+}
 \description{
 \code{read_h5ad(as = "AnnData")} returns one of these instead of a
 \code{SingleCellExperiment}. It holds what the Rust reader produced and builds R
@@ -20,6 +45,10 @@ asks for an \code{SingleCellExperiment}.
 Fields are reached with \code{$}, and each is built on first access and cached:
 \verb{$X}, \verb{$obs}, \verb{$var}, \verb{$obsm}, \verb{$layers}, \verb{$obs_names}, \verb{$var_names},
 \verb{$n_obs}, \verb{$n_vars}. Convert with \code{\link[=as_sce]{as_sce()}} or \code{\link[=as_seurat]{as_seurat()}}.
+
+\code{dim()} and \code{dimnames()} answer from what the reader already returned,
+genes by cells as in a \code{SingleCellExperiment}, without building anything.
+\code{print()} lists the components and which of them have been built so far.
 }
 \examples{
 \dontrun{
