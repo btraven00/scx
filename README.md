@@ -38,6 +38,7 @@ build can opt out with `--no-default-features` — see
 | MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
 | Parquet, local or S3/GCS/HTTP (build with `--features net`) | ✓ | |
 | Seurat `.rds` / `.rda` (counts + meta.data; v3/v4 `Assay`, v5 `Assay5`; URLs with `--features net`) | ✓ | |
+| bixverse binary sparse store, v3 and v4 (build with `--features bixverse`) | ✓ | |
 
 Any readable format converts to any writable one: everything goes through a
 single internal representation. Input is detected by content; output by
