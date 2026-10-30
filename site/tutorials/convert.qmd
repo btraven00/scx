@@ -105,6 +105,30 @@ sce
 
 :::
 
+## Provenance
+
+`scx convert` records where its output came from, in two places. The
+`provenance` section of `scx inspect tiny_cli.h5ad` above is the first: a
+block in `uns["scx_provenance"]` with the SCX version and the source file's
+path and SHA-256. It depends only on the input, so it is the same every
+time that input is converted.
+
+The second is a sidecar file next to the output, which adds what is
+particular to one run: when the conversion ran, and the output's SHA-256 and
+shape.
+
+```{bash}
+cat tiny_cli.h5ad.prov.json
+```
+
+In a pipeline that downloads its input, `--source-url` adds the origin URL
+to both records, and `--source-sha256` passes in a hash the downloader
+already computed, so SCX doesn't read the source a second time to hash it.
+
+Provenance is written by the command line only: `convert()` in Python and R
+writes neither the block nor the sidecar. The record formats are described
+in [docs/provenance.md](https://github.com/btraven00/scx/blob/main/docs/provenance.md).
+
 ## Options shared by all three
 
 | Option | CLI | Python | R | Default |

@@ -72,10 +72,13 @@ convert("in.h5seurat", "out.h5ad")
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
 | MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
 | Parquet, local or S3/GCS/HTTP (CLI built with `--features net`) | ✓ | |
-| Seurat `.rds` / `.rda` | ✓ | |
+| Seurat `.rds` / `.rda` (counts and `meta.data`; v3/v4 `Assay`, v5 `Assay5`) | ✓ | |
+| bixverse binary sparse store, v3 and v4 (CLI built with `--features bixverse`) | ✓ | |
 
-The input format is detected from the content; the output format from the
-extension (`.h5ad`, `.h5seurat`, `.zarr`, `.bpcells`).
+Any readable format converts to any writable one: everything goes through a
+single internal representation. The input format is detected from the
+content; the output format from the extension (`.h5ad`, `.h5seurat`,
+`.zarr`, `.bpcells`).
 
 ## Where to go next
 
