@@ -21,8 +21,6 @@ website:
   repo-actions: [issue]
   navbar:
     left:
-      - href: index.qmd
-        text: Home
       - text: Tutorials
         menu:
           - tutorials/convert.qmd
@@ -43,9 +41,15 @@ website:
 
 format:
   html:
+    # Colours and fonts come from _brand.yml, with a light/dark toggle that
+    # starts out following the reader's system setting.
     theme:
-      light: cosmo
-      dark: darkly
+      light: [brand, theme.scss]
+      dark: [brand, theme.scss]
+    respect-user-color-scheme: true
+    highlight-style:
+      light: github
+      dark: github-dark
     toc: true
     code-copy: true
     # Embedded Python cells come from tutorials/_*-py.qmd companions, which

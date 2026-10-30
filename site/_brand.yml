@@ -1,0 +1,72 @@
+# The docs site's colours and fonts, light and dark, applied by Quarto
+# (https://quarto.org/docs/authoring/brand/). The R part (pkgdown) can't
+# read this file without the brand.yml R package, so it repeats the accent
+# colour and fonts in r/picklerick/_pkgdown.yml: keep the two in step.
+meta:
+  name: SCX
+  link:
+    home: https://btraven00.github.io/scx/
+    github: https://github.com/btraven00/scx
+
+color:
+  palette:
+    teal: "#0f766e"
+    teal-bright: "#2dd4bf"
+    ink: "#0f172a"
+    slate: "#475569"
+    mist: "#e2e8f0"
+    paper: "#ffffff"
+    night: "#0b1220"
+    chalk: "#f1f5f9"
+    dusk: "#1e293b"
+  foreground:
+    light: ink
+    dark: mist
+  background:
+    light: paper
+    dark: night
+  primary:
+    light: teal
+    dark: teal-bright
+  secondary:
+    light: slate
+    dark: mist
+
+typography:
+  fonts:
+    - family: Inter
+      source: google
+      weight: [400, 500, 600, 700]
+    - family: JetBrains Mono
+      source: google
+      weight: [400, 500]
+  base:
+    family: Inter
+    line-height: 1.65
+  headings:
+    family: Inter
+    weight: 600
+  monospace: JetBrains Mono
+  monospace-inline:
+    color:
+      light: ink
+      dark: mist
+    background-color:
+      light: chalk
+      dark: dusk
+  monospace-block:
+    color:
+      light: ink
+      dark: mist
+    background-color:
+      light: chalk
+      dark: "#111a2e"
+  link:
+    weight: 500
+
+defaults:
+  bootstrap:
+    defaults:
+      # The page background rather than the accent colour, so the navbar is
+      # light in the light theme and dark in the dark theme.
+      navbar-bg: $background
