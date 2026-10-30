@@ -166,7 +166,7 @@ pub fn write_bpcells_h5(
 ) -> Result<()> {
     let grp = match file.group(group_path) {
         Ok(g) => g,
-        Err(_) => file.create_group(group_path).map_err(|e| {
+        Err(_) => crate::h5::create_group(file, group_path).map_err(|e| {
             ScxError::InvalidFormat(format!("BPCells HDF5: creating group '{group_path}': {e}"))
         })?,
     };
@@ -262,14 +262,16 @@ fn append_1d<T: hdf5::H5Type + Clone>(ds: &Dataset, data: &[T]) -> Result<()> {
 
 pub(crate) struct H5Sink {
     grp: Group,
-    streams: std::collections::HashMap<String, Dataset>,
+    // BTreeMap, not HashMap: each stream's chunks are allocated when its
+    // dataset closes, so drop order sets the file layout.
+    streams: std::collections::BTreeMap<String, Dataset>,
 }
 
 impl H5Sink {
     fn new(file: &File, group_path: &str) -> Result<Self> {
         let grp = match file.group(group_path) {
             Ok(g) => g,
-            Err(_) => file.create_group(group_path).map_err(|e| {
+            Err(_) => crate::h5::create_group(file, group_path).map_err(|e| {
                 ScxError::InvalidFormat(format!(
                     "BPCells stream: creating group '{group_path}': {e}"
                 ))
@@ -611,7 +613,7 @@ impl BpcellsH5Writer {
         let assay = assay.unwrap_or("RNA").to_string();
         let layer = layer.unwrap_or("counts").to_string();
         let project = project.unwrap_or("SeuratProject");
-        let file = File::create(path.as_ref())?;
+        let file = crate::h5::create_file(path.as_ref())?;
 
         if seuratdisk_compat {
             let root = file.group("/")?;
@@ -634,15 +636,15 @@ impl BpcellsH5Writer {
                 "reductions",
                 "tools",
             ] {
-                file.create_group(grp)?;
+                crate::h5::create_group(&file, grp)?;
             }
         }
 
         if file.group("assays").is_err() {
-            file.create_group("assays")?;
+            crate::h5::create_group(&file, "assays")?;
         }
         let assay_grp = if file.group(&format!("assays/{assay}")).is_err() {
-            file.create_group(&format!("assays/{assay}"))?
+            crate::h5::create_group(&file, &format!("assays/{assay}"))?
         } else {
             file.group(&format!("assays/{assay}"))?
         };
@@ -801,7 +803,7 @@ impl DatasetWriter for BpcellsH5Writer {
         write_strings(&root, "cell.names", &obs.index)?;
         let meta_grp = match self.file.group("meta.data") {
             Ok(g) => g,
-            Err(_) => self.file.create_group("meta.data")?,
+            Err(_) => crate::h5::create_group(&self.file, "meta.data")?,
         };
         crate::h5seurat::seurat_write_meta_cols(&meta_grp, &obs.columns)?;
 
@@ -810,7 +812,7 @@ impl DatasetWriter for BpcellsH5Writer {
         if !var.columns.is_empty() {
             let mf_grp = match assay_grp.group("meta.features") {
                 Ok(g) => g,
-                Err(_) => assay_grp.create_group("meta.features")?,
+                Err(_) => crate::h5::create_group(&assay_grp, "meta.features")?,
             };
             crate::h5seurat::seurat_write_meta_cols(&mf_grp, &var.columns)?;
         }
@@ -818,15 +820,18 @@ impl DatasetWriter for BpcellsH5Writer {
         // Always create reductions — SeuratDisk requires it even when empty.
         let reds_grp = Some(match self.file.group("reductions") {
             Ok(g) => g,
-            Err(_) => self.file.create_group("reductions")?,
+            Err(_) => crate::h5::create_group(&self.file, "reductions")?,
         });
 
         if let (Some(reds_grp), Some(obsm)) = (&reds_grp, &self.obsm) {
-            for (key, mat) in &obsm.map {
+            // Sorted: HashMap order changes between runs, and so would the file bytes.
+            let mut entries: Vec<_> = obsm.map.iter().collect();
+            entries.sort_by_key(|(k, _)| *k);
+            for (key, mat) in entries {
                 let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
                 let red_grp = match reds_grp.group(red_name) {
                     Ok(g) => g,
-                    Err(_) => reds_grp.create_group(red_name)?,
+                    Err(_) => crate::h5::create_group(reds_grp, red_name)?,
                 };
 
                 let (n_obs, n_comps) = mat.shape;
@@ -861,11 +866,14 @@ impl DatasetWriter for BpcellsH5Writer {
         }
 
         if let (Some(reds_grp), Some(varm)) = (&reds_grp, &self.varm) {
-            for (key, mat) in &varm.map {
+            // Sorted: HashMap order changes between runs, and so would the file bytes.
+            let mut entries: Vec<_> = varm.map.iter().collect();
+            entries.sort_by_key(|(k, _)| *k);
+            for (key, mat) in entries {
                 let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
                 let red_grp = match reds_grp.group(red_name) {
                     Ok(g) => g,
-                    Err(_) => reds_grp.create_group(red_name)?,
+                    Err(_) => crate::h5::create_group(reds_grp, red_name)?,
                 };
 
                 let (n_vars, k) = mat.shape;

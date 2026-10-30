@@ -99,7 +99,7 @@ pub(crate) fn write_json(parent: &Group, name: &str, value: &Value, enc: Encodin
             array::<VarLenUnicode>(parent, name, v, enc, "string-array")
         }
         Value::Array(a) => {
-            let grp = parent.create_group(name)?;
+            let grp = crate::h5::create_group(parent, name)?;
             encode(&grp, enc, "dict", "0.1.0")?;
             for (i, v) in a.iter().enumerate() {
                 write_json(&grp, &i.to_string(), v, enc)?;
@@ -107,7 +107,7 @@ pub(crate) fn write_json(parent: &Group, name: &str, value: &Value, enc: Encodin
             Ok(())
         }
         Value::Object(map) => {
-            let grp = parent.create_group(name)?;
+            let grp = crate::h5::create_group(parent, name)?;
             encode(&grp, enc, "dict", "0.1.0")?;
             for (k, v) in map {
                 write_json(&grp, k, v, enc)?;
