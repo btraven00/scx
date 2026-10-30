@@ -37,11 +37,11 @@ Useful links:
 
 }
 \author{
-\strong{Maintainer}: ben \email{ben.uzh@proton.me}
+\strong{Maintainer}: Benjamin Carrillo \email{ben.uzh@proton.me}
 
 Authors:
 \itemize{
-  \item ben \email{ben.uzh@proton.me}
+  \item Benjamin Carrillo \email{ben.uzh@proton.me}
   \item Atreya Choudhury \email{atreyachoudhury@hotmail.com}
 }
 

@@ -2,7 +2,7 @@ Package: picklerick
 Title: Fast Single-Cell Format Conversion via SCX
 Version: 0.1.0
 Authors@R: c(
-    person("ben", role = c("aut", "cre"),
+    person("Benjamin", "Carrillo", role = c("aut", "cre"),
            email = "ben.uzh@proton.me"),
     person("Atreya", "Choudhury", role = "aut",
            email = "atreyachoudhury@hotmail.com"))

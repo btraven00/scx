@@ -9,7 +9,7 @@ description = "Streaming conversion between single-cell formats (H5AD, H5Seurat,
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "ben", email = "ben.uzh@proton.me" }]
+authors = [{ name = "Benjamin Carrillo", email = "ben.uzh@proton.me" }]
 keywords = ["single-cell", "anndata", "seurat", "h5ad", "bpcells", "bioinformatics"]
 classifiers = [
   "Development Status :: 3 - Alpha",
