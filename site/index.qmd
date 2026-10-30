@@ -38,7 +38,7 @@ extension (`.h5ad`, `.h5seurat`, `.zarr`, `.bpcells`).
   the command line, Python and R, side by side.
 - [Stream a matrix in Python](tutorials/stream.qmd): process a matrix chunk
   by chunk, and read only the cells you select.
-- [Reading single-cell files in R](r/articles/picklerick.html): every format
+- [Reading single-cell files in R](tutorials/r/picklerick.Rmd): every format
   into a `SingleCellExperiment`, a `Seurat` object or a lazy `DelayedMatrix`.
 - Reference: [command line](reference/cli.qmd),
-  [Python](reference/python/index.qmd), [R](r/reference/index.html).
+  [Python](reference/python/index.qmd), [R](reference/r/index.qmd).

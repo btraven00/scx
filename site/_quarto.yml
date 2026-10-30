@@ -11,6 +11,8 @@ project:
     - tutorials/stream.qmd
     - reference/cli.qmd
     - reference/python/*.qmd
+    - reference/r/*.qmd
+    - tutorials/r/*.Rmd
 
 website:
   title: "SCX"
@@ -26,7 +28,7 @@ website:
           - tutorials/convert.qmd
           - tutorials/stream.qmd
           - text: "Reading single-cell files in R"
-            href: r/articles/picklerick.html
+            href: tutorials/r/picklerick.Rmd
       - text: Reference
         menu:
           - text: Command line
@@ -34,7 +36,7 @@ website:
           - text: Python
             href: reference/python/index.qmd
           - text: R
-            href: r/reference/index.html
+            href: reference/r/index.qmd
     right:
       - icon: github
         href: https://github.com/btraven00/scx
@@ -70,3 +72,19 @@ quartodoc:
       contents: [inspect, open_stream, MatrixChunk]
     - title: Errors
       contents: [PickleRickError]
+
+# R API reference, generated into reference/r/ (git-ignored) from
+# r/picklerick/man by scripts/rd2qmd.R, as quartodoc does for Python. The R
+# vignettes are copied to tutorials/r/ (git-ignored) and rendered as pages.
+r-reference:
+  title: R reference
+  dir: reference/r
+  sections:
+    - title: Reading
+      contents: [read_h5ad, uns]
+    - title: The light AnnData handle
+      contents: [AnnDataLight, as_sce]
+    - title: Inspecting, converting and writing
+      contents: [inspect, convert, write_h5ad]
+    - title: Lazy matrices
+      contents: [PicklerickMatrix]
