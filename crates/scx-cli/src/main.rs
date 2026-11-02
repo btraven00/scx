@@ -1495,6 +1495,12 @@ async fn inspect(
                     println!();
                     let hdr = format!("provenance slots ({} patched)", slots.len());
                     println!("{}", bold_cyan!(&hdr));
+                    // added_at lives in the sidecar; older merges kept it in uns.
+                    let sidecar: serde_json::Value =
+                        std::fs::read(provenance::sidecar_path(Path::new(path)))
+                            .ok()
+                            .and_then(|b| serde_json::from_slice(&b).ok())
+                            .unwrap_or_default();
                     let mut keys: Vec<&String> = slots.keys().collect();
                     keys.sort();
                     for key in keys {
@@ -1505,7 +1511,11 @@ async fn inspect(
                                 .unwrap_or("?");
                             let sha = entry.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
                             let sha_short = &sha[..12.min(sha.len())];
-                            let at = entry.get("added_at").and_then(|v| v.as_str()).unwrap_or("");
+                            let at = entry
+                                .get("added_at")
+                                .or_else(|| sidecar["slots"][key.as_str()].get("added_at"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             println!(
                                 "  {:<38} {}  {}  {}",
                                 key,

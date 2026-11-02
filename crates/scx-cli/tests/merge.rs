@@ -720,6 +720,12 @@ fn test_merge_append_adds_second_slot() {
             );
         });
     });
+
+    // Append keeps the first run's time in the sidecar and adds its own.
+    let slots = &sidecar(&out)["slots"];
+    for key in ["layers/normalized", "layers/counts"] {
+        assert!(slots[key]["added_at"].is_string(), "{key} missing: {slots}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +782,57 @@ fn test_merge_provenance_written_to_uns() {
     });
 }
 
+fn sidecar(out: &Path) -> serde_json::Value {
+    let p = format!("{}.prov.json", out.display());
+    serde_json::from_slice(&std::fs::read(&p).expect("merge sidecar missing")).unwrap()
+}
+
+/// The same merge twice gives identical bytes: the wall-clock `added_at`
+/// goes to the sidecar, not into uns.
+#[test]
+fn test_merge_output_is_byte_reproducible() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().join("base.h5ad");
+    let patch = dir.path().join("patch.h5ad");
+    with_hdf5(|| {
+        make_base_h5ad(&base, 6, 4);
+        make_h5ad_with_layer(&patch, 6, 4, "normalized");
+    });
+    let merge = |name: &str| {
+        let out = dir.path().join(name);
+        assert_success(&scx(&[
+            "merge",
+            "--base",
+            base.to_str().unwrap(),
+            "--patch",
+            &format!("{}:layers/normalized", patch.display()),
+            "--output",
+            out.to_str().unwrap(),
+            "--tag",
+            "b=2",
+            "--tag",
+            "a=1",
+        ]));
+        out
+    };
+    let (a, b) = (merge("a.h5ad"), merge("b.h5ad"));
+    assert!(
+        std::fs::read(&a).unwrap() == std::fs::read(&b).unwrap(),
+        "two identical merges differ"
+    );
+
+    with_hdf5(|| {
+        futures::executor::block_on(async {
+            let uns = H5AdReader::open(&a, 5).unwrap().uns().await.unwrap();
+            let slot = &uns.raw["scx_provenance"]["slots"]["layers/normalized"];
+            assert!(slot.get("sha256").is_some(), "{slot}");
+            assert!(slot.get("added_at").is_none(), "added_at leaked into uns");
+        })
+    });
+    let at = &sidecar(&a)["slots"]["layers/normalized"]["added_at"];
+    assert!(at.as_str().is_some_and(|s| s.ends_with('Z')), "{at}");
+}
+
 // ---------------------------------------------------------------------------
 // scx inspect — shows provenance section
 // ---------------------------------------------------------------------------
@@ -813,6 +870,11 @@ fn test_inspect_shows_merge_provenance() {
     assert!(
         stdout.contains("layers/normalized"),
         "inspect missing slot\n{stdout}"
+    );
+    let at = sidecar(&out)["slots"]["layers/normalized"]["added_at"].clone();
+    assert!(
+        stdout.contains(at.as_str().unwrap()),
+        "inspect missing sidecar added_at\n{stdout}"
     );
 }
 

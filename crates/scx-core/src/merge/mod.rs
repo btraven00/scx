@@ -226,6 +226,7 @@ impl SlotPatchManager {
             .to_json()
             .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
         writer.upsert_uns_provenance(&prov_json)?;
+        prov.write_sidecar(output, false)?;
 
         Ok(())
     }
@@ -253,6 +254,7 @@ impl SlotPatchManager {
             .to_json()
             .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
         writer.upsert_uns_provenance(&prov_json)?;
+        prov.write_sidecar(into, true)?;
 
         Ok(())
     }
