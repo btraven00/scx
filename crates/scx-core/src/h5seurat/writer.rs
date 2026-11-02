@@ -195,10 +195,12 @@ fn seurat_reduction_key(red_name: &str) -> String {
 
 /// Whether the h5ad CSR group `src` is, as stored, exactly the dgCMatrix the
 /// streaming path would write, so `copy_csr_from_h5ad` may copy it: int32
-/// indices, deflate (optionally after shuffle) so R can decode it, `want` as
+/// indices, chunked with no filter or deflate (optionally after shuffle), so
+/// R can decode it, `want` as
 /// the value dtype when given, and every row's indices strictly increasing and
 /// below `n_cols`. dgCMatrix needs them sorted; the streaming path sorts, a
-/// copy cannot. That check decodes `indices` (in parallel), never `data`.
+/// copy cannot. That check reads `indices` (inflating in parallel), never
+/// `data`.
 fn csr_copyable(src: &Group, n_rows: usize, n_cols: usize, want: Option<DataType>) -> Result<bool> {
     use crate::h5_chunk::{chunk_plan, read_range_parallel};
     if crate::h5_str::read_str_attr(src, "encoding-type")
@@ -227,18 +229,20 @@ fn csr_copyable(src: &Group, n_rows: usize, n_cols: usize, want: Option<DataType
     } else {
         return Ok(false);
     };
+    // Stored chunks R can decode: unfiltered (anndata's default) or deflate.
+    let copyable = |d: &hdf5::Dataset| {
+        d.chunk().is_some_and(|c| c.len() == 1)
+            && (d.filters().is_empty() || chunk_plan(d).is_some())
+    };
     let ip = indptr.dtype()?;
-    let plan = chunk_plan(&indices);
     if want.is_some_and(|w| w != dtype)
         || !indices.dtype()?.is::<i32>()
         || !(ip.is::<i32>() || ip.is::<i64>())
-        || chunk_plan(&data).is_none()
-        || chunk_plan(&indptr).is_none()
-        || plan.is_none()
+        || ![&data, &indices, &indptr].into_iter().all(copyable)
     {
         return Ok(false);
     }
-    let plan = plan.unwrap();
+    let plan = chunk_plan(&indices);
     let indptr: Vec<i64> = indptr.read_raw()?;
     let nnz = indices.size();
     if indptr.len() != n_rows + 1
@@ -258,13 +262,16 @@ fn csr_copyable(src: &Group, n_rows: usize, n_cols: usize, want: Option<DataType
         while e < n_rows && indptr[e + 1] as usize - a <= BLOCK {
             e += 1;
         }
-        let bytes = read_range_parallel(&indices, a, indptr[e] as usize, 4, plan)?;
-        let idx: Vec<i32> = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| i32::from_le_bytes(*c))
-            .collect();
+        let b = indptr[e] as usize;
+        let idx: Vec<i32> = match plan {
+            Some(plan) => read_range_parallel(&indices, a, b, 4, plan)?
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_le_bytes(*c))
+                .collect(),
+            None => indices.read_slice_1d::<i32, _>(a..b)?.to_vec(),
+        };
         for w in indptr[r..=e].windows(2) {
             let row = &idx[w[0] as usize - a..w[1] as usize - a];
             let in_range = row.first().is_none_or(|&i| i >= 0)
