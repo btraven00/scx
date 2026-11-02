@@ -77,6 +77,14 @@ jobs:
       # sccache can't cache incremental builds (the workspace crates in dev
       # profiles, e.g. clippy and test).
       CARGO_INCREMENTAL: "0"
+      # The job builds the R package three times: R CMD build installs it to
+      # render the vignettes, R CMD check installs it again, and roxygen loads
+      # it. src/Makevars builds into ./rust/target, under a fresh temporary
+      # copy or the cleaned checkout, so each redid HDF5's CMake build and the
+      # LTO link. PICKLERICK_TARGET_DIR makes all three share one build dir,
+      # kept between runs: only crates changed since the last run rebuild,
+      # once. LTO stays on, so the compiled-code check sees what ships.
+      PICKLERICK_TARGET_DIR: /opt/cache/runner/scx/target-rcheck
       # Per R build: packages compiled against one R don't load in another,
       # and rv keys its cache by R version only. Change with /opt/R/<version>.
       RV_CACHE_DIR: /opt/cache/runner/scx/rv/posit-4.5.3
@@ -87,6 +95,12 @@ jobs:
       _R_CHECK_SYSTEM_CLOCK_: "FALSE"
     steps:
       - uses: actions/checkout@v7
+      # ponytail: cleared wholesale past 40 GB; prune by age if that recurs often.
+      - name: Cap the kept build dir
+        run: |
+          if [ -d "$PICKLERICK_TARGET_DIR" ] && [ "$(du -s --block-size=1G "$PICKLERICK_TARGET_DIR" | cut -f1)" -gt 40 ]; then
+            rm -rf "$PICKLERICK_TARGET_DIR"
+          fi
       # Ahead of the host's /usr/local R, which has no graphics devices for
       # knitr to render the vignettes with.
       - run: echo "/opt/R/4.5.3/bin" >> "$GITHUB_PATH"

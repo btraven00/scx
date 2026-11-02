@@ -20,12 +20,16 @@ RUST_SRC = $(shell find ./rust/src -name '*.rs' 2>/dev/null) ./rust/Cargo.toml .
 $(SHLIB): $(STATLIB)
 
 $(STATLIB): $(RUST_SRC)
-	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir=$(TARGET_DIR)
-	@# When CARGO_BUILD_TARGET is set (e.g. by conda's rust toolchain
-	@# activation), cargo writes to $(TARGET_DIR)/<triple>/release/ instead
-	@# of $(TARGET_DIR)/release/. Copy it back to the expected location.
-	@if [ ! -f $(STATLIB) ]; then \
-	    found=$$(find $(TARGET_DIR) -path '*/release/libpicklerick_r.a' | head -1); \
+	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir="$${PICKLERICK_TARGET_DIR:-$(TARGET_DIR)}"
+	@# PICKLERICK_TARGET_DIR (optional; r.yml sets it) builds in a directory
+	@# kept outside the package, so the copies R CMD build and check install
+	@# from reuse one build. When CARGO_BUILD_TARGET is set (e.g. by conda's
+	@# rust toolchain activation), cargo writes to <target-dir>/<triple>/release/
+	@# instead of <target-dir>/release/. Either way, copy the library to the
+	@# expected location.
+	@tgt="$${PICKLERICK_TARGET_DIR:-$(TARGET_DIR)}"; \
+	if [ -n "$${PICKLERICK_TARGET_DIR:-}" ] || [ ! -f $(STATLIB) ]; then \
+	    found=$$(find "$$tgt" -path '*/release/libpicklerick_r.a' | head -1); \
 	    if [ -n "$$found" ]; then \
 	        mkdir -p $(LIBDIR); \
 	        cp "$$found" $(STATLIB); \
