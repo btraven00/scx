@@ -114,3 +114,22 @@ def test_zarr_output_reads_back_with_anndata(norman, norman_path, tmp_path) -> N
     # And through picklerick's own reader.
     assert pk.inspect(out)["format"].startswith("Zarr")
     np.testing.assert_array_equal(dense(pk.read(out).X), dense(norman.X))
+
+
+def test_gene_major_writes_x_by_gene(norman, norman_path, tmp_path) -> None:
+    # A tiny budget forces many passes over the input.
+    out = pk.convert(norman_path, tmp_path / "by_gene.h5ad", gene_major=True, transpose_mem=1e-5)
+    assert pk.inspect(out)["x_axis"] == "var"
+    back = ad.read_h5ad(out)
+    assert back.X.format == "csc"
+    np.testing.assert_array_equal(dense(back.X), dense(norman.X))
+    # Streamed by gene, the blocks put back together are X.
+    blocks = [c.to_scipy().toarray() for c in pk.open_stream(out, axis="var", chunk_size=7)]
+    np.testing.assert_array_equal(np.hstack(blocks), dense(norman.X))
+
+
+def test_gene_major_needs_h5ad_output_and_a_positive_budget(norman_path, tmp_path) -> None:
+    with pytest.raises(Exception, match="gene_major only applies to .h5ad"):
+        pk.convert(norman_path, tmp_path / "x.h5seurat", gene_major=True)
+    with pytest.raises(ValueError, match="transpose_mem"):
+        pk.convert(norman_path, tmp_path / "x.h5ad", gene_major=True, transpose_mem=0)

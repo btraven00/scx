@@ -78,6 +78,7 @@ def scx_convert(
     assay: str,
     layer: str,
     x_slot: str = "X",
+    transpose_mem: int | None = None,
 ) -> None: ...
 def scx_inspect(input: str, with_names: bool = False) -> dict[str, Any]: ...
 def scx_open_stream(

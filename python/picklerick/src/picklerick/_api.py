@@ -29,6 +29,8 @@ def convert(
     layer: str = "counts",
     x_slot: str = "X",
     chunk_size: int = 5000,
+    gene_major: bool = False,
+    transpose_mem: float = 4.0,
 ) -> Path:
     """Convert a single-cell dataset to ``.h5ad``, ``.h5seurat`` or ``.zarr``.
 
@@ -54,6 +56,14 @@ def convert(
         ``.zarr`` output; ignored for ``.h5seurat``.
     chunk_size
         Cells per streamed chunk.
+    gene_major
+        Write ``X`` stored by gene (CSC), so :func:`open_stream` with
+        ``axis="var"`` reads blocks of whole genes; ``.h5ad`` output only.
+        The same as ``scx convert --gene-major``. anndata reads it as a
+        ``csc_matrix``.
+    transpose_mem
+        With ``gene_major``: GB of transposed nonzeros held at a time. Less
+        memory means more passes over the input.
 
     Returns
     -------
@@ -62,9 +72,14 @@ def convert(
     """
     if dtype not in _DTYPES:
         raise ValueError(f"unknown dtype {dtype!r}: use one of {_DTYPES}")
+    if gene_major and not transpose_mem > 0:
+        raise ValueError("transpose_mem must be a positive GB budget")
     out = Path(output).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    _native.scx_convert(_path(input), str(out), chunk_size, dtype, assay, layer, x_slot)
+    mem = int(transpose_mem * 1e9) if gene_major else None
+    _native.scx_convert(
+        _path(input), str(out), chunk_size, dtype, assay, layer, x_slot, mem
+    )
     return out
 
 
