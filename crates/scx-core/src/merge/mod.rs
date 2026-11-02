@@ -826,10 +826,7 @@ mod timed_base_tests {
         let mut b = H5AdBuilder::new(&base, 2, 2, &H5AdOptions::default()).unwrap();
         b.push_x_csr_chunk(0, [0, 0, 0], [], []).unwrap();
         b.finalize().unwrap();
-        hdf5::File::open_rw(&base)
-            .unwrap()
-            .create_group("timed")
-            .unwrap();
+        crate::h5::add_timed_group(&base, "timed");
 
         let merge = |allow: bool| {
             let mut m = SlotPatchManager::new(MergeMode::Create {

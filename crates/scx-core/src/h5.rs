@@ -64,6 +64,19 @@ pub(crate) fn assert_untimed(path: impl AsRef<Path>) {
     assert!(timed.is_empty(), "groups with timestamps: {timed:?}");
 }
 
+/// Test helper: add a timestamped group `name` to the file at `path`, as h5py
+/// writes them. Needs the v1.8+ format: with libhdf5 1.10's default (earliest)
+/// format a group gets a v1 object header, which has no room for times.
+#[cfg(test)]
+pub(crate) fn add_timed_group(path: impl AsRef<Path>, name: &str) {
+    File::with_options()
+        .with_fapl(|p| p.libver_v18())
+        .open_rw(path)
+        .unwrap()
+        .create_group(name)
+        .unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Typed reads shared by the HDF5 readers (h5ad, H5Seurat, 10x)
 // ---------------------------------------------------------------------------
@@ -327,13 +340,13 @@ mod tests {
 
     /// HDF5 creates missing parents of a nested path with the leaf's gcpl,
     /// so they are untimed too; writers rely on this for `graphs/<name>`.
-    /// A plain `File::create` root is timed, which proves the check bites.
+    /// A timed group is caught, which proves the check bites.
     #[test]
     fn nested_create_group_is_untimed() {
         let path = tmp("nested_untimed");
         create_group(&create_file(&path).unwrap(), "a/b/c").unwrap();
         assert_untimed(&path);
-        File::create(&path).unwrap();
+        add_timed_group(&path, "timed");
         let caught = std::panic::catch_unwind(|| assert_untimed(&path));
         let _ = std::fs::remove_file(&path);
         assert!(caught.is_err(), "assert_untimed missed a timed root");
