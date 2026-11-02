@@ -19,6 +19,10 @@
                             string with NA, non-ASCII level, duplicate var
                             names, a dense and a CSC layer
     tiny_edge.zarr          the same AnnData as a Zarr v3 store
+    tiny_raw.h5ad           normalised CSR X with the counts in raw.X, no
+                            counts layer (the common scanpy layout)
+    tiny_raw_subset.h5ad    X keeps genes 0-3, raw.X keeps all 5 genes (raw
+                            frozen before gene filtering)
 
 tiny_v4.h5seurat also carries a second assay (ADT, 2 features x 6 cells) that
 an RNA-only conversion drops.
@@ -169,6 +173,17 @@ def write_h5ad():
     )
 
 
+def write_raw_h5ad():
+    var = pd.DataFrame(index=GENES)
+    a = ad.AnnData(X=sp.csr_matrix(COUNTS.astype(np.float32)), obs=pd.DataFrame(index=CELLS), var=var)
+    a.raw = a
+    a.X = sp.csr_matrix(X)
+    a.write_h5ad(OUT / "tiny_raw.h5ad")
+
+    a = a[:, :4].copy()  # raw keeps all 5 genes
+    a.write_h5ad(OUT / "tiny_raw_subset.h5ad")
+
+
 def write_edge_h5ad():
     obs = pd.DataFrame(index=CELLS)
     obs["stage"] = pd.Categorical(STAGE, categories=STAGE_LEVELS, ordered=True)
@@ -297,6 +312,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     write_expected()
     write_h5ad()
+    write_raw_h5ad()
     write_edge_h5ad()
     write_10x()
     write_mtx()

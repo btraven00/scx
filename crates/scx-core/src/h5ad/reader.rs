@@ -208,10 +208,7 @@ pub(super) fn read_shape(grp: &Group) -> Result<(usize, usize)> {
 /// Returns (index, columns).
 fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<Column>)> {
     let grp = file.group(group_path)?;
-
-    // Index dataset name from _index attr; fall back to "index"
-    let index_name = read_str_attr(&grp, "_index").unwrap_or_else(|_| "index".into());
-    let index = ad_read_index(file, &format!("{group_path}/{index_name}"))?;
+    let index = ad_read_df_index(file, group_path)?;
 
     let col_names = if grp.attr("column-order").is_ok() {
         read_str_array_attr(&grp, "column-order")?
@@ -250,6 +247,14 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
     }
 
     Ok((index, columns))
+}
+
+/// Read the index of the dataframe group at `group_path`, named by its
+/// `_index` attribute (default "index").
+fn ad_read_df_index(file: &File, group_path: &str) -> Result<Vec<String>> {
+    let grp = file.group(group_path)?;
+    let index_name = read_str_attr(&grp, "_index").unwrap_or_else(|_| "index".into());
+    ad_read_index(file, &format!("{group_path}/{index_name}"))
 }
 
 /// Read a dataframe index.
@@ -711,6 +716,44 @@ impl DatasetReader for H5AdReader {
 
     fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
         sparse_chunks(&self.path, format!("obsp/{}", meta.name), meta, chunk_size)
+    }
+
+    async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {
+        let file = File::open(&self.path)?;
+        let meta = match file.dataset("raw/X") {
+            Ok(ds) => match ds.shape()[..] {
+                // Dense: an empty indptr marks it for read_rows.
+                [rows, cols] => SparseMatrixMeta {
+                    name: "raw".into(),
+                    shape: (rows, cols),
+                    indptr: Vec::new(),
+                },
+                ref other => {
+                    return Err(ScxError::InvalidFormat(format!(
+                        "dense raw/X must be 2-D, has shape {other:?}"
+                    )))
+                }
+            },
+            Err(_) if file.group("raw/X").is_ok() => ad_read_sparse_meta(&file, "raw", "raw/X")?,
+            Err(_) => return Ok(None),
+        };
+        // raw is often frozen before gene filtering, so it can hold more genes
+        // than X. Then it is not X's counts and has no slot beside X.
+        let same_genes = meta.shape == (self.n_obs, self.n_vars)
+            && file.group("raw/var").is_ok()
+            && ad_read_df_index(&file, "raw/var")? == ad_read_df_index(&file, "var")?;
+        if !same_genes {
+            tracing::warn!(
+                shape = ?meta.shape,
+                "raw/X does not have X's cells and genes; it is not used as counts"
+            );
+            return Ok(None);
+        }
+        Ok(Some(meta))
+    }
+
+    fn raw_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
+        sparse_chunks(&self.path, "raw/X".to_string(), meta, chunk_size)
     }
 
     async fn varm(&mut self) -> Result<Varm> {
