@@ -435,4 +435,52 @@ mod tests {
         );
         assert!(select_rows(&chunk(), &[0..10, 14..20]).is_empty());
     }
+
+    /// The trait's defaults for what a format lacks fail with a message
+    /// rather than panicking: 10x has no layers and no gene-major X, and
+    /// h5seurat can't store X by column.
+    #[tokio::test]
+    async fn defaults_refuse_what_a_format_lacks() {
+        use futures::StreamExt;
+        let tiny = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/tiny/tiny_10x.h5");
+        let mut r = crate::tenx::TenxH5Reader::open(&tiny, 10).unwrap();
+        let first_err = |mut s: ChunkStream<'_>| {
+            futures::executor::block_on(s.next())
+                .expect("an item")
+                .expect_err("an error")
+                .to_string()
+        };
+        let meta = SparseMatrixMeta {
+            name: "x".into(),
+            shape: (1, 1),
+            indptr: vec![0, 0],
+        };
+        assert!(first_err(r.layer_stream(&meta, 10)).contains("no layer matrices"));
+        assert!(first_err(r.x_stream_cols(vec![0..1])).contains("--gene-major"));
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let mut w = crate::h5seurat::H5SeuratWriter::create(
+            tmp.path(),
+            1,
+            1,
+            crate::dtype::DataType::F32,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let cols = SparseMatrixCSR {
+            shape: (0, 1),
+            indptr: vec![0],
+            indices: vec![],
+            data: TypedVec::empty(crate::dtype::DataType::F32),
+        };
+        let err = w.write_x_columns(&cols).await.unwrap_err();
+        assert!(
+            err.to_string().contains("cannot store X by column"),
+            "{err}"
+        );
+    }
 }

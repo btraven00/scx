@@ -172,7 +172,7 @@ mod tests {
     use crate::api::write::{write_h5ad_csr, H5AdOptions};
     use crate::h5_str::read_str_attr;
     use crate::h5ad::{H5AdReader, H5AdWriter};
-    use crate::ir::{ObsTable, VarTable};
+    use crate::ir::{MatrixChunk, ObsTable, VarTable};
     use sprs::TriMatI;
 
     #[test]
@@ -269,5 +269,168 @@ mod tests {
                 assert_eq!(&v[nz], col.data());
             }
         }
+    }
+
+    /// A reader whose X streams `passes[i]` on its i-th pass (the last pass
+    /// repeats), declaring `dtype`, which its chunks needn't share.
+    struct Stub {
+        shape: (usize, usize),
+        dtype: DataType,
+        passes: Vec<Vec<MatrixChunk>>,
+        pass: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl DatasetReader for Stub {
+        fn shape(&self) -> (usize, usize) {
+            self.shape
+        }
+        fn dtype(&self) -> DataType {
+            self.dtype
+        }
+        async fn obs(&mut self) -> Result<ObsTable> {
+            Ok(ObsTable::default())
+        }
+        async fn var(&mut self) -> Result<VarTable> {
+            Ok(VarTable::default())
+        }
+        fn x_stream(&mut self) -> crate::stream::ChunkStream<'_> {
+            let chunks = self.passes[self.pass.min(self.passes.len() - 1)].clone();
+            self.pass += 1;
+            futures::stream::iter(chunks.into_iter().map(Ok)).boxed()
+        }
+    }
+
+    /// One chunk of `n_vars` columns holding `rows`, as (column, value) pairs.
+    fn f64_chunk(n_vars: usize, rows: &[&[(u32, f64)]]) -> MatrixChunk {
+        let mut indptr = vec![0u64];
+        let (mut indices, mut data) = (Vec::new(), Vec::new());
+        for row in rows {
+            for &(c, v) in *row {
+                indices.push(c);
+                data.push(v);
+            }
+            indptr.push(indices.len() as u64);
+        }
+        MatrixChunk {
+            row_offset: 0,
+            nrows: rows.len(),
+            data: SparseMatrixCSR {
+                shape: (rows.len(), n_vars),
+                indptr,
+                indices,
+                data: TypedVec::F64(data),
+            },
+        }
+    }
+
+    /// Chunks whose dtype differs from the reader's declared one (as BPCells
+    /// h5seurat streams u32 under an f64 dtype) are cast to the declared
+    /// dtype, for each output dtype.
+    #[tokio::test]
+    async fn chunks_are_cast_to_the_declared_dtype() {
+        let x = f64_chunk(3, &[&[(0, 1.0), (2, 2.0)], &[(1, 3.0)]]);
+        for dtype in [DataType::F32, DataType::I32, DataType::U32] {
+            let mut reader = Stub {
+                shape: (2, 3),
+                dtype,
+                passes: vec![vec![x.clone()]],
+                pass: 0,
+            };
+            let dst = tempfile::NamedTempFile::with_suffix(".h5ad").unwrap();
+            let mut writer = H5AdWriter::create(dst.path(), 2, 3, dtype).unwrap();
+            write_x_csc(&mut reader, &mut writer, 1 << 20)
+                .await
+                .unwrap();
+            writer.finalize().await.unwrap();
+
+            let f = hdf5::File::open(dst.path()).unwrap();
+            let data = f.dataset("X/data").unwrap();
+            assert_eq!(data.dtype().unwrap().size(), 4, "{dtype}");
+            // By column: gene 0 (cell 0), gene 1 (cell 1), gene 2 (cell 0).
+            assert_eq!(data.read_raw::<f64>().unwrap(), [1.0, 3.0, 2.0], "{dtype}");
+            let indices = f.dataset("X/indices").unwrap().read_raw::<u32>().unwrap();
+            assert_eq!(indices, [0, 1, 0], "{dtype}");
+        }
+    }
+
+    /// Every pass reads X again; if it changed since the counting pass the
+    /// columns would be misplaced, so the transpose stops with an error.
+    #[tokio::test]
+    async fn x_changing_between_passes_is_an_error() {
+        let mut reader = Stub {
+            shape: (1, 2),
+            dtype: DataType::F64,
+            passes: vec![
+                vec![f64_chunk(2, &[&[(0, 1.0), (1, 2.0)]])],
+                vec![f64_chunk(2, &[&[(0, 1.0)]])],
+            ],
+            pass: 0,
+        };
+        let dst = tempfile::NamedTempFile::with_suffix(".h5ad").unwrap();
+        let mut writer = H5AdWriter::create(dst.path(), 1, 2, DataType::F64).unwrap();
+        let err = write_x_csc(&mut reader, &mut writer, 1 << 20)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("changed between passes"), "{err}");
+    }
+
+    /// X with no genes has no column blocks; it is still written as an empty
+    /// gene-major matrix.
+    #[tokio::test]
+    async fn x_without_genes_is_still_marked_csc() {
+        let mut reader = Stub {
+            shape: (2, 0),
+            dtype: DataType::F32,
+            passes: vec![vec![]],
+            pass: 0,
+        };
+        let dst = tempfile::NamedTempFile::with_suffix(".h5ad").unwrap();
+        let mut writer = H5AdWriter::create(dst.path(), 2, 0, DataType::F32).unwrap();
+        assert_eq!(
+            write_x_csc(&mut reader, &mut writer, 1 << 20)
+                .await
+                .unwrap(),
+            0
+        );
+        writer.finalize().await.unwrap();
+
+        let f = hdf5::File::open(dst.path()).unwrap();
+        let g = f.group("X").unwrap();
+        assert_eq!(read_str_attr(&g, "encoding-type").unwrap(), "csc_matrix");
+        assert_eq!(g.attr("shape").unwrap().read_raw::<u64>().unwrap(), [2, 0]);
+        assert_eq!(
+            f.dataset("X/indptr").unwrap().read_raw::<u64>().unwrap(),
+            [0]
+        );
+    }
+
+    /// A gene-major X whose indptr doesn't have n_vars + 1 entries is refused
+    /// on open, naming the dataset.
+    #[tokio::test]
+    async fn malformed_gene_major_indptr_is_refused() {
+        let mut reader = Stub {
+            shape: (2, 3),
+            dtype: DataType::F32,
+            passes: vec![vec![f64_chunk(3, &[&[(0, 1.0)], &[(2, 2.0)]])]],
+            pass: 0,
+        };
+        let dst = tempfile::NamedTempFile::with_suffix(".h5ad").unwrap();
+        let mut writer = H5AdWriter::create(dst.path(), 2, 3, DataType::F32).unwrap();
+        write_x_csc(&mut reader, &mut writer, 1 << 20)
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+        drop(writer);
+        {
+            let f = hdf5::File::open_rw(dst.path()).unwrap();
+            f.unlink("X/indptr").unwrap();
+            f.new_dataset_builder()
+                .with_data(&[0u64, 1, 2])
+                .create("X/indptr")
+                .unwrap();
+        }
+        let err = H5AdReader::open(dst.path(), 2).err().expect("opened");
+        assert!(err.to_string().contains("X/indptr has 3 entries"), "{err}");
     }
 }
