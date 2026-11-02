@@ -103,6 +103,25 @@ This is the trusted reference for all downstream comparisons.
 These are pure Rust tests using the golden fixtures. They do not require the
 `test` pixi environment.
 
+### Property-based round trips (`crates/scx-core/tests/roundtrip_prop.rs`)
+
+proptest generates random datasets and runs each through every writer (h5ad,
+both h5seurat writers, BPCells dir, npy snapshot), reads it back with scx's
+readers and requires it unchanged: shape, cell and gene names, X, obs columns
+of every type with missing values, and an embedding. Shapes go down to 0 cells
+or 0 genes, and the chunk size is random, so chunk boundaries move. Each
+format's documented representation of a missing value is expected (`stored_na`):
+float NA as NaN in h5ad/h5seurat, a missing string as "" in h5seurat.
+
+- `PROPTEST_CASES=500 cargo test -p scx-core --test roundtrip_prop` for more
+  cases than the default 32 per writer.
+- A failure is shrunk to a minimal dataset and its seed saved in
+  `tests/roundtrip_prop.proptest-regressions`, which is replayed first on every
+  run; commit it.
+- A new writer or slot belongs here: add it to `roundtrip!` or the generator.
+  `tests/common/convert.rs` holds the steps of `scx convert` shared with
+  `roundtrip.rs`.
+
 ---
 
 ## Python pytest suite (`tests/python/`)

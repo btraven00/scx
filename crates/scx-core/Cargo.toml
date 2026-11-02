@@ -96,6 +96,7 @@ tempfile = "3"
 serde_yaml = "0.9"
 criterion = { version = "0.5", features = ["async_tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+proptest = "1"
 
 [[bench]]
 name = "conversion"
