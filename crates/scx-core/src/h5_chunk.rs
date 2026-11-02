@@ -97,6 +97,114 @@ fn unshuffle(src: &[u8], elem_size: usize) -> Vec<u8> {
     out
 }
 
+/// Read the stored (still-filtered) chunk that starts at element `start`, and
+/// its filter mask. Raw `hdf5-sys` FFI: the caller must hold `hdf5::sync::sync`.
+fn read_raw_chunk(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, Vec<u8>)> {
+    let off = start as hdf5_sys::h5::hsize_t;
+    let mut filter_mask: u32 = 0;
+    let mut addr: hdf5_sys::h5::haddr_t = 0;
+    let mut size: hdf5_sys::h5::hsize_t = 0;
+    let rc = unsafe {
+        hdf5_sys::h5d::H5Dget_chunk_info_by_coord(
+            dsid,
+            &off,
+            &mut filter_mask,
+            &mut addr,
+            &mut size,
+        )
+    };
+    if rc < 0 || size == 0 {
+        return Err(ScxError::InvalidFormat(format!(
+            "H5Dget_chunk_info_by_coord failed at element {}",
+            start
+        )));
+    }
+    let mut buf = vec![0u8; size as usize];
+    // The raw chunk-read symbol is versioned by the HDF5 ABI we link
+    // against:
+    //   - HDF5 < 2.0 exports the 5-arg `H5Dread_chunk` and
+    //     hdf5-metno-sys binds it as `H5Dread_chunk1` (via a link_name
+    //     override).
+    //   - HDF5 >= 2.0 drops the deprecated `H5Dread_chunk1` symbol
+    //     entirely and exports only the 6-arg `H5Dread_chunk2` (extra
+    //     in/out `buf_size`); hdf5-metno-sys only declares the
+    //     `H5Dread_chunk2` binding when it detects that version.
+    // Gate on the actual linked version (the `hdf5_2_0` cfg set by
+    // build.rs from hdf5-metno-sys's `DEP_HDF5_VERSION_2_0_0` metadata),
+    // NOT on our `vendored-hdf5` feature — the feature only selects
+    // static-vs-system linking and a system HDF5 can be either ABI.
+    // `buf` is already sized exactly from H5Dget_chunk_info_by_coord
+    // above, so the chunk fits without resizing.
+    let rc = unsafe {
+        #[cfg(hdf5_2_0)]
+        {
+            let mut buf_size = buf.len();
+            hdf5_sys::h5d::H5Dread_chunk2(
+                dsid,
+                0, // H5P_DEFAULT
+                &off,
+                &mut filter_mask,
+                buf.as_mut_ptr().cast(),
+                &mut buf_size,
+            )
+        }
+        #[cfg(not(hdf5_2_0))]
+        {
+            hdf5_sys::h5d::H5Dread_chunk1(
+                dsid,
+                0, // H5P_DEFAULT
+                &off,
+                &mut filter_mask,
+                buf.as_mut_ptr().cast(),
+            )
+        }
+    };
+    if rc < 0 {
+        return Err(ScxError::InvalidFormat(format!(
+            "H5Dread_chunk failed at element {}",
+            start
+        )));
+    }
+    Ok((filter_mask, buf))
+}
+
+/// Copy the 1-D chunked dataset `src` to `dst/name` as stored: same type,
+/// chunking and filters, each chunk moved still compressed, never decoded.
+/// The copy carries no timestamp, unlike `H5Ocopy`, which keeps the source's.
+pub fn copy_chunks(src: &Dataset, dst: &hdf5::Group, name: &str) -> Result<()> {
+    let Some(chunk) = src.chunk().filter(|c| c.len() == 1).map(|c| c[0]) else {
+        return Err(ScxError::InvalidFormat(format!(
+            "{}: not a 1-D chunked dataset",
+            src.name()
+        )));
+    };
+    let n = src.size();
+    let out = dst
+        .new_dataset_builder()
+        .empty_as(&src.dtype()?)
+        .chunk(chunk)
+        .set_filters(&src.filters())
+        .shape(n)
+        .create(name)?;
+    let (sid, did) = (src.id(), out.id());
+    hdf5::sync::sync(|| {
+        for start in (0..n).step_by(chunk) {
+            let (mask, buf) = read_raw_chunk(sid, start)?;
+            let off = start as hdf5_sys::h5::hsize_t;
+            let rc = unsafe {
+                hdf5_sys::h5d::H5Dwrite_chunk(did, 0, mask, &off, buf.len(), buf.as_ptr().cast())
+            };
+            if rc < 0 {
+                return Err(ScxError::InvalidFormat(format!(
+                    "H5Dwrite_chunk failed at element {start} of {}",
+                    src.name()
+                )));
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Inflate elements `[a, b)` of a 1-D deflate-chunked dataset in parallel and
 /// return their raw little-endian bytes (`(b - a) * elem_size` of them).
 ///
@@ -124,76 +232,9 @@ pub fn read_range_parallel(
     //    same process-global lock the safe API uses for the whole read stage; the
     //    parallel inflate below touches no HDF5 state and stays outside the lock.
     let raw: Vec<(usize, u32, Vec<u8>)> = hdf5::sync::sync(|| {
-        let mut raw: Vec<(usize, u32, Vec<u8>)> = Vec::with_capacity(kb - ka + 1);
-        for k in ka..=kb {
-            let off = (k * chunk_len) as hdf5_sys::h5::hsize_t;
-            let mut filter_mask: u32 = 0;
-            let mut addr: hdf5_sys::h5::haddr_t = 0;
-            let mut size: hdf5_sys::h5::hsize_t = 0;
-            let rc = unsafe {
-                hdf5_sys::h5d::H5Dget_chunk_info_by_coord(
-                    dsid,
-                    &off,
-                    &mut filter_mask,
-                    &mut addr,
-                    &mut size,
-                )
-            };
-            if rc < 0 || size == 0 {
-                return Err(ScxError::InvalidFormat(format!(
-                    "H5Dget_chunk_info_by_coord failed at element {}",
-                    k * chunk_len
-                )));
-            }
-            let mut buf = vec![0u8; size as usize];
-            // The raw chunk-read symbol is versioned by the HDF5 ABI we link
-            // against:
-            //   - HDF5 < 2.0 exports the 5-arg `H5Dread_chunk` and
-            //     hdf5-metno-sys binds it as `H5Dread_chunk1` (via a link_name
-            //     override).
-            //   - HDF5 >= 2.0 drops the deprecated `H5Dread_chunk1` symbol
-            //     entirely and exports only the 6-arg `H5Dread_chunk2` (extra
-            //     in/out `buf_size`); hdf5-metno-sys only declares the
-            //     `H5Dread_chunk2` binding when it detects that version.
-            // Gate on the actual linked version (the `hdf5_2_0` cfg set by
-            // build.rs from hdf5-metno-sys's `DEP_HDF5_VERSION_2_0_0` metadata),
-            // NOT on our `vendored-hdf5` feature — the feature only selects
-            // static-vs-system linking and a system HDF5 can be either ABI.
-            // `buf` is already sized exactly from H5Dget_chunk_info_by_coord
-            // above, so the chunk fits without resizing.
-            let rc = unsafe {
-                #[cfg(hdf5_2_0)]
-                {
-                    let mut buf_size = buf.len();
-                    hdf5_sys::h5d::H5Dread_chunk2(
-                        dsid,
-                        0, // H5P_DEFAULT
-                        &off,
-                        &mut filter_mask,
-                        buf.as_mut_ptr().cast(),
-                        &mut buf_size,
-                    )
-                }
-                #[cfg(not(hdf5_2_0))]
-                {
-                    hdf5_sys::h5d::H5Dread_chunk1(
-                        dsid,
-                        0, // H5P_DEFAULT
-                        &off,
-                        &mut filter_mask,
-                        buf.as_mut_ptr().cast(),
-                    )
-                }
-            };
-            if rc < 0 {
-                return Err(ScxError::InvalidFormat(format!(
-                    "H5Dread_chunk failed at element {}",
-                    k * chunk_len
-                )));
-            }
-            raw.push((k, filter_mask, buf));
-        }
-        Ok(raw)
+        (ka..=kb)
+            .map(|k| read_raw_chunk(dsid, k * chunk_len).map(|(m, buf)| (k, m, buf)))
+            .collect::<Result<_>>()
     })?;
 
     // 2) Inflate, then un-shuffle, across cores. A set bit in the filter mask
