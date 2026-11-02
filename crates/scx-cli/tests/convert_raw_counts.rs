@@ -145,3 +145,23 @@ fn dgcmatrix_streams_unsorted_rows() {
     assert_eq!(slot(out.path(), "counts"), counts(5, 1.0));
     assert_eq!(slot(out.path(), "data"), counts(5, 0.5));
 }
+
+/// --no-output-hash leaves `output.sha256` out of the provenance sidecar;
+/// by default it is there.
+#[test]
+fn no_output_hash_leaves_sidecar_hash_out() {
+    let dir = tempfile::tempdir().unwrap();
+    for (extra, hashed) in [(&[][..], true), (&["--no-output-hash"][..], false)] {
+        let out = dir.path().join("o.h5seurat");
+        let _ = std::fs::remove_file(&out);
+        convert(&fixture("tiny_raw.h5ad"), &out, extra);
+        let side = std::fs::read_to_string(dir.path().join("o.h5seurat.prov.json")).unwrap();
+        let side: serde_json::Value = serde_json::from_str(&side).unwrap();
+        assert_eq!(
+            side["output"].get("sha256").is_some(),
+            hashed,
+            "{extra:?}: {side}"
+        );
+        assert!(side["source"]["sha256"].is_string(), "{extra:?}: {side}");
+    }
+}
