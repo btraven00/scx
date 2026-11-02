@@ -39,20 +39,28 @@ pub(crate) fn create_group(parent: &hdf5::Group, name: &str) -> hdf5::Result<hdf
         .create(name)
 }
 
-/// Test helper: panic if any group in `path` carries a timestamp.
-#[cfg(test)]
-pub(crate) fn assert_untimed(path: impl AsRef<Path>) {
-    fn walk(g: &hdf5::Group, timed: &mut Vec<String>) {
-        let i = g.loc_info().unwrap();
+/// Paths of the groups in `root` (itself included) that carry a timestamp,
+/// as h5py/anndata writes them. HDF5 has no call to remove one.
+pub(crate) fn timed_groups(root: &hdf5::Group) -> hdf5::Result<Vec<String>> {
+    fn walk(g: &hdf5::Group, timed: &mut Vec<String>) -> hdf5::Result<()> {
+        let i = g.loc_info()?;
         if i.ctime != 0 || i.mtime != 0 || i.btime != 0 {
             timed.push(g.name());
         }
-        for c in g.groups().unwrap() {
-            walk(&c, timed);
+        for c in g.groups()? {
+            walk(&c, timed)?;
         }
+        Ok(())
     }
     let mut timed = Vec::new();
-    walk(&File::open(path).unwrap(), &mut timed);
+    walk(root, &mut timed)?;
+    Ok(timed)
+}
+
+/// Test helper: panic if any group in `path` carries a timestamp.
+#[cfg(test)]
+pub(crate) fn assert_untimed(path: impl AsRef<Path>) {
+    let timed = timed_groups(&File::open(path).unwrap()).unwrap();
     assert!(timed.is_empty(), "groups with timestamps: {timed:?}");
 }
 
