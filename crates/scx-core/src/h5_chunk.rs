@@ -1,4 +1,5 @@
-//! Parallel inflate for deflate-chunked 1-D HDF5 datasets.
+//! Parallel inflate (and deflate, see [`DeflateAppender`]) for deflate-chunked
+//! 1-D HDF5 datasets.
 //!
 //! libhdf5 decompresses a dataset's gzip chunks single-threaded, under the
 //! hdf5-metno process-global lock — so a normal `read_slice` is decode-bound on
@@ -26,9 +27,12 @@
 //! `hdf5::sync::sync` for the read stage. Only the parallel inflate stage, which
 //! touches no HDF5 state, runs outside that lock.
 
-use std::io::Read;
+use std::borrow::Cow;
+use std::io::{Read, Write};
 
 use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use hdf5::filters::Filter;
 use hdf5::Dataset;
 use rayon::prelude::*;
@@ -428,6 +432,178 @@ pub fn read_range_parallel(
     Ok(out)
 }
 
+/// Apply the HDF5 shuffle filter: the inverse of [`unshuffle`], with the same
+/// `e > 1 && n > 1` guard and pass-through tail as `H5Zshuffle.c`.
+fn shuffle(src: &[u8], elem_size: usize) -> Vec<u8> {
+    let nbytes = src.len();
+    let n = nbytes / elem_size.max(1);
+    if elem_size <= 1 || n <= 1 {
+        return src.to_vec();
+    }
+    let mut out = vec![0u8; nbytes];
+    for (i, plane) in out.chunks_exact_mut(n).take(elem_size).enumerate() {
+        for (j, slot) in plane.iter_mut().enumerate() {
+            *slot = src[j * elem_size + i];
+        }
+    }
+    let tail = n * elem_size;
+    if tail < nbytes {
+        out[tail..].copy_from_slice(&src[tail..]);
+    }
+    out
+}
+
+/// Appends to a resizable 1-D deflate-chunked dataset, compressing whole
+/// chunks across cores and storing them with `H5Dwrite_chunk`.
+///
+/// libhdf5 deflates on one thread under its global lock, so a compressed
+/// `write_slice` is compress-bound on one core. Here values are buffered until
+/// whole chunks are available; each chunk is filtered (shuffle, then zlib at
+/// the dataset's level — HDF5's deflate filter output is a zlib stream) in
+/// parallel and written exactly once. [`finish`](Self::finish) writes the last
+/// partial chunk zero-padded to full chunk size, which is how HDF5 itself
+/// stores filtered edge chunks.
+///
+/// Like HDF5's optional deflate filter, a chunk that doesn't shrink is stored
+/// raw with the deflate bit set in its filter mask.
+pub struct DeflateAppender {
+    ds: Dataset,
+    elem_size: usize,
+    chunk_len: usize,
+    level: u32,
+    shuffle: bool,
+    /// Bytes of the trailing partial chunk not yet written.
+    pending: Vec<u8>,
+    /// Elements written or pending; the dataset's current extent.
+    len: usize,
+}
+
+impl DeflateAppender {
+    /// An appender for `ds` if it is an empty 1-D chunked dataset filtered by
+    /// deflate or shuffle+deflate, else `None` (use normal writes).
+    pub fn new(ds: Dataset) -> Option<Self> {
+        let (level, shuffle) = match ds.filters().as_slice() {
+            [Filter::Deflate(l)] => (*l as u32, false),
+            [Filter::Shuffle, Filter::Deflate(l)] => (*l as u32, true),
+            _ => return None,
+        };
+        let chunk_len = match ds.chunk() {
+            Some(dims) if dims.len() == 1 => dims[0],
+            _ => return None,
+        };
+        if ds.shape() != [0] {
+            return None;
+        }
+        let elem_size = ds.dtype().ok()?.size();
+        Some(Self {
+            ds,
+            elem_size,
+            chunk_len,
+            level,
+            shuffle,
+            pending: Vec::new(),
+            len: 0,
+        })
+    }
+
+    /// Append `vals`, whose type must match the dataset's stored type.
+    pub fn append<T: bytemuck::Pod>(&mut self, vals: &[T]) -> Result<()> {
+        if size_of::<T>() != self.elem_size {
+            return Err(ScxError::InvalidFormat(format!(
+                "DeflateAppender: {}-byte values for a {}-byte dataset",
+                size_of::<T>(),
+                self.elem_size
+            )));
+        }
+        if vals.is_empty() {
+            return Ok(());
+        }
+        self.len += vals.len();
+        self.ds.resize(self.len)?;
+        let chunk_bytes = self.chunk_len * self.elem_size;
+        let mut bytes: &[u8] = bytemuck::cast_slice(vals);
+        // Top up the pending partial chunk first.
+        if !self.pending.is_empty() {
+            let take = (chunk_bytes - self.pending.len()).min(bytes.len());
+            self.pending.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.pending.len() < chunk_bytes {
+                return Ok(());
+            }
+            let first = (self.len - vals.len()) / self.chunk_len;
+            let full = std::mem::take(&mut self.pending);
+            self.write_chunks(first, &full)?;
+        }
+        // Whole chunks straight from the input; the remainder waits.
+        let whole = bytes.len() / chunk_bytes * chunk_bytes;
+        let first = (self.len - bytes.len() / self.elem_size) / self.chunk_len;
+        self.write_chunks(first, &bytes[..whole])?;
+        self.pending.extend_from_slice(&bytes[whole..]);
+        Ok(())
+    }
+
+    /// Write the trailing partial chunk, if any.
+    pub fn finish(mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let mut last = std::mem::take(&mut self.pending);
+        last.resize(self.chunk_len * self.elem_size, 0);
+        self.write_chunks(self.len / self.chunk_len, &last)
+    }
+
+    /// Filter and store whole chunks `bytes`, the first at chunk index `first`.
+    fn write_chunks(&self, first: usize, bytes: &[u8]) -> Result<()> {
+        let chunk_bytes = self.chunk_len * self.elem_size;
+        let deflate_bit = u32::from(self.shuffle);
+        let filtered: Vec<(u32, Vec<u8>)> = bytes
+            .par_chunks(chunk_bytes)
+            .map(|raw| {
+                let src: Cow<[u8]> = if self.shuffle {
+                    Cow::Owned(shuffle(raw, self.elem_size))
+                } else {
+                    Cow::Borrowed(raw)
+                };
+                let mut z = ZlibEncoder::new(
+                    Vec::with_capacity(src.len() / 2),
+                    Compression::new(self.level),
+                );
+                // Writing into a Vec can't fail.
+                z.write_all(&src).expect("zlib into Vec");
+                let out = z.finish().expect("zlib into Vec");
+                if out.len() < src.len() {
+                    (0, out)
+                } else {
+                    (1 << deflate_bit, src.into_owned())
+                }
+            })
+            .collect();
+        // Raw hdf5-sys FFI: hold the process-global HDF5 lock (see module docs).
+        let dsid = self.ds.id();
+        hdf5::sync::sync(|| {
+            for (i, (mask, buf)) in filtered.iter().enumerate() {
+                let off = ((first + i) * self.chunk_len) as hdf5_sys::h5::hsize_t;
+                let rc = unsafe {
+                    hdf5_sys::h5d::H5Dwrite_chunk(
+                        dsid,
+                        0, // H5P_DEFAULT
+                        *mask,
+                        &off,
+                        buf.len(),
+                        buf.as_ptr().cast(),
+                    )
+                };
+                if rc < 0 {
+                    return Err(ScxError::InvalidFormat(format!(
+                        "H5Dwrite_chunk failed at element {off}"
+                    )));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +698,100 @@ mod tests {
         let f = File::open(&path).unwrap();
         assert!(chunk_plan(&f.dataset("data").unwrap()).is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Append `vals` in uneven pieces through a `DeflateAppender` into a
+    /// resizable dataset chunked at 1000, then read back with libhdf5's own
+    /// filter pipeline: values, filters and chunking must all match.
+    fn appender_roundtrip<T>(name: &str, vals: &[T], shuffle: bool)
+    where
+        T: hdf5::H5Type + bytemuck::Pod + PartialEq + std::fmt::Debug,
+    {
+        let path = tmp(name);
+        {
+            let f = File::create(&path).unwrap();
+            let mut b = f.new_dataset::<T>().chunk(1000);
+            if shuffle {
+                b = b.shuffle();
+            }
+            let ds = b
+                .deflate(4)
+                .shape(hdf5::SimpleExtents::resizable([0usize]))
+                .create("data")
+                .unwrap();
+            let mut app = DeflateAppender::new(ds).expect("deflate dataset");
+            // Pieces below, at and across chunk boundaries.
+            let mut rest = vals;
+            for n in [1, 998, 1, 2500, 0, 1000].iter().cycle() {
+                if rest.is_empty() {
+                    break;
+                }
+                let (head, tail) = rest.split_at((*n).min(rest.len()));
+                app.append(head).unwrap();
+                rest = tail;
+            }
+            app.finish().unwrap();
+        }
+        let f = File::open(&path).unwrap();
+        let ds = f.dataset("data").unwrap();
+        assert_eq!(ds.read_raw::<T>().unwrap(), vals);
+        assert_eq!(ds.chunk(), Some(vec![1000]));
+        let want = if shuffle {
+            vec![Filter::Shuffle, Filter::Deflate(4)]
+        } else {
+            vec![Filter::Deflate(4)]
+        };
+        assert_eq!(ds.filters(), want);
+        // The parallel read path agrees too.
+        if !vals.is_empty() {
+            let plan = chunk_plan(&ds).unwrap();
+            let raw = read_range_parallel(&ds, 0, vals.len(), size_of::<T>(), plan).unwrap();
+            assert_eq!(raw, bytemuck::cast_slice::<T, u8>(vals));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn appender_partial_last_chunk() {
+        appender_roundtrip("app_partial", &values(4321), false);
+    }
+
+    #[test]
+    fn appender_exact_multiple() {
+        appender_roundtrip("app_exact", &values(5000), false);
+    }
+
+    #[test]
+    fn appender_empty() {
+        appender_roundtrip::<f64>("app_empty", &[], false);
+    }
+
+    #[test]
+    fn appender_shuffle_deflate_i32() {
+        let v: Vec<i32> = (0..7777).map(|i| i * 31 - 9000).collect();
+        appender_roundtrip("app_shuffle", &v, true);
+    }
+
+    /// Random bytes don't deflate: those chunks must be stored raw with the
+    /// deflate bit set in their filter mask, and still read back.
+    #[test]
+    fn appender_incompressible_chunk() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let v: Vec<u64> = (0..2500)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            })
+            .collect();
+        appender_roundtrip("app_random", &v, false);
+    }
+
+    #[test]
+    fn shuffle_inverts_unshuffle() {
+        let orig: Vec<u8> = (0..8 * 37 + 3).map(|i| (i * 7 % 251) as u8).collect();
+        assert_eq!(unshuffle(&shuffle(&orig, 8), 8), orig);
     }
 
     /// The transpose itself, against a hand-rolled shuffle.

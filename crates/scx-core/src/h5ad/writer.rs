@@ -8,6 +8,7 @@ use hdf5::{Dataset, File, Group, SimpleExtents};
 use ndarray::{s, Array1, Array2};
 
 use super::reader::read_shape;
+use crate::h5_chunk::DeflateAppender;
 use crate::h5_str::{read_str_array_attr, write_str_array_attr, write_str_attr, write_strings};
 use crate::{
     dtype::{DataType, TypedVec},
@@ -41,6 +42,27 @@ struct SparseWriteState {
     shape: (usize, usize),
     /// The stored value type: the first chunk's, so `data` is created then.
     dtype: Option<DataType>,
+    /// Parallel-deflate appenders for (`data`, `indices`) when compressed.
+    sink: Option<CsrSink>,
+}
+
+/// Parallel-deflate appenders for a CSR matrix's `data` and `indices`.
+type CsrSink = (DeflateAppender, DeflateAppender);
+
+/// Appenders for `data` and `indices` in `grp`, or `None` when they aren't
+/// deflate-compressed (normal HDF5 writes then).
+fn csr_sink(grp: &Group) -> Result<Option<CsrSink>> {
+    Ok(DeflateAppender::new(grp.dataset("data")?)
+        .zip(DeflateAppender::new(grp.dataset("indices")?)))
+}
+
+/// Write out the last partial chunks of a compressed CSR matrix.
+fn finish_sink(sink: Option<CsrSink>) -> Result<()> {
+    if let Some((data, indices)) = sink {
+        data.finish()?;
+        indices.finish()?;
+    }
+    Ok(())
 }
 
 /// Streaming writer for the AnnData `.h5ad` format.
@@ -68,6 +90,8 @@ pub struct H5AdWriter {
     x_path: String,
     /// X is being written by column (`csc_matrix`): `x_indptr` is over columns.
     x_csc: bool,
+    /// Parallel-deflate appenders for the streamed matrix when compressed.
+    x_sink: Option<CsrSink>,
 }
 
 impl H5AdWriter {
@@ -142,6 +166,7 @@ impl H5AdWriter {
         init_values(&x_grp, dtype, compression)?;
         // AnnData spec requires indices as i32
         init_resizable_1d::<i32>(&x_grp, "indices", compression)?;
+        let x_sink = csr_sink(&x_grp)?;
 
         Ok(Self {
             file,
@@ -154,6 +179,7 @@ impl H5AdWriter {
             mode: WriterMode::Create,
             x_path: x_slot.to_string(),
             x_csc: false,
+            x_sink,
         })
     }
 
@@ -184,6 +210,7 @@ impl H5AdWriter {
             mode: WriterMode::Append,
             x_path: "X".to_string(),
             x_csc: false,
+            x_sink: None,
         })
     }
 
@@ -363,33 +390,51 @@ pub(crate) fn cast<T: Send>(v: &TypedVec, f: impl Fn(f64) -> T + Sync + Send) ->
     }
 }
 
+/// Append `v` to the growable 1-D `ds`: through its parallel-deflate
+/// appender when it has one, else with a normal HDF5 write.
+fn append_1d<T: hdf5::H5Type + bytemuck::Pod>(
+    ds: &Dataset,
+    sink: Option<&mut DeflateAppender>,
+    v: &[T],
+) -> Result<()> {
+    if let Some(a) = sink {
+        return a.append(v);
+    }
+    let start = ds.shape()[0];
+    ds.resize(start + v.len())?;
+    ds.write_slice(v, s![start..start + v.len()])?;
+    Ok(())
+}
+
 /// Append a chunk's values and column indices to the growable `data` (stored
 /// as `dtype`) and `indices` datasets of the matrix group `grp`.
-fn append_csr(grp: &Group, csr: &SparseMatrixCSR, dtype: DataType) -> Result<()> {
-    let nnz = csr.indices.len();
-    if nnz == 0 {
+fn append_csr(
+    grp: &Group,
+    csr: &SparseMatrixCSR,
+    dtype: DataType,
+    sink: Option<&mut CsrSink>,
+) -> Result<()> {
+    if csr.indices.is_empty() {
         return Ok(());
     }
+    let (ds, is) = match sink {
+        Some((d, i)) => (Some(d), Some(i)),
+        None => (None, None),
+    };
     let data_ds = grp.dataset("data")?;
-    let range = data_ds.shape()[0]..data_ds.shape()[0] + nnz;
-    data_ds.resize(range.end)?;
-    let dst = s![range.clone()];
     match (&csr.data, dtype) {
         // Same type: write straight from the chunk, no copy.
-        (TypedVec::F32(v), DataType::F32) => data_ds.write_slice(v.as_slice(), dst)?,
-        (TypedVec::F64(v), DataType::F64) => data_ds.write_slice(v.as_slice(), dst)?,
-        (TypedVec::I32(v), DataType::I32) => data_ds.write_slice(v.as_slice(), dst)?,
-        (TypedVec::U32(v), DataType::U32) => data_ds.write_slice(v.as_slice(), dst)?,
-        (v, DataType::F32) => data_ds.write_slice(&cast(v, |x| x as f32), dst)?,
-        (v, DataType::F64) => data_ds.write_slice(&cast(v, |x| x), dst)?,
-        (v, DataType::I32) => data_ds.write_slice(&cast(v, |x| x as i32), dst)?,
-        (v, DataType::U32) => data_ds.write_slice(&cast(v, |x| x as u32), dst)?,
+        (TypedVec::F32(v), DataType::F32) => append_1d(&data_ds, ds, v)?,
+        (TypedVec::F64(v), DataType::F64) => append_1d(&data_ds, ds, v)?,
+        (TypedVec::I32(v), DataType::I32) => append_1d(&data_ds, ds, v)?,
+        (TypedVec::U32(v), DataType::U32) => append_1d(&data_ds, ds, v)?,
+        (v, DataType::F32) => append_1d(&data_ds, ds, &cast(v, |x| x as f32))?,
+        (v, DataType::F64) => append_1d(&data_ds, ds, &cast(v, |x| x))?,
+        (v, DataType::I32) => append_1d(&data_ds, ds, &cast(v, |x| x as i32))?,
+        (v, DataType::U32) => append_1d(&data_ds, ds, &cast(v, |x| x as u32))?,
     }
-    let idx_ds = grp.dataset("indices")?;
-    idx_ds.resize(range.end)?;
     let indices = cast_slice(&csr.indices, |x| x as i32);
-    idx_ds.write_slice(&indices, s![range])?;
-    Ok(())
+    append_1d(&grp.dataset("indices")?, is, &indices)
 }
 
 /// Write `indptr` into `grp` as i32, or as i64 when it doesn't fit.
@@ -699,6 +744,7 @@ impl DatasetWriter for H5AdWriter {
             indptr: vec![0u64],
             shape: meta.shape,
             dtype: None,
+            sink: None,
         });
         Ok(())
     }
@@ -714,10 +760,11 @@ impl DatasetWriter for H5AdWriter {
                 let dtype = chunk.data.data.dtype();
                 let ds = init_values(&grp, dtype, self.compression)?;
                 write_encoding_on_ds(&ds, "array", "0.2.0")?;
+                state.sink = csr_sink(&grp)?;
                 *state.dtype.insert(dtype)
             }
         };
-        append_csr(&grp, &chunk.data, dtype)?;
+        append_csr(&grp, &chunk.data, dtype, state.sink.as_mut())?;
         let base = *state.indptr.last().unwrap();
         state
             .indptr
@@ -730,6 +777,7 @@ impl DatasetWriter for H5AdWriter {
             ScxError::InvalidFormat("end_sparse called without begin_sparse".into())
         })?;
         let grp = self.file.group(&state.group_path)?;
+        finish_sink(state.sink)?;
         if state.dtype.is_none() {
             // No chunks: an empty matrix still needs its data dataset.
             let ds = init_values(&grp, DataType::F32, self.compression)?;
@@ -755,7 +803,12 @@ impl DatasetWriter for H5AdWriter {
                 "write_x_chunk after write_x_columns: X is already being written by column".into(),
             ));
         }
-        append_csr(&self.file.group(&self.x_path)?, &chunk.data, self.dtype)?;
+        append_csr(
+            &self.file.group(&self.x_path)?,
+            &chunk.data,
+            self.dtype,
+            self.x_sink.as_mut(),
+        )?;
         let base = *self.x_indptr.last().unwrap();
         self.x_indptr
             .extend(chunk.data.indptr[1..=chunk.nrows].iter().map(|&p| base + p));
@@ -780,7 +833,7 @@ impl DatasetWriter for H5AdWriter {
             write_str_attr(&grp, "encoding-type", "csc_matrix")?;
             self.x_csc = true;
         }
-        append_csr(&grp, cols, self.dtype)?;
+        append_csr(&grp, cols, self.dtype, self.x_sink.as_mut())?;
         let base = *self.x_indptr.last().unwrap();
         self.x_indptr
             .extend(cols.indptr[1..].iter().map(|&p| base + p));
@@ -793,6 +846,7 @@ impl DatasetWriter for H5AdWriter {
                 "finalize must not be called on an append-mode H5AdWriter".into(),
             ));
         }
+        finish_sink(self.x_sink.take())?;
         let x_grp = self.file.group(&self.x_path)?;
         write_indptr(&x_grp, &self.x_indptr, self.compression)?;
         write_shape(&x_grp, (self.n_obs, self.n_vars))?;
