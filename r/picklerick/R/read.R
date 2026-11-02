@@ -34,8 +34,8 @@
 #'   when that package is installed; everything else (AnnData Zarr, 10x,
 #'   H5Seurat, ...) with [PicklerickMatrix()], a seed that reads selected
 #'   cells through scx. Only when `as = "SingleCellExperiment"` (Seurat does
-#'   not consume DelayedArray natively). Layers and obsp are not attached in
-#'   lazy mode; see [PicklerickMatrix()] to wrap a layer.
+#'   not consume DelayedArray natively). Layers are wrapped the same way, so
+#'   the assays match the eager read; obsp is not attached in lazy mode.
 #' @param parse_uns  When `TRUE`, read all of `uns` into `metadata()`
 #'   (SingleCellExperiment) or `@misc` (Seurat). The default `FALSE` stores
 #'   only the source path there, and [uns()] reads keys on demand.
@@ -427,8 +427,28 @@ uns <- function(x, key = NULL, sub_key = NULL) {
 # Lazy SCE assembler: X stays on disk as a DelayedMatrix. An h5ad goes through
 # HDF5Array::H5SparseMatrix (the conventional seed for that layout) when the
 # package is installed; anything else, or an h5ad without HDF5Array, through
-# PicklerickMatrixSeed (R/delayed.R). obsp / layers are skipped in lazy mode.
+# PicklerickMatrixSeed (R/delayed.R). Layers are wrapped the same way, so the
+# assays match the eager path's; obsp is skipped in lazy mode.
 # ---------------------------------------------------------------------------
+
+# X (`layer = NULL`) or a layer as a features x cells DelayedMatrix. A sparse
+# matrix in an h5ad goes through HDF5Array::H5SparseMatrix when installed: it
+# infers CSR vs CSC from the AnnData encoding-type, giving (n_obs, n_vars)
+# for CSR, which t() turns lazily into SCE's (n_vars x n_obs). Anything else
+# (other formats, dense layers, no HDF5Array) goes through PicklerickMatrix.
+.lazy_matrix <- function(raw, path, layer, chunk_size) {
+  if (identical(raw$format, "H5AD") && requireNamespace("HDF5Array", quietly = TRUE)) {
+    group <- if (is.null(layer)) "/X" else paste0("/layers/", layer)
+    m <- tryCatch(HDF5Array::H5SparseMatrix(filepath = path, group = group),
+                  error = function(e) NULL)
+    if (!is.null(m)) {
+      if (nrow(m) == raw$n_obs && ncol(m) == raw$n_vars) m <- t(m)
+      dimnames(m) <- list(raw$var_index, raw$obs_index)
+      return(m)
+    }
+  }
+  PicklerickMatrix(path, layer = layer, chunk_size = chunk_size)
+}
 
 .as_sce_lazy <- function(raw, path, parse_uns = FALSE, chunk_size = 5000L) {
   if (!requireNamespace("SingleCellExperiment", quietly = TRUE)) {
@@ -436,18 +456,9 @@ uns <- function(x, key = NULL, sub_key = NULL) {
          call. = FALSE)
   }
 
-  if (identical(raw$format, "H5AD") && requireNamespace("HDF5Array", quietly = TRUE)) {
-    # H5SparseMatrix infers CSR vs CSC from the AnnData encoding-type
-    # attribute on /X. For h5ad: encoding-type = "csr_matrix" → shape
-    # (n_obs, n_vars). SCE wants (n_vars × n_obs); t() is lazy.
-    x_lazy <- HDF5Array::H5SparseMatrix(filepath = path, group = "/X")
-    if (nrow(x_lazy) == raw$n_obs && ncol(x_lazy) == raw$n_vars) {
-      x_lazy <- t(x_lazy)
-    }
-    dimnames(x_lazy) <- list(raw$var_index, raw$obs_index)
-  } else {
-    x_lazy <- PicklerickMatrix(path, chunk_size = chunk_size)
-  }
+  x_lazy <- .lazy_matrix(raw, path, NULL, chunk_size)
+  layers_lazy <- lapply(names(raw$layers), function(nm) .lazy_matrix(raw, path, nm, chunk_size))
+  names(layers_lazy) <- names(raw$layers)
 
   obs_df <- .cols_to_df(raw$obs_cols, raw$obs_index)
   var_df <- .cols_to_df(raw$var_cols, raw$var_index)
@@ -463,7 +474,7 @@ uns <- function(x, key = NULL, sub_key = NULL) {
   # Same naming rule as the eager path: X is "counts" unless a layer is.
   x_name <- if ("counts" %in% names(raw$layers)) "X" else "counts"
   sce <- SingleCellExperiment::SingleCellExperiment(
-    assays      = stats::setNames(list(x_lazy), x_name),
+    assays      = c(stats::setNames(list(x_lazy), x_name), layers_lazy),
     colData     = S4Vectors::DataFrame(obs_df),
     rowData     = S4Vectors::DataFrame(var_df),
     reducedDims = reduced,
