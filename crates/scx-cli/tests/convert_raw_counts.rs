@@ -4,6 +4,9 @@
 //! `counts` slot and the real counts were dropped. `raw.X` now fills `counts`
 //! and X goes to `data`, for both H5Seurat writers. A `raw` with a different
 //! gene set than X can't share X's assay, so X stays the counts there.
+//!
+//! A gzip h5ad with sorted rows goes into a dgCMatrix h5seurat by copying
+//! X and raw.X as stored; unsorted rows fall back to streaming.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -96,4 +99,49 @@ fn raw_with_other_genes_leaves_x_as_counts() {
         &["--dgcmatrix"],
     );
     assert_eq!(slot(out.path(), "counts"), counts(4, 0.5));
+}
+
+/// `scx convert` at info level; its log, which names copied matrices.
+fn convert_log(input: &Path, out: &Path, extra: &[&str]) -> String {
+    let res = Command::new(env!("CARGO_BIN_EXE_scx"))
+        .env("RUST_LOG", "info")
+        .arg("convert")
+        .arg(input)
+        .arg(out)
+        .args(extra)
+        .output()
+        .expect("failed to run scx convert");
+    // The tracing log goes to stdout; errors to stderr.
+    let log = String::from_utf8_lossy(&res.stdout).into_owned();
+    assert!(
+        res.status.success(),
+        "scx convert failed:\n{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    log
+}
+
+/// gzip, f32, sorted rows: --dgcmatrix copies X and raw.X as stored.
+#[test]
+fn dgcmatrix_copies_gzip_x_and_raw_as_stored() {
+    let out = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let log = convert_log(&fixture("tiny_raw_gzip.h5ad"), out.path(), &["--dgcmatrix"]);
+    assert!(log.contains("copied raw/X into 'counts'"), "{log}");
+    assert!(log.contains("copied X into 'data'"), "{log}");
+    assert_eq!(slot(out.path(), "counts"), counts(5, 1.0));
+    assert_eq!(slot(out.path(), "data"), counts(5, 0.5));
+}
+
+/// Unsorted rows can't be copied (dgCMatrix needs them sorted): they stream.
+#[test]
+fn dgcmatrix_streams_unsorted_rows() {
+    let out = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let log = convert_log(
+        &fixture("tiny_raw_unsorted_gzip.h5ad"),
+        out.path(),
+        &["--dgcmatrix"],
+    );
+    assert!(!log.contains("copied"), "{log}");
+    assert_eq!(slot(out.path(), "counts"), counts(5, 1.0));
+    assert_eq!(slot(out.path(), "data"), counts(5, 0.5));
 }

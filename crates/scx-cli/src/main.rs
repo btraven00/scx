@@ -1150,15 +1150,38 @@ async fn convert_with_reader(
         writer.end_sparse().await?;
     }
 
+    // A local h5ad's sparse X and raw.X can go into a dgCMatrix h5seurat as
+    // stored, compressed chunks and all, when that is the matrix streaming
+    // would write (H5SeuratWriter::copy_csr_from_h5ad checks); else they stream.
+    let src_h5 = Path::new(source_path);
+    let can_copy = source_url.is_none()
+        && src_h5.extension().and_then(|e| e.to_str()) == Some("h5ad")
+        && src_h5.is_file();
+    let copy = |writer: &mut Box<dyn DatasetWriter>, group: &str, slot: &str| {
+        let t = std::time::Instant::now();
+        let copied = can_copy && writer.copy_csr_from_h5ad(src_h5, group, slot)?;
+        if copied {
+            tracing::info!(
+                "copied {group} into '{slot}' as stored in {:.2?}",
+                t.elapsed()
+            );
+        }
+        anyhow::Ok(copied)
+    };
+
     // AnnData's raw.X is the counts of a normalised X: Seurat's `counts` slot.
     if let Some(scx_core::h5seurat::CountsSource::Raw(meta)) = &counts_source {
-        tracing::info!(shape = ?meta.shape, "streaming raw.X into 'counts'");
-        writer.begin_sparse("layers", "counts", meta).await?;
-        let mut stream = reader.raw_stream(meta, chunk_size);
-        while let Some(chunk) = stream.next().await {
-            writer.write_sparse_chunk(&chunk?).await?;
+        if copy(&mut writer, "raw/X", "counts")? {
+            // done
+        } else {
+            tracing::info!(shape = ?meta.shape, "streaming raw.X into 'counts'");
+            writer.begin_sparse("layers", "counts", meta).await?;
+            let mut stream = reader.raw_stream(meta, chunk_size);
+            while let Some(chunk) = stream.next().await {
+                writer.write_sparse_chunk(&chunk?).await?;
+            }
+            writer.end_sparse().await?;
         }
-        writer.end_sparse().await?;
     }
 
     // Stream each obsp matrix.
@@ -1185,7 +1208,7 @@ async fn convert_with_reader(
             "matrix transposed to CSC in {:.2?}",
             t_x.elapsed()
         );
-    } else {
+    } else if !copy(&mut writer, "X", effective_x_slot)? {
         let mut stream = reader.x_stream();
         let mut total_nnz = 0usize;
         let mut n_chunks = 0usize;

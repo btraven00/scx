@@ -73,6 +73,8 @@ pub struct H5SeuratWriter {
     sparse_state: Option<SparseWriteState>,
     /// Whether to emit the extra attributes `SeuratDisk::LoadH5Seurat` validates.
     seuratdisk_compat: bool,
+    /// X was copied as stored (`copy_csr_from_h5ad`), indptr included.
+    x_copied: bool,
 }
 
 impl H5SeuratWriter {
@@ -148,6 +150,7 @@ impl H5SeuratWriter {
             x_indptr: vec![0u64],
             sparse_state: None,
             seuratdisk_compat,
+            x_copied: false,
         })
     }
 
@@ -189,6 +192,91 @@ fn seurat_reduction_key(red_name: &str) -> String {
 // ---------------------------------------------------------------------------
 // Write helpers
 // ---------------------------------------------------------------------------
+
+/// Whether the h5ad CSR group `src` is, as stored, exactly the dgCMatrix the
+/// streaming path would write, so `copy_csr_from_h5ad` may copy it: int32
+/// indices, deflate (optionally after shuffle) so R can decode it, `want` as
+/// the value dtype when given, and every row's indices strictly increasing and
+/// below `n_cols`. dgCMatrix needs them sorted; the streaming path sorts, a
+/// copy cannot. That check decodes `indices` (in parallel), never `data`.
+fn csr_copyable(src: &Group, n_rows: usize, n_cols: usize, want: Option<DataType>) -> Result<bool> {
+    use crate::h5_chunk::{chunk_plan, read_range_parallel};
+    if crate::h5_str::read_str_attr(src, "encoding-type")
+        .ok()
+        .as_deref()
+        != Some("csr_matrix")
+    {
+        return Ok(false);
+    }
+    let (Ok(data), Ok(indices), Ok(indptr)) = (
+        src.dataset("data"),
+        src.dataset("indices"),
+        src.dataset("indptr"),
+    ) else {
+        return Ok(false);
+    };
+    let dt = data.dtype()?;
+    let dtype = if dt.is::<f32>() {
+        DataType::F32
+    } else if dt.is::<f64>() {
+        DataType::F64
+    } else if dt.is::<i32>() {
+        DataType::I32
+    } else if dt.is::<u32>() {
+        DataType::U32
+    } else {
+        return Ok(false);
+    };
+    let ip = indptr.dtype()?;
+    let plan = chunk_plan(&indices);
+    if want.is_some_and(|w| w != dtype)
+        || !indices.dtype()?.is::<i32>()
+        || !(ip.is::<i32>() || ip.is::<i64>())
+        || chunk_plan(&data).is_none()
+        || chunk_plan(&indptr).is_none()
+        || plan.is_none()
+    {
+        return Ok(false);
+    }
+    let plan = plan.unwrap();
+    let indptr: Vec<i64> = indptr.read_raw()?;
+    let nnz = indices.size();
+    if indptr.len() != n_rows + 1
+        || indptr[0] != 0
+        || indptr[n_rows] as usize != nnz
+        || data.size() != nnz
+        || indptr.windows(2).any(|w| w[0] > w[1])
+    {
+        return Ok(false);
+    }
+    // Decode indices in whole-row blocks of about 16M elements.
+    const BLOCK: usize = 1 << 24;
+    let mut r = 0;
+    while r < n_rows {
+        let a = indptr[r] as usize;
+        let mut e = r + 1;
+        while e < n_rows && indptr[e + 1] as usize - a <= BLOCK {
+            e += 1;
+        }
+        let bytes = read_range_parallel(&indices, a, indptr[e] as usize, 4, plan)?;
+        let idx: Vec<i32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect();
+        for w in indptr[r..=e].windows(2) {
+            let row = &idx[w[0] as usize - a..w[1] as usize - a];
+            let in_range = row.first().is_none_or(|&i| i >= 0)
+                && row.last().is_none_or(|&i| (i as usize) < n_cols);
+            if !in_range || row.windows(2).any(|p| p[0] >= p[1]) {
+                return Ok(false);
+            }
+        }
+        r = e;
+    }
+    Ok(true)
+}
 
 fn seurat_init_resizable<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()> {
     file.new_dataset::<T>()
@@ -649,7 +737,9 @@ impl DatasetWriter for H5SeuratWriter {
         // Write indptr (i32 if nnz fits, i64 otherwise)
         let max_ptr = self.x_indptr.iter().copied().max().unwrap_or(0);
         let indptr_path = format!("{layer_path}/indptr");
-        if max_ptr > i32::MAX as u64 {
+        if self.x_copied {
+            // copy_csr_from_h5ad brought the source's indptr along.
+        } else if max_ptr > i32::MAX as u64 {
             let v: Vec<i64> = self.x_indptr.iter().map(|&x| x as i64).collect();
             let ds = self
                 .file
@@ -683,6 +773,42 @@ impl DatasetWriter for H5SeuratWriter {
         );
 
         Ok(())
+    }
+
+    fn copy_csr_from_h5ad(&mut self, src: &Path, group: &str, slot: &str) -> Result<bool> {
+        let Ok(src) = File::open(src).and_then(|f| f.group(group)) else {
+            return Ok(false);
+        };
+        // X's dtype is the one asked for; other slots keep the source's.
+        let is_x = slot == self.layer;
+        let want = is_x.then_some(self.dtype);
+        if !csr_copyable(&src, self.n_obs, self.n_vars, want)? {
+            return Ok(false);
+        }
+        let path = format!("assays/{}/{}", self.assay, slot);
+        let grp = if is_x {
+            // `create` made empty resizable datasets for streaming.
+            let g = self.file.group(&path)?;
+            g.unlink("data")?;
+            g.unlink("indices")?;
+            self.x_copied = true;
+            g
+        } else {
+            self.file.create_group(&path)?
+        };
+        // CSR of cells x genes is, array for array, the CSC of genes x cells
+        // that dgCMatrix stores; only `dims` is written fresh.
+        for name in ["data", "indices", "indptr"] {
+            crate::h5_chunk::copy_chunks(&src.dataset(name)?, &grp, name)?;
+        }
+        if !is_x {
+            let dims = [self.n_vars as i32, self.n_obs as i32];
+            grp.new_attr::<i32>()
+                .shape(2)
+                .create("dims")?
+                .write(&dims)?;
+        }
+        Ok(true)
     }
 }
 

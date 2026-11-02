@@ -19,6 +19,8 @@
                             string with NA, non-ASCII level, duplicate var
                             names, a dense and a CSC layer
     tiny_edge.zarr          the same AnnData as a Zarr v3 store
+    tiny_raw_gzip.h5ad, tiny_raw_unsorted_gzip.h5ad  tiny_raw, gzip and f32
+                            (unsorted: each row's indices reversed)
     tiny_raw.h5ad           normalised CSR X with the counts in raw.X, no
                             counts layer (the common scanpy layout)
     tiny_raw_subset.h5ad    X keeps genes 0-3, raw.X keeps all 5 genes (raw
@@ -184,6 +186,26 @@ def write_raw_h5ad():
     a.write_h5ad(OUT / "tiny_raw_subset.h5ad")
 
 
+def write_raw_gzip_h5ad():
+    """tiny_raw with gzip and float32 X: scx copies X and raw.X into a
+    dgCMatrix h5seurat as stored. The _unsorted twin has each row's indices
+    reversed, so it must fall back to streaming, which sorts them."""
+    def tiny_raw(order):
+        def csr(m):
+            m = sp.csr_matrix(m)
+            for r in range(m.shape[0]):
+                a, b = m.indptr[r], m.indptr[r + 1]
+                m.indices[a:b], m.data[a:b] = m.indices[a:b][order], m.data[a:b][order]
+            m.has_sorted_indices = False  # else scipy may re-sort on write
+            return m
+        a = ad.AnnData(X=csr(COUNTS.astype(np.float32)), obs=pd.DataFrame(index=CELLS), var=pd.DataFrame(index=GENES))
+        a.raw = a
+        a.X = csr(X.astype(np.float32))
+        return a
+    tiny_raw(slice(None)).write_h5ad(OUT / "tiny_raw_gzip.h5ad", compression="gzip")
+    tiny_raw(slice(None, None, -1)).write_h5ad(OUT / "tiny_raw_unsorted_gzip.h5ad", compression="gzip")
+
+
 def write_edge_h5ad():
     obs = pd.DataFrame(index=CELLS)
     obs["stage"] = pd.Categorical(STAGE, categories=STAGE_LEVELS, ordered=True)
@@ -313,6 +335,7 @@ def main():
     write_expected()
     write_h5ad()
     write_raw_h5ad()
+    write_raw_gzip_h5ad()
     write_edge_h5ad()
     write_10x()
     write_mtx()

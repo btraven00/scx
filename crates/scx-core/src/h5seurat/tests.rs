@@ -807,3 +807,71 @@ async fn varm_is_scattered_onto_var_and_filtered_by_assay() {
     assert!(row(2).iter().all(|v| v.is_nan()), "g2 has no loading: NaN");
     assert_eq!(row(3), &[31.0, 32.0]);
 }
+
+/// copy_csr_from_h5ad copies X and raw.X as stored: same values, dtypes,
+/// chunking and filters as the source, no timestamps, and the dims Seurat
+/// reads. It refuses (writing nothing) input it can't copy exactly.
+#[tokio::test]
+async fn dgcmatrix_copies_h5ad_csr_as_stored() {
+    let tiny = |f: &str| {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/tiny")
+            .join(f)
+    };
+    let writer = |path: &std::path::Path, dtype| {
+        H5SeuratWriter::create(path, 6, 5, dtype, Some("RNA"), Some("data"), None, false).unwrap()
+    };
+    let src = tiny("tiny_raw_gzip.h5ad");
+
+    // Refused: unsorted rows, no deflate, an X dtype other than the one asked.
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let mut w = writer(tmp.path(), DataType::F32);
+    assert!(!w
+        .copy_csr_from_h5ad(&tiny("tiny_raw_unsorted_gzip.h5ad"), "X", "data")
+        .unwrap());
+    assert!(!w
+        .copy_csr_from_h5ad(&tiny("tiny_raw.h5ad"), "raw/X", "counts")
+        .unwrap());
+    let mut w64 = writer(
+        tempfile::NamedTempFile::new().unwrap().path(),
+        DataType::F64,
+    );
+    assert!(!w64.copy_csr_from_h5ad(&src, "X", "data").unwrap());
+    drop((w, w64));
+
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let mut w = writer(tmp.path(), DataType::F32);
+    assert!(w.copy_csr_from_h5ad(&src, "raw/X", "counts").unwrap());
+    assert!(w.copy_csr_from_h5ad(&src, "X", "data").unwrap());
+    w.finalize().await.unwrap();
+    drop(w);
+
+    let (s, o) = (File::open(&src).unwrap(), File::open(tmp.path()).unwrap());
+    for (group, slot) in [("raw/X", "counts"), ("X", "data")] {
+        let g = o.group(&format!("assays/RNA/{slot}")).unwrap();
+        assert_eq!(g.attr("dims").unwrap().read_raw::<i32>().unwrap(), [5, 6]);
+        for name in ["data", "indices", "indptr"] {
+            let (a, b) = (
+                s.dataset(&format!("{group}/{name}")).unwrap(),
+                g.dataset(name).unwrap(),
+            );
+            assert_eq!(
+                a.read_raw::<f64>().unwrap(),
+                b.read_raw::<f64>().unwrap(),
+                "{slot}/{name}"
+            );
+            assert_eq!(
+                a.dtype().unwrap().size(),
+                b.dtype().unwrap().size(),
+                "{slot}/{name}"
+            );
+            assert_eq!(
+                (a.chunk(), a.filters()),
+                (b.chunk(), b.filters()),
+                "{slot}/{name}"
+            );
+            let i = b.loc_info().unwrap();
+            assert_eq!((i.ctime, i.mtime), (0, 0), "{slot}/{name} is timestamped");
+        }
+    }
+}

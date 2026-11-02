@@ -326,6 +326,20 @@ pub trait DatasetWriter: Send {
 
     /// Finalize the output (flush, write footers, etc.).
     async fn finalize(&mut self) -> Result<()>;
+
+    /// Copy the CSR group `group` (`X` or `raw/X`) of the h5ad file `src` into matrix slot `slot`
+    /// as stored, compressed chunks included, instead of streaming it. Only
+    /// when that writes exactly the matrix streaming would; otherwise returns
+    /// `false` having written nothing, and the caller streams. The default
+    /// never copies.
+    fn copy_csr_from_h5ad(
+        &mut self,
+        _src: &std::path::Path,
+        _group: &str,
+        _slot: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
