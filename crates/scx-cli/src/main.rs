@@ -671,21 +671,25 @@ async fn run() -> anyhow::Result<()> {
             let input_path = Path::new(&input);
             let output_path = Path::new(&output);
 
-            let source_sha256 = if let Some(hex) = source_sha256_arg {
+            // The source hash is only needed for the provenance records, so it
+            // is computed on its own thread while the conversion runs.
+            let source_sha256: SourceHash = if let Some(hex) = source_sha256_arg {
                 if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
                     anyhow::bail!(
                         "--source-sha256 must be 64 hex characters, got {} chars",
                         hex.len()
                     );
                 }
-                Some(hex.to_ascii_lowercase())
+                std::thread::spawn(move || Ok(Some(hex.to_ascii_lowercase())))
             } else if input_path.is_file() {
-                Some(
-                    provenance::sha256_file(input_path)
-                        .map_err(|e| anyhow::anyhow!("hashing source '{input}': {e}"))?,
-                )
+                let (path, name) = (input_path.to_path_buf(), input.clone());
+                std::thread::spawn(move || {
+                    provenance::sha256_file(&path)
+                        .map(Some)
+                        .map_err(|e| anyhow::anyhow!("hashing source '{name}': {e}"))
+                })
             } else {
-                None
+                std::thread::spawn(|| Ok(None))
             };
 
             // Detect the format (or route a URL to Parquet) and open the reader
@@ -729,16 +733,16 @@ async fn run() -> anyhow::Result<()> {
                 seuratdisk_compat,
                 &input,
                 source_url.as_deref(),
-                source_sha256.clone(),
+                source_sha256,
                 compress,
                 csc_mem,
                 &filter,
             )
             .await;
-            let (n_obs, n_vars) = match converted {
-                Ok(dims) => {
+            let (n_obs, n_vars, source_sha256) = match converted {
+                Ok(converted) => {
                     std::fs::rename(&partial, output_path)?;
-                    dims
+                    converted
                 }
                 Err(e) => {
                     remove_path(&partial)?;
@@ -919,11 +923,11 @@ async fn convert_with_reader(
     seuratdisk_compat: bool,
     source_path: &str,
     source_url: Option<&str>,
-    source_sha256: Option<String>,
+    source_sha256: SourceHash,
     compress: Option<u8>,
     csc_mem: Option<usize>,
     filter: &SlotFilter,
-) -> anyhow::Result<(usize, usize)> {
+) -> anyhow::Result<(usize, usize, Option<String>)> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
 
@@ -968,24 +972,6 @@ async fn convert_with_reader(
     } else {
         UnsTable::default()
     };
-
-    if write_uns {
-        let prov = scx_core::provenance::det_record(
-            source_path,
-            source_url,
-            source_sha256.as_deref(),
-            n_obs,
-            n_vars,
-        );
-        match uns.raw.as_object_mut() {
-            Some(obj) => {
-                obj.insert("scx_provenance".to_string(), prov);
-            }
-            None => {
-                uns.raw = serde_json::json!({ "scx_provenance": prov });
-            }
-        }
-    }
 
     // An excluded slot is not read at all, so a matrix scx cannot read there
     // never blocks the conversion.
@@ -1119,9 +1105,6 @@ async fn convert_with_reader(
     if !obsm.map.is_empty() {
         writer.write_obsm(&obsm).await?;
     }
-    if write_uns {
-        writer.write_uns(&uns).await?;
-    }
     if !varm.map.is_empty() {
         writer.write_varm(&varm).await?;
     }
@@ -1229,6 +1212,30 @@ async fn convert_with_reader(
         );
     }
 
+    // uns goes last: its provenance record needs the source hash, which has
+    // been computing alongside everything above.
+    let source_sha256 = source_sha256
+        .join()
+        .map_err(|_| anyhow::anyhow!("source hashing thread panicked"))??;
+    if write_uns {
+        let prov = scx_core::provenance::det_record(
+            source_path,
+            source_url,
+            source_sha256.as_deref(),
+            n_obs,
+            n_vars,
+        );
+        match uns.raw.as_object_mut() {
+            Some(obj) => {
+                obj.insert("scx_provenance".to_string(), prov);
+            }
+            None => {
+                uns.raw = serde_json::json!({ "scx_provenance": prov });
+            }
+        }
+        writer.write_uns(&uns).await?;
+    }
+
     writer.finalize().await?;
 
     tracing::info!(
@@ -1237,8 +1244,11 @@ async fn convert_with_reader(
         "conversion complete"
     );
 
-    Ok((n_obs, n_vars))
+    Ok((n_obs, n_vars, source_sha256))
 }
+
+/// The source file's SHA-256, being computed on its own thread.
+type SourceHash = std::thread::JoinHandle<anyhow::Result<Option<String>>>;
 
 // ---------------------------------------------------------------------------
 // Inspect
