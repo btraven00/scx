@@ -95,6 +95,16 @@ jobs:
         timeout-minutes: 10
         run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y ${{ matrix.apt_packages }}
 
+      # target/ holds hdf5-metno-sys's build output, which records the HDF5
+      # version it found. A runner image with another system libhdf5 must not
+      # restore it: ubuntu-latest moving to 26.04 (HDF5 1.10 -> 1.14) linked
+      # 1.10 symbol names against 1.14 (undefined H5E_ATOM_g, H5Literate).
+      - name: Cache key
+        id: cache-key
+        run: |
+          hdf5=$(dpkg-query -W -f='${Version}' libhdf5-dev 2>/dev/null || echo none)
+          echo "env=${ImageOS:-self-hosted}-hdf5-${hdf5}" >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo registry
         uses: actions/cache@v6
         with:
@@ -102,8 +112,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-${{ steps.cache-key.outputs.env }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.hdf5 }}-${{ steps.cache-key.outputs.env }}-
 
       - name: clippy
         run: cargo clippy --all-targets ${{ matrix.cargo_flags }} -- -D warnings
