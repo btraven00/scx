@@ -38,6 +38,23 @@ pub(crate) fn create_group(parent: &hdf5::Group, name: &str) -> hdf5::Result<hdf
         .create(name)
 }
 
+/// Test helper: panic if any group in `path` carries a timestamp.
+#[cfg(test)]
+pub(crate) fn assert_untimed(path: impl AsRef<Path>) {
+    fn walk(g: &hdf5::Group, timed: &mut Vec<String>) {
+        let i = g.loc_info().unwrap();
+        if i.ctime != 0 || i.mtime != 0 || i.btime != 0 {
+            timed.push(g.name());
+        }
+        for c in g.groups().unwrap() {
+            walk(&c, timed);
+        }
+    }
+    let mut timed = Vec::new();
+    walk(&File::open(path).unwrap(), &mut timed);
+    assert!(timed.is_empty(), "groups with timestamps: {timed:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Typed reads shared by the HDF5 readers (h5ad, H5Seurat, 10x)
 // ---------------------------------------------------------------------------
@@ -297,6 +314,20 @@ mod tests {
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("scx_h5_{name}_{}.h5", std::process::id()))
+    }
+
+    /// HDF5 creates missing parents of a nested path with the leaf's gcpl,
+    /// so they are untimed too; writers rely on this for `graphs/<name>`.
+    /// A plain `File::create` root is timed, which proves the check bites.
+    #[test]
+    fn nested_create_group_is_untimed() {
+        let path = tmp("nested_untimed");
+        create_group(&create_file(&path).unwrap(), "a/b/c").unwrap();
+        assert_untimed(&path);
+        File::create(&path).unwrap();
+        let caught = std::panic::catch_unwind(|| assert_untimed(&path));
+        let _ = std::fs::remove_file(&path);
+        assert!(caught.is_err(), "assert_untimed missed a timed root");
     }
 
     /// h5py's `compression="lzf"` (anndata's second option) must decode.
