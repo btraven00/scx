@@ -97,7 +97,10 @@ impl<'de> Deserialize<'de> for Qualifier {
 // Schema
 // ---------------------------------------------------------------------------
 
+/// Unknown keys are an error, so a typo (`obps:`) or an option that doesn't
+/// exist can't silently drop a check.
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ValidationSchema {
     /// Minimum/exact obs count, e.g. `">= 1000"` or `8000`.
     pub obs: Option<Qualifier>,
