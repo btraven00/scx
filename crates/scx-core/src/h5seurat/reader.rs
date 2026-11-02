@@ -375,13 +375,21 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
                 continue;
             }
         };
-        // SeuratDisk stores cell.embeddings column-major as (n_components, n_obs).
-        // After HDF5 read in row-major, we get shape (n_components, n_obs) unless
-        // the writer already transposed. Detect and fix.
-        let arr = if arr.shape()[0] != n_obs && arr.shape()[1] == n_obs {
+        // SeuratDisk (and scx) store cell.embeddings column-major from R, so
+        // a row-major read gives (n_components, n_obs); transpose to
+        // (n_obs, n_components) unless it was stored that way already. A
+        // square matrix is taken as (n_components, n_obs), as for
+        // feature.loadings below: it used to come back transposed.
+        let arr = if arr.shape()[1] == n_obs {
             arr.t().as_standard_layout().into_owned()
-        } else {
+        } else if arr.shape()[0] == n_obs {
             arr
+        } else {
+            tracing::warn!(
+                "skipping reduction '{red_name}': embeddings are {:?} but there are {n_obs} cells",
+                arr.shape()
+            );
+            continue;
         };
         // Map reduction name to AnnData obsm key convention
         let obsm_key = format!("X_{}", red_name.to_lowercase());
