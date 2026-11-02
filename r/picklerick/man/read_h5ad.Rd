@@ -34,8 +34,8 @@ count matrix. An \code{.h5ad} is wrapped with \code{HDF5Array::H5SparseMatrix}
 when that package is installed; everything else (AnnData Zarr, 10x,
 H5Seurat, ...) with \code{\link[=PicklerickMatrix]{PicklerickMatrix()}}, a seed that reads selected
 cells through scx. Only when \code{as = "SingleCellExperiment"} (Seurat does
-not consume DelayedArray natively). Layers and obsp are not attached in
-lazy mode; see \code{\link[=PicklerickMatrix]{PicklerickMatrix()}} to wrap a layer.}
+not consume DelayedArray natively). Layers are wrapped the same way, so
+the assays match the eager read; obsp is not attached in lazy mode.}
 
 \item{parse_uns}{When \code{TRUE}, read all of \code{uns} into \code{metadata()}
 (SingleCellExperiment) or \verb{@misc} (Seurat). The default \code{FALSE} stores

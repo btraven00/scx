@@ -63,8 +63,12 @@ test_that("PicklerickMatrix drops into a SingleCellExperiment and survives seria
 test_that("read_zarr(lazy = TRUE) wraps X in a PicklerickMatrix", {
   path <- delayed_fixture("small_v3.zarr")
   sce <- read_zarr(path, lazy = TRUE)
-  # The fixture has a `counts` layer, so X is the `X` assay, as when eager.
-  expect_identical(SummarizedExperiment::assayNames(sce), "X")
+  # The fixture has a `counts` layer, so X is the `X` assay and the layer is
+  # `counts`, as when eager; both stay on disk.
+  expect_identical(SummarizedExperiment::assayNames(sce),
+                   SummarizedExperiment::assayNames(read_zarr(path)))
+  expect_identical(SummarizedExperiment::assayNames(sce), c("X", "counts"))
+  expect_s4_class(SummarizedExperiment::assay(sce, "counts"), "DelayedMatrix")
   x <- SummarizedExperiment::assay(sce, "X")
   expect_s4_class(x, "DelayedMatrix")
   expect_s4_class(DelayedArray::seed(x), "PicklerickMatrixSeed")

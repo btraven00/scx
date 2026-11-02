@@ -90,3 +90,22 @@ test_that("X is named 'X' when a layer is already called 'counts'", {
   # A file without a counts layer keeps the conventional name.
   expect_identical(SummarizedExperiment::assayNames(read_h5ad(tiny("tiny_10x.h5"))), "counts")
 })
+
+# Regression: lazy mode attached only X, so with a `counts` layer (X is then
+# the `X` assay) `counts(sce)` worked eager but failed lazy.
+test_that("read_h5ad(lazy = TRUE) attaches layers, so counts() works as when eager", {
+  skip_if_not_installed("SingleCellExperiment")
+  path <- tiny("tiny.h5ad")
+  lazy <- read_h5ad(path, lazy = TRUE)
+  eager <- read_h5ad(path)
+  expect_identical(SummarizedExperiment::assayNames(lazy),
+                   SummarizedExperiment::assayNames(eager))
+  cl <- SingleCellExperiment::counts(lazy)
+  expect_true(methods::is(cl, "DelayedMatrix"))
+  expect_equal(as.matrix(cl), as.matrix(SingleCellExperiment::counts(eager)))
+  # The filter from the vignette, without realising the matrix.
+  keep <- MatrixGenerics::rowSums(cl > 0) > 0
+  expect_identical(keep, MatrixGenerics::rowSums(SingleCellExperiment::counts(eager) > 0) > 0)
+  expect_true(methods::is(SingleCellExperiment::counts(lazy[keep, ]), "DelayedMatrix"))
+})
+
