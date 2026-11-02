@@ -16,6 +16,9 @@
 #              project library, when rv is installed).
 #   DOCS_VENV  Python venv made from site/requirements.txt
 #              (default: .venv-docs).
+#   CARGO_TARGET_DIR  used by all three builds; the R package's
+#              ./rust/target is linked to it when that doesn't exist yet
+#              (docs.yml keeps it between runs).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -34,7 +37,7 @@ fi
 
 echo "==> scx CLI"
 cargo build --release -p scx-cli
-export PATH="$root/target/release:$PATH"
+export PATH="${CARGO_TARGET_DIR:-$root/target}/release:$PATH"
 
 echo "==> R package"
 # Build against the checked-out scx-core rather than the crates.io release
@@ -43,6 +46,12 @@ cargo_cfg=r/picklerick/.cargo/config.toml
 if [ ! -f "$cargo_cfg" ]; then
   mkdir -p "$(dirname "$cargo_cfg")"
   printf '[patch.crates-io]\nscx-core = { path = "%s/crates/scx-core" }\n' "$root" > "$cargo_cfg"
+fi
+# src/Makevars builds into ./rust/target; share CARGO_TARGET_DIR instead.
+r_target=r/picklerick/src/rust/target
+if [ -n "${CARGO_TARGET_DIR:-}" ] && [ ! -e "$r_target" ]; then
+  mkdir -p "$CARGO_TARGET_DIR"
+  ln -s "$CARGO_TARGET_DIR" "$r_target"
 fi
 "$r_bin/R" CMD INSTALL --no-test-load r/picklerick
 

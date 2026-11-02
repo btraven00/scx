@@ -50,12 +50,28 @@ jobs:
       # sccache can't cache incremental builds (the workspace crates in dev
       # profiles, e.g. clippy and test).
       CARGO_INCREMENTAL: "0"
+      # The docs run examples on tiny fixtures, so the three builds (CLI, R
+      # package, Python package) optimise for build time, not speed: no LTO,
+      # parallel codegen. That is most of their link time, which sccache
+      # can't cache (an scx-core change: CLI 110 s -> 16 s). Overrides the
+      # release profile for this job only; shipped builds keep LTO.
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      # One build dir for all three, kept between runs (the checkout is
+      # cleaned), so unchanged crates and HDF5's CMake build are reused.
+      CARGO_TARGET_DIR: /opt/cache/runner/scx/target-docs
       # Per R build: packages compiled against one R don't load in another,
       # and rv keys its cache by R version only. Change with /opt/R/<version>.
       RV_CACHE_DIR: /opt/cache/runner/scx/rv/posit-4.5.3
       PIP_CACHE_DIR: /opt/cache/runner/scx/pip
     steps:
       - uses: actions/checkout@v7
+      # ponytail: cleared wholesale past 40 GB; prune by age if that recurs often.
+      - name: Cap the kept build dir
+        run: |
+          if [ -d "$CARGO_TARGET_DIR" ] && [ "$(du -s --block-size=1G "$CARGO_TARGET_DIR" | cut -f1)" -gt 40 ]; then
+            rm -rf "$CARGO_TARGET_DIR"
+          fi
       # Ahead of the host's /usr/local R, which has no graphics devices for
       # knitr to render the R chunks with.
       - run: echo "/opt/R/4.5.3/bin" >> "$GITHUB_PATH"
