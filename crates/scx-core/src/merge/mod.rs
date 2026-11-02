@@ -157,6 +157,9 @@ pub struct SlotPatchManager {
     pub patches: Vec<PatchSpec>,
     pub tags: HashMap<String, String>,
     pub chunk_size: usize,
+    /// Merge into a file whose groups carry HDF5 timestamps (h5py/anndata
+    /// output), accepting that the result differs on every run.
+    pub allow_nonreproducible: bool,
 }
 
 /// Obs/var axis metadata loaded from the base file before patching.
@@ -175,6 +178,7 @@ impl SlotPatchManager {
             patches: Vec::new(),
             tags: HashMap::new(),
             chunk_size: 5000,
+            allow_nonreproducible: false,
         }
     }
 
@@ -194,7 +198,31 @@ impl SlotPatchManager {
         }
     }
 
+    /// Patching updates the timestamps of the groups it touches, and HDF5 can't
+    /// strip them, so a timed file can't give a byte-reproducible merge: fail
+    /// unless the caller opted in.
+    fn check_untimed(&self, path: &Path) -> Result<()> {
+        if self.allow_nonreproducible {
+            return Ok(());
+        }
+        let file = hdf5::File::open(path)?;
+        let timed = crate::h5::timed_groups(&file)?;
+        if timed.is_empty() {
+            return Ok(());
+        }
+        let shown = timed.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        let more = if timed.len() > 3 { ", ..." } else { "" };
+        Err(ScxError::InvalidFormat(format!(
+            "{p}: HDF5 groups carry timestamps ({shown}{more}), as h5py/anndata writes them. \
+             HDF5 cannot remove them and merge updates them, so the merged file would \
+             differ on every run. Rewrite it without timestamps first \
+             (`scx convert {p} <new>.h5ad`), or pass --allow-nonreproducible.",
+            p = path.display()
+        )))
+    }
+
     async fn run_create(&mut self, base: &Path, output: &Path) -> Result<()> {
+        self.check_untimed(base)?;
         let chunk_size = self.chunk_size;
         let base_sha256 = crate::provenance::sha256_file(base)?;
         let base_meta = read_base_meta(base).await?;
@@ -232,6 +260,7 @@ impl SlotPatchManager {
     }
 
     async fn run_append(&mut self, into: &Path) -> Result<()> {
+        self.check_untimed(into)?;
         let chunk_size = self.chunk_size;
 
         // Read existing provenance + obs/var index before opening R/W.
@@ -780,5 +809,41 @@ mod tests {
         assert_eq!(SlotSelector::Layer("x".into()).hdf5_path(), "layers/x");
         assert_eq!(SlotSelector::ObsColumn("c".into()).hdf5_path(), "obs/c");
         assert_eq!(SlotSelector::Obsm("X_pca".into()).hdf5_path(), "obsm/X_pca");
+    }
+}
+
+#[cfg(test)]
+mod timed_base_tests {
+    use super::*;
+    use crate::api::write::{H5AdBuilder, H5AdOptions};
+
+    /// A base with a timestamped group (as h5py writes every group) fails with
+    /// an explanation, unless the caller opts in.
+    #[test]
+    fn merge_rejects_timed_base_unless_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.h5ad");
+        let mut b = H5AdBuilder::new(&base, 2, 2, &H5AdOptions::default()).unwrap();
+        b.push_x_csr_chunk(0, [0, 0, 0], [], []).unwrap();
+        b.finalize().unwrap();
+        hdf5::File::open_rw(&base)
+            .unwrap()
+            .create_group("timed")
+            .unwrap();
+
+        let merge = |allow: bool| {
+            let mut m = SlotPatchManager::new(MergeMode::Create {
+                base: base.clone(),
+                output: dir.path().join(format!("out_{allow}.h5ad")),
+            });
+            m.allow_nonreproducible = allow;
+            futures::executor::block_on(m.run())
+        };
+        let msg = merge(false).unwrap_err().to_string();
+        assert!(
+            msg.contains("/timed") && msg.contains("--allow-nonreproducible"),
+            "{msg}"
+        );
+        merge(true).unwrap();
     }
 }

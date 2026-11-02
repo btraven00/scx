@@ -58,6 +58,8 @@ pub struct MergeArgs {
     pub config: Option<String>,
     /// Streaming chunk size.
     pub chunk_size: usize,
+    /// Accept a timestamped (non-reproducible) base.
+    pub allow_nonreproducible: bool,
 }
 
 pub async fn run_merge(args: MergeArgs) -> anyhow::Result<()> {
@@ -66,6 +68,7 @@ pub async fn run_merge(args: MergeArgs) -> anyhow::Result<()> {
     } else {
         build_from_flags(&args)?
     };
+    mgr.allow_nonreproducible = args.allow_nonreproducible;
 
     mgr.run().await.map_err(|e| anyhow::anyhow!("{e}"))?;
     eprintln!("merge complete");

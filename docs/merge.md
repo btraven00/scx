@@ -62,6 +62,7 @@ The target must have been created by `scx merge` (it must contain
 | `--tag <key=value>` | repeatable | Free-form tags written into provenance |
 | `--config <yaml>` | — | YAML config file (overrides all other flags) |
 | `--chunk-size` | `5000` | Rows per streaming chunk for layer patches |
+| `--allow-nonreproducible` | off | Merge into a file with HDF5 group timestamps (see below); also applies with `--config` |
 
 ---
 
@@ -203,6 +204,13 @@ new source.
 The time each slot was added goes in the `<output>.prov.json` sidecar,
 not in the file, so the same merge gives identical bytes. See
 [provenance.md](provenance.md).
+
+h5py, and so anndata, writes every HDF5 group with a timestamp. HDF5 cannot
+remove one, and merge updates the timestamps of the groups it patches, so
+merging into such a file can never give the same bytes twice. Merge refuses
+such a base (or `--into` target) and names the timed groups. Rewrite it
+without timestamps first with `scx convert base.h5ad base.scx.h5ad`, or pass
+`--allow-nonreproducible` to merge anyway.
 
 ---
 

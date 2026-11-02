@@ -406,6 +406,11 @@ enum Cli {
         /// Cells per streaming chunk
         #[arg(long, default_value = "5000")]
         chunk_size: usize,
+
+        /// Merge into an h5py/anndata-written file even though its HDF5 group
+        /// timestamps make the output differ on every run
+        #[arg(long)]
+        allow_nonreproducible: bool,
     },
 }
 
@@ -835,6 +840,7 @@ async fn run() -> anyhow::Result<()> {
             tags,
             config,
             chunk_size,
+            allow_nonreproducible,
         } => {
             cmd_merge::run_merge(cmd_merge::MergeArgs {
                 base,
@@ -845,6 +851,7 @@ async fn run() -> anyhow::Result<()> {
                 tags,
                 config,
                 chunk_size,
+                allow_nonreproducible,
             })
             .await?;
         }
