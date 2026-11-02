@@ -21,13 +21,13 @@ jobs:
   #
   # Runs on the self-hosted omnibenchmark machine (set up by the lab's
   # github_runner Ansible play), with the cargo and rustup caches outside the
-  # checkout, which is cleaned on every run. Skipped for pull requests from
-  # forks, which shouldn't run code on a shared lab machine; the macOS job
-  # below still builds the vendored path for them.
+  # checkout, which is cleaned on every run. Runs on merges to main only, not
+  # on pull requests: the single self-hosted runner was their bottleneck, and
+  # the macOS job below already builds the vendored path for every PR.
   test-vendored:
     name: Test & Lint (omnibenchmark, vendored)
     runs-on: self-hosted
-    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+    if: github.event_name != 'pull_request'
     env:
       CARGO_HOME: /opt/cache/runner/scx/cargo
       RUSTUP_HOME: /opt/cache/runner/scx/rustup

@@ -1,22 +1,14 @@
 name: Docs
 
 # Renders the docs site with scripts/render_docs.sh, which runs every code
-# chunk, so a broken example fails this check. Pushes to main also deploy it
-# to GitHub Pages (Settings -> Pages -> Source must be "GitHub Actions").
+# chunk, so a broken example fails this check, and deploys it to GitHub Pages
+# (Settings -> Pages -> Source must be "GitHub Actions").
+#
+# Runs on merges to main (and by hand), not on pull requests: it needs the
+# single self-hosted runner, which pull requests were queueing behind. Run it
+# on a branch with workflow_dispatch to check the docs before merging.
 
 on:
-  pull_request:
-    paths:
-      - "site/**"
-      - "r/picklerick/**"
-      - "python/picklerick/**"
-      - "crates/**"
-      - "tests/fixtures/**"
-      - "Cargo.lock"
-      - "rproject.toml"
-      - "rv.lock"
-      - "scripts/render_docs.sh"
-      - ".github/workflows/docs.yml"
   push:
     branches: [main]
   workflow_dispatch:
@@ -26,7 +18,7 @@ permissions:
 
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   # Runs on the self-hosted omnibenchmark machine, set up by the lab's
@@ -37,7 +29,6 @@ jobs:
   # machine.
   build:
     runs-on: self-hosted
-    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
     env:
       CARGO_HOME: /opt/cache/runner/scx/cargo
       RUSTUP_HOME: /opt/cache/runner/scx/rustup
