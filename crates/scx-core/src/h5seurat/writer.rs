@@ -11,8 +11,8 @@ use crate::{
     dtype::DataType,
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta, UnsTable,
-        VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
+        UnsTable, VarTable, Varm,
     },
     stream::DatasetWriter,
 };
@@ -201,6 +201,27 @@ fn seurat_init_resizable<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()>
     Ok(())
 }
 
+/// obsm/varm entries as `(reduction name, matrix)`: `X_` stripped, sorted
+/// (HashMap order would change the file bytes). Two keys naming the same
+/// reduction (`X_pca` and `pca`) are an error, not an HDF5 "already exists".
+pub(crate) fn reductions<'a>(
+    map: &'a std::collections::HashMap<String, DenseMatrix>,
+    slot: &str,
+) -> Result<Vec<(&'a str, &'a DenseMatrix)>> {
+    let mut out: Vec<_> = map
+        .iter()
+        .map(|(k, m)| (k.strip_prefix("X_").unwrap_or(k), m))
+        .collect();
+    out.sort_by_key(|(name, _)| *name);
+    if let Some(w) = out.windows(2).find(|w| w[0].0 == w[1].0) {
+        let name = w[0].0;
+        return Err(ScxError::InvalidFormat(format!(
+            "{slot} keys `{name}` and `X_{name}` both map to H5Seurat reduction `{name}`; rename one"
+        )));
+    }
+    Ok(out)
+}
+
 /// Write a SeuratDisk data.frame group (`meta.data`, `meta.features`): its
 /// columns plus the `colnames`, `logicals` and (for meta.data) `_class`
 /// attributes.
@@ -375,11 +396,7 @@ impl DatasetWriter for H5SeuratWriter {
         if obsm.map.is_empty() {
             return Ok(());
         }
-        // Sorted: HashMap order changes between runs, and so would the file bytes.
-        let mut entries: Vec<_> = obsm.map.iter().collect();
-        entries.sort_by_key(|(k, _)| *k);
-        for (key, mat) in entries {
-            let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
+        for (red_name, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
             let red_grp = crate::h5::create_group(&reds_grp, red_name)?;
             self.attr_reduction(&red_grp, red_name)?;
 
@@ -517,11 +534,7 @@ impl DatasetWriter for H5SeuratWriter {
             Ok(g) => g,
             Err(_) => crate::h5::create_group(&self.file, "reductions")?,
         };
-        // Sorted: HashMap order changes between runs, and so would the file bytes.
-        let mut entries: Vec<_> = varm.map.iter().collect();
-        entries.sort_by_key(|(k, _)| *k);
-        for (key, mat) in entries {
-            let red_name = key.strip_prefix("X_").unwrap_or(key.as_str());
+        for (red_name, mat) in crate::h5seurat::reductions(&varm.map, "varm")? {
             // reduction sub-group may already exist from write_obsm
             let red_grp = match reds_grp.group(red_name) {
                 Ok(g) => g,
