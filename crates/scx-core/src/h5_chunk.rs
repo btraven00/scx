@@ -466,6 +466,10 @@ fn shuffle(src: &[u8], elem_size: usize) -> Vec<u8> {
 ///
 /// Like HDF5's optional deflate filter, a chunk that doesn't shrink is stored
 /// raw with the deflate bit set in its filter mask.
+///
+/// `H5Dwrite_chunk` bypasses HDF5's chunk cache, so the dataset must be
+/// written only through this appender: a `write_slice` to it as well could
+/// leave a cached chunk that later overwrites one written here.
 pub struct DeflateAppender {
     ds: Dataset,
     elem_size: usize,
