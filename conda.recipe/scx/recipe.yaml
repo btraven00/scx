@@ -33,10 +33,12 @@ requirements:
     - ${{ compiler('rust') }}
     - if: unix
       then: pkg-config
+  # Same HDF5 as picklerick-python (and conda-forge's current global pin), so
+  # the two packages can be installed into one environment.
   host:
-    - hdf5 1.12.*
+    - hdf5 1.14.*
   run:
-    - hdf5 1.12.*
+    - hdf5 1.14.*
 
 tests:
   - script:
