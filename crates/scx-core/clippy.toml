@@ -1,0 +1,6 @@
+# HDF5 timestamps groups by default, which breaks byte-reproducible output.
+# Writers go through the untimed helpers in src/h5.rs instead.
+disallowed-methods = [
+  { path = "hdf5_metno::Group::create_group", reason = "timestamps the group; use crate::h5::create_group" },
+  { path = "hdf5_metno::File::create", reason = "timestamps the root group; use crate::h5::create_file" },
+]

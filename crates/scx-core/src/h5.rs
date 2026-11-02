@@ -21,7 +21,8 @@ use crate::{
 // HDF5 stamps each group's object header with its creation time by default,
 // so converting the same input twice gives different bytes. hdf5-metno
 // already turns this off for datasets; these two cover the root group and
-// every other group. Writers must create files and groups through them.
+// every other group. Writers must create files and groups through them;
+// clippy.toml bans the timed `File::create` / `Group::create_group`.
 
 /// `File::create` with no timestamp on the root group.
 pub(crate) fn create_file(path: impl AsRef<Path>) -> hdf5::Result<File> {
