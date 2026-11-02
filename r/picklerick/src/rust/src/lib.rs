@@ -723,12 +723,19 @@ fn scx_seed_open_inner(input: &str, layer: &str) -> Result<Robj> {
         let (n_obs, n_vars) = r.shape();
         let obs = r.obs().await?;
         let var = r.var().await?;
+        // h5ad and Zarr read only the requested rows (their own
+        // x_stream_rows); other readers stream the whole matrix per call.
+        let row_ranges = matches!(
+            detect::detect(Path::new(input)),
+            Some(Format::H5Ad | Format::ZarrAd)
+        );
         Ok(list!(
             n_obs = n_obs as i32,
             n_vars = n_vars as i32,
             obs_index = obs.index,
             var_index = var.index,
-            dtype = r.dtype().to_string()
+            dtype = r.dtype().to_string(),
+            row_ranges = row_ranges
         )
         .into_robj())
     })
