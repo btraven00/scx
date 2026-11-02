@@ -783,6 +783,10 @@ impl DatasetReader for H5AdReader {
         self.x_stream_rows(vec![0..self.n_obs])
     }
 
+    fn reads_row_ranges(&self) -> bool {
+        self.col_ptr.is_none()
+    }
+
     fn x_stream_rows(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
         if self.col_ptr.is_some() {
             return error_stream(GENE_MAJOR_X.into());

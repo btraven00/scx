@@ -9,7 +9,7 @@ use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::h5_str::read_strings;
 use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, VarTable};
-use crate::stream::row_chunks;
+use crate::stream::row_range_chunks;
 use crate::stream::ChunkStream;
 use crate::stream::DatasetReader;
 
@@ -332,6 +332,15 @@ impl DatasetReader for TenxH5Reader {
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
+        let n_obs = self.n_obs;
+        self.x_stream_rows(vec![0..n_obs])
+    }
+
+    fn reads_row_ranges(&self) -> bool {
+        true
+    }
+
+    fn x_stream_rows(&mut self, ranges: Vec<std::ops::Range<usize>>) -> ChunkStream<'_> {
         let path = self.path.clone();
         let indptr = &self.indptr;
         let n_obs = self.n_obs;
@@ -339,7 +348,7 @@ impl DatasetReader for TenxH5Reader {
         let chunk_size = self.chunk_size;
         let dtype = self.dtype;
 
-        row_chunks(n_obs, chunk_size, move |rows| {
+        row_range_chunks(n_obs, ranges, chunk_size, move |rows| {
             let (row_start, row_end) = (rows.start, rows.end);
             read_tenx_chunk(&path, indptr, row_start, row_end, n_vars, dtype)
         })

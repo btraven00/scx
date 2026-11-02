@@ -864,6 +864,10 @@ impl DatasetReader for ZarrAdReader {
         self.x_stream_rows(vec![0..self.n_obs])
     }
 
+    fn reads_row_ranges(&self) -> bool {
+        true
+    }
+
     fn x_stream_rows(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
         let store = self.store.clone();
         let base = self.x_path.clone();

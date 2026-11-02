@@ -665,6 +665,13 @@ impl DatasetReader for BpcellsDatasetReader {
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
+        let n_obs = self.n_obs;
+        self.x_stream_rows(vec![0..n_obs])
+    }
+
+    /// Slices the matrix decoded at open; `reads_row_ranges` stays false, as
+    /// opening decodes all of it.
+    fn x_stream_rows(&mut self, ranges: Vec<std::ops::Range<usize>>) -> ChunkStream<'_> {
         if self.metadata_only {
             return Box::pin(stream::once(async {
                 Err(crate::error::ScxError::InvalidFormat(
@@ -672,7 +679,7 @@ impl DatasetReader for BpcellsDatasetReader {
                 ))
             }));
         }
-        crate::stream::row_chunks(self.n_obs, self.chunk_size, move |rows| {
+        crate::stream::row_range_chunks(self.n_obs, ranges, self.chunk_size, move |rows| {
             self.read_chunk(rows.start, rows.end)
         })
     }
