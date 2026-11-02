@@ -12,8 +12,16 @@
 //! or found. Cargo forwards those to direct dependents as `DEP_HDF5_VERSION_*`,
 //! so the presence of `DEP_HDF5_VERSION_2_0_0` tells us the linked HDF5 is >= 2.0
 //! and exports `H5Dread_chunk2`. Gate the chunk read on that, not on a feature.
+//!
+//! Likewise `hdf5_1_14` (HDF5 >= 1.14) gates `Dataset::chunks_visit`
+//! (`H5Dchunk_iter`), which lists every chunk's location in one pass.
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hdf5_2_0)");
+    println!("cargo::rustc-check-cfg=cfg(hdf5_1_14)");
+    println!("cargo::rerun-if-env-changed=DEP_HDF5_VERSION_1_14_0");
+    if std::env::var_os("DEP_HDF5_VERSION_1_14_0").is_some() {
+        println!("cargo::rustc-cfg=hdf5_1_14");
+    }
     println!("cargo::rerun-if-env-changed=DEP_HDF5_VERSION_2_0_0");
     if std::env::var_os("DEP_HDF5_VERSION_2_0_0").is_some() {
         println!("cargo::rustc-cfg=hdf5_2_0");

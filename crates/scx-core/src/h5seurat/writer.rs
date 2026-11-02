@@ -193,29 +193,28 @@ fn seurat_reduction_key(red_name: &str) -> String {
 // Write helpers
 // ---------------------------------------------------------------------------
 
-/// Whether the h5ad CSR group `src` is, as stored, exactly the dgCMatrix the
-/// streaming path would write, so `copy_csr_from_h5ad` may copy it: int32
-/// indices, chunked with no filter or deflate (optionally after shuffle), so
-/// R can decode it, `want` as
-/// the value dtype when given, and every row's indices strictly increasing and
-/// below `n_cols`. dgCMatrix needs them sorted; the streaming path sorts, a
-/// copy cannot. That check reads `indices` (inflating in parallel), never
-/// `data`.
-fn csr_copyable(src: &Group, n_rows: usize, n_cols: usize, want: Option<DataType>) -> Result<bool> {
-    use crate::h5_chunk::{chunk_plan, read_range_parallel};
+/// `indptr` of the h5ad CSR group `src` when its arrays can be copied into a
+/// dgCMatrix slot as stored (`copy_csr_from_h5ad`): int32 indices, chunks R
+/// can decode (unfiltered, as anndata writes by default, or deflate,
+/// optionally after shuffle), `want` as the value dtype when given, no
+/// userblock, and a well-formed indptr. `None` otherwise. Whether each row is
+/// sorted is checked during the copy, by [`RowCheck`].
+fn csr_copy_indptr(src: &Group, n_rows: usize, want: Option<DataType>) -> Result<Option<Vec<i64>>> {
+    use crate::h5_chunk::chunk_plan;
     if crate::h5_str::read_str_attr(src, "encoding-type")
         .ok()
         .as_deref()
         != Some("csr_matrix")
+        || src.file()?.fcpl()?.userblock() != 0
     {
-        return Ok(false);
+        return Ok(None);
     }
     let (Ok(data), Ok(indices), Ok(indptr)) = (
         src.dataset("data"),
         src.dataset("indices"),
         src.dataset("indptr"),
     ) else {
-        return Ok(false);
+        return Ok(None);
     };
     let dt = data.dtype()?;
     let dtype = if dt.is::<f32>() {
@@ -227,9 +226,8 @@ fn csr_copyable(src: &Group, n_rows: usize, n_cols: usize, want: Option<DataType
     } else if dt.is::<u32>() {
         DataType::U32
     } else {
-        return Ok(false);
+        return Ok(None);
     };
-    // Stored chunks R can decode: unfiltered (anndata's default) or deflate.
     let copyable = |d: &hdf5::Dataset| {
         d.chunk().is_some_and(|c| c.len() == 1)
             && (d.filters().is_empty() || chunk_plan(d).is_some())
@@ -240,49 +238,56 @@ fn csr_copyable(src: &Group, n_rows: usize, n_cols: usize, want: Option<DataType
         || !(ip.is::<i32>() || ip.is::<i64>())
         || ![&data, &indices, &indptr].into_iter().all(copyable)
     {
-        return Ok(false);
+        return Ok(None);
     }
-    let plan = chunk_plan(&indices);
     let indptr: Vec<i64> = indptr.read_raw()?;
     let nnz = indices.size();
-    if indptr.len() != n_rows + 1
-        || indptr[0] != 0
-        || indptr[n_rows] as usize != nnz
-        || data.size() != nnz
-        || indptr.windows(2).any(|w| w[0] > w[1])
-    {
-        return Ok(false);
-    }
-    // Decode indices in whole-row blocks of about 16M elements.
-    const BLOCK: usize = 1 << 24;
-    let mut r = 0;
-    while r < n_rows {
-        let a = indptr[r] as usize;
-        let mut e = r + 1;
-        while e < n_rows && indptr[e + 1] as usize - a <= BLOCK {
-            e += 1;
+    let ok = indptr.len() == n_rows + 1
+        && indptr[0] == 0
+        && indptr[n_rows] as usize == nnz
+        && data.size() == nnz
+        && indptr.windows(2).all(|w| w[0] <= w[1]);
+    Ok(ok.then_some(indptr))
+}
+
+/// Checks, a chunk of `indices` at a time, that every row's column indices
+/// are strictly increasing and below `n_cols`. dgCMatrix requires it, and
+/// the streaming path sorts rows, so a copy is only equivalent when it holds.
+struct RowCheck<'a> {
+    indptr: &'a [i64],
+    n_cols: i64,
+    row: usize,
+    pos: i64,
+    prev: i64,
+}
+
+impl<'a> RowCheck<'a> {
+    fn new(indptr: &'a [i64], n_cols: usize) -> Self {
+        Self {
+            indptr,
+            n_cols: n_cols as i64,
+            row: 0,
+            pos: 0,
+            prev: -1,
         }
-        let b = indptr[e] as usize;
-        let idx: Vec<i32> = match plan {
-            Some(plan) => read_range_parallel(&indices, a, b, 4, plan)?
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| i32::from_le_bytes(*c))
-                .collect(),
-            None => indices.read_slice_1d::<i32, _>(a..b)?.to_vec(),
-        };
-        for w in indptr[r..=e].windows(2) {
-            let row = &idx[w[0] as usize - a..w[1] as usize - a];
-            let in_range = row.first().is_none_or(|&i| i >= 0)
-                && row.last().is_none_or(|&i| (i as usize) < n_cols);
-            if !in_range || row.windows(2).any(|p| p[0] >= p[1]) {
-                return Ok(false);
+    }
+
+    /// Feed the next indices, as little-endian int32 bytes.
+    fn feed(&mut self, bytes: &[u8]) -> bool {
+        for c in bytes.as_chunks::<4>().0 {
+            let i = i32::from_le_bytes(*c) as i64;
+            while self.pos == self.indptr[self.row + 1] {
+                self.row += 1;
+                self.prev = -1;
             }
+            if i <= self.prev || i >= self.n_cols {
+                return false;
+            }
+            self.prev = i;
+            self.pos += 1;
         }
-        r = e;
+        true
     }
-    Ok(true)
 }
 
 fn seurat_init_resizable<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()> {
@@ -783,32 +788,55 @@ impl DatasetWriter for H5SeuratWriter {
     }
 
     fn copy_csr_from_h5ad(&mut self, src: &Path, group: &str, slot: &str) -> Result<bool> {
+        use crate::h5_chunk::copy_chunks;
         let Ok(src) = File::open(src).and_then(|f| f.group(group)) else {
             return Ok(false);
         };
         // X's dtype is the one asked for; other slots keep the source's.
         let is_x = slot == self.layer;
         let want = is_x.then_some(self.dtype);
-        if !csr_copyable(&src, self.n_obs, self.n_vars, want)? {
+        let Some(indptr) = csr_copy_indptr(&src, self.n_obs, want)? else {
             return Ok(false);
-        }
+        };
         let path = format!("assays/{}/{}", self.assay, slot);
+        // X's group exists, holding `create`'s empty streaming datasets.
         let grp = if is_x {
-            // `create` made empty resizable datasets for streaming.
-            let g = self.file.group(&path)?;
-            g.unlink("data")?;
-            g.unlink("indices")?;
-            self.x_copied = true;
-            g
+            self.file.group(&path)?
         } else {
             self.file.create_group(&path)?
         };
+        // Copy under temporary names, renamed once all three are in.
+        let tmp = |name: &str| format!("{name}.copy");
+        // indices first, checked as they go; an unsorted row abandons the copy.
+        let mut rows = RowCheck::new(&indptr, self.n_vars);
+        if !copy_chunks(
+            &src.dataset("indices")?,
+            &grp,
+            &tmp("indices"),
+            Some(&mut |b| rows.feed(b)),
+        )? {
+            // ponytail: the partial copy stays in the file as dead space (HDF5
+            // does not reclaim it); only input with unsorted rows pays it.
+            if is_x {
+                grp.unlink(&tmp("indices"))?;
+            } else {
+                self.file.unlink(&path)?;
+            }
+            return Ok(false);
+        }
         // CSR of cells x genes is, array for array, the CSC of genes x cells
         // that dgCMatrix stores; only `dims` is written fresh.
+        copy_chunks(&src.dataset("data")?, &grp, &tmp("data"), None)?;
+        copy_chunks(&src.dataset("indptr")?, &grp, &tmp("indptr"), None)?;
         for name in ["data", "indices", "indptr"] {
-            crate::h5_chunk::copy_chunks(&src.dataset(name)?, &grp, name)?;
+            if grp.link_exists(name) {
+                grp.unlink(name)?;
+            }
+            grp.relink(&tmp(name), name)?;
         }
-        if !is_x {
+        if is_x {
+            self.x_copied = true;
+        } else {
             let dims = [self.n_vars as i32, self.n_obs as i32];
             grp.new_attr::<i32>()
                 .shape(2)

@@ -97,9 +97,9 @@ fn unshuffle(src: &[u8], elem_size: usize) -> Vec<u8> {
     out
 }
 
-/// Read the stored (still-filtered) chunk that starts at element `start`, and
-/// its filter mask. Raw `hdf5-sys` FFI: the caller must hold `hdf5::sync::sync`.
-fn read_raw_chunk(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, Vec<u8>)> {
+/// Filter mask, file address and stored size of the chunk that starts at
+/// element `start`. Raw `hdf5-sys` FFI: the caller must hold `hdf5::sync::sync`.
+fn chunk_location(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, u64, usize)> {
     let off = start as hdf5_sys::h5::hsize_t;
     let mut filter_mask: u32 = 0;
     let mut addr: hdf5_sys::h5::haddr_t = 0;
@@ -119,7 +119,15 @@ fn read_raw_chunk(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, Vec<
             start
         )));
     }
-    let mut buf = vec![0u8; size as usize];
+    Ok((filter_mask, addr, size as usize))
+}
+
+/// Read the stored (still-filtered) chunk that starts at element `start`, and
+/// its filter mask. Raw `hdf5-sys` FFI: the caller must hold `hdf5::sync::sync`.
+fn read_raw_chunk(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, Vec<u8>)> {
+    let off = start as hdf5_sys::h5::hsize_t;
+    let (mut filter_mask, _, size) = chunk_location(dsid, start)?;
+    let mut buf = vec![0u8; size];
     // The raw chunk-read symbol is versioned by the HDF5 ABI we link
     // against:
     //   - HDF5 < 2.0 exports the 5-arg `H5Dread_chunk` and
@@ -168,40 +176,199 @@ fn read_raw_chunk(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, Vec<
     Ok((filter_mask, buf))
 }
 
+/// Sees a chunk's values, as raw little-endian bytes; false stops a copy.
+pub type ChunkCheck<'a> = &'a mut dyn FnMut(&[u8]) -> bool;
+
 /// Copy the 1-D chunked dataset `src` to `dst/name` as stored: same type,
-/// chunking and filters, each chunk moved still compressed, never decoded.
-/// The copy carries no timestamp, unlike `H5Ocopy`, which keeps the source's.
-pub fn copy_chunks(src: &Dataset, dst: &hdf5::Group, name: &str) -> Result<()> {
+/// chunking and filters, each chunk moved still compressed. The new dataset
+/// carries no timestamp, unlike an `H5Ocopy`, which keeps the source's.
+///
+/// `check`, if given, sees each chunk's values in order, as raw little-endian
+/// bytes: unfiltered chunks as stored, deflate ones (optionally after shuffle)
+/// inflated in parallel a batch at a time. Once it returns false the copy
+/// stops and this returns `Ok(false)`, leaving `dst/name` partly written for
+/// the caller to unlink. Any other filter is an error when `check` is given.
+///
+/// Chunk bytes are read with `pread` at the address HDF5 reports, one lookup
+/// per chunk instead of `H5Dread_chunk`'s two; that address is only the file
+/// offset without a userblock, so a file with one is an error.
+pub fn copy_chunks(
+    src: &Dataset,
+    dst: &hdf5::Group,
+    name: &str,
+    mut check: Option<ChunkCheck>,
+) -> Result<bool> {
+    const BATCH: usize = 256;
+
     let Some(chunk) = src.chunk().filter(|c| c.len() == 1).map(|c| c[0]) else {
         return Err(ScxError::InvalidFormat(format!(
             "{}: not a 1-D chunked dataset",
             src.name()
         )));
     };
+    if src.file()?.fcpl()?.userblock() != 0 {
+        return Err(ScxError::InvalidFormat(format!(
+            "{}: chunk copy does not support a userblock",
+            src.filename()
+        )));
+    }
+    let filters = src.filters();
+    let plan = chunk_plan(src);
+    if check.is_some() && !filters.is_empty() && plan.is_none() {
+        return Err(ScxError::InvalidFormat(format!(
+            "{}: cannot decode {filters:?} to check it",
+            src.name()
+        )));
+    }
+    let dtype = src.dtype()?;
+    let elem = dtype.size();
     let n = src.size();
     let out = dst
         .new_dataset_builder()
-        .empty_as(&src.dtype()?)
+        .empty_as(&dtype)
         .chunk(chunk)
-        .set_filters(&src.filters())
+        .set_filters(&filters)
         .shape(n)
         .create(name)?;
-    let (sid, did) = (src.id(), out.id());
-    hdf5::sync::sync(|| {
-        for start in (0..n).step_by(chunk) {
-            let (mask, buf) = read_raw_chunk(sid, start)?;
-            let off = start as hdf5_sys::h5::hsize_t;
-            let rc = unsafe {
-                hdf5_sys::h5d::H5Dwrite_chunk(did, 0, mask, &off, buf.len(), buf.as_ptr().cast())
-            };
-            if rc < 0 {
-                return Err(ScxError::InvalidFormat(format!(
-                    "H5Dwrite_chunk failed at element {start} of {}",
-                    src.name()
-                )));
+    let file = std::fs::File::open(src.filename())?;
+    let did = out.id();
+    let starts: Vec<usize> = (0..n).step_by(chunk).collect();
+    let all_locs = chunk_locations(src, chunk, n)?;
+    for (batch, locs) in starts.chunks(BATCH).zip(all_locs.chunks(BATCH)) {
+        let raw = locs
+            .iter()
+            .map(|&(_, addr, size)| {
+                let mut buf = vec![0u8; size];
+                read_at(&file, &mut buf, addr)?;
+                Ok(buf)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(check) = check.as_mut() {
+            let decoded = plan
+                .map(|p| {
+                    raw.par_iter()
+                        .zip(locs)
+                        .map(|(b, &(mask, ..))| decode_chunk(p, mask, b, elem))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?;
+            for (i, &start) in batch.iter().enumerate() {
+                let bytes = decoded.as_ref().map_or(&raw[i], |d| &d[i]);
+                // The last chunk is stored full size; only its first part is data.
+                let valid = (chunk.min(n - start) * elem).min(bytes.len());
+                if !check(&bytes[..valid]) {
+                    return Ok(false);
+                }
+            }
+        }
+        hdf5::sync::sync(|| {
+            for ((&start, &(mask, ..)), buf) in batch.iter().zip(locs).zip(&raw) {
+                let off = start as hdf5_sys::h5::hsize_t;
+                let rc = unsafe {
+                    hdf5_sys::h5d::H5Dwrite_chunk(
+                        did,
+                        0,
+                        mask,
+                        &off,
+                        buf.len(),
+                        buf.as_ptr().cast(),
+                    )
+                };
+                if rc < 0 {
+                    return Err(ScxError::InvalidFormat(format!(
+                        "H5Dwrite_chunk failed at element {start} of {}",
+                        src.name()
+                    )));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(true)
+}
+
+/// (filter mask, file address, stored size) of each chunk of the 1-D dataset
+/// `ds`, in element order. HDF5 1.14 lists them in one pass; older versions
+/// look each up, about 50 us a chunk.
+fn chunk_locations(ds: &Dataset, chunk: usize, n: usize) -> Result<Vec<(u32, u64, usize)>> {
+    #[cfg(hdf5_1_14)]
+    {
+        let mut locs = vec![None; n.div_ceil(chunk)];
+        ds.chunks_visit(|c| {
+            if let Some(slot) = locs.get_mut(c.offset[0] as usize / chunk) {
+                *slot = Some((c.filter_mask, c.addr, c.size as usize));
+            }
+            0
+        })?;
+        locs.into_iter()
+            .enumerate()
+            .map(|(k, loc)| {
+                loc.filter(|l| l.2 > 0).ok_or_else(|| {
+                    ScxError::InvalidFormat(format!(
+                        "{}: chunk at element {} is not stored",
+                        ds.name(),
+                        k * chunk
+                    ))
+                })
+            })
+            .collect()
+    }
+    #[cfg(not(hdf5_1_14))]
+    {
+        let id = ds.id();
+        hdf5::sync::sync(|| {
+            (0..n)
+                .step_by(chunk)
+                .map(|s| chunk_location(id, s))
+                .collect()
+        })
+    }
+}
+
+/// Fill `buf` from `file` at byte `offset`, leaving the file position alone.
+fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut done = 0;
+        while done < buf.len() {
+            match std::os::windows::fs::FileExt::seek_read(
+                file,
+                &mut buf[done..],
+                offset + done as u64,
+            )? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                k => done += k,
             }
         }
         Ok(())
+    }
+}
+
+/// The values (raw little-endian bytes) of one stored chunk: inflate, then
+/// un-shuffle. A set bit in the filter mask means that filter was skipped for
+/// this chunk, so each stage is applied only when its own bit is clear.
+fn decode_chunk(
+    plan: ChunkPlan,
+    filter_mask: u32,
+    cbuf: &[u8],
+    elem_size: usize,
+) -> Result<Vec<u8>> {
+    let bytes = if filter_mask & (1 << plan.deflate_bit) != 0 {
+        cbuf.to_vec()
+    } else {
+        let mut out = Vec::new();
+        ZlibDecoder::new(cbuf)
+            .read_to_end(&mut out)
+            .map_err(|e| ScxError::InvalidFormat(format!("inflate failed: {e}")))?;
+        out
+    };
+    Ok(match plan.shuffle_bit {
+        Some(bit) if filter_mask & (1 << bit) == 0 => unshuffle(&bytes, elem_size),
+        _ => bytes,
     })
 }
 
@@ -242,22 +409,7 @@ pub fn read_range_parallel(
     //    only when its own bit is clear.
     let inflated: Vec<(usize, Vec<u8>)> = raw
         .into_par_iter()
-        .map(|(k, filter_mask, cbuf)| -> Result<(usize, Vec<u8>)> {
-            let bytes = if filter_mask & (1 << plan.deflate_bit) != 0 {
-                cbuf
-            } else {
-                let mut d = ZlibDecoder::new(&cbuf[..]);
-                let mut out = Vec::new();
-                d.read_to_end(&mut out)
-                    .map_err(|e| ScxError::InvalidFormat(format!("inflate failed: {e}")))?;
-                out
-            };
-            let bytes = match plan.shuffle_bit {
-                Some(bit) if filter_mask & (1 << bit) == 0 => unshuffle(&bytes, elem_size),
-                _ => bytes,
-            };
-            Ok((k, bytes))
-        })
+        .map(|(k, filter_mask, cbuf)| Ok((k, decode_chunk(plan, filter_mask, &cbuf, elem_size)?)))
         .collect::<Result<Vec<_>>>()?;
 
     // 3) Concatenate the requested byte sub-range (chunks are in ka..=kb order).
