@@ -829,12 +829,18 @@ impl DatasetWriter for BpcellsH5Writer {
                     Err(_) => reds_grp.create_group(red_name)?,
                 };
 
+                // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs),
+                // as SeuratDisk and the dgCMatrix writer store it; R then reads
+                // it back as cells x components.
                 let (n_obs, n_comps) = mat.shape;
                 let arr_t = Array2::from_shape_vec((n_obs, n_comps), mat.data.clone())
-                    .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+                    .map_err(|e| ScxError::InvalidFormat(e.to_string()))?
+                    .reversed_axes()
+                    .as_standard_layout()
+                    .into_owned();
                 let ds = red_grp
                     .new_dataset::<f64>()
-                    .shape((n_obs, n_comps))
+                    .shape((n_comps, n_obs))
                     .create("cell.embeddings")?;
                 ds.write(&arr_t)?;
 
@@ -1538,6 +1544,22 @@ mod tests {
         assert_eq!(rt_pca.shape, (n_obs, 2));
         for (a, b) in rt_pca.data.iter().zip(obsm.map["X_pca"].data.iter()) {
             assert!((a - b).abs() < 1e-10, "obsm data mismatch: {a} vs {b}");
+        }
+        // The reader guesses the orientation from the shape, so the round
+        // trip above passes either way. Check the dataset itself: SeuratDisk
+        // stores (n_comps, n_obs), which R reads back as cells x components.
+        let on_disk: ndarray::Array2<f64> = hdf5::File::open(&path)
+            .unwrap()
+            .dataset("reductions/pca/cell.embeddings")
+            .unwrap()
+            .read_2d()
+            .unwrap();
+        assert_eq!(on_disk.shape(), [2, n_obs]);
+        let pca = &obsm.map["X_pca"].data;
+        for o in 0..n_obs {
+            for c in 0..2 {
+                assert_eq!(on_disk[[c, o]], pca[o * 2 + c], "cell {o}, component {c}");
+            }
         }
 
         let rt_varm = reader.varm().await.unwrap();
