@@ -370,6 +370,16 @@ enum Cli {
     /// Patch format: file.h5ad:slot/name[,slot/name...]
     ///   Supported slot groups: layers, obs, var, obsm, varm, obsp, uns
     ///
+    /// Provenance: uns["scx_provenance"] records the base and each patched
+    /// slot's source and SHA-256. When each slot was added goes in the sidecar
+    /// <output>.prov.json (extended by --into), so the same merge gives the
+    /// same bytes.
+    ///
+    /// Files written by h5py/anndata carry HDF5 group timestamps that merge
+    /// would update, so merge refuses them as a base or --into target. Rewrite
+    /// the file first with `scx convert in.h5ad out.h5ad`, or pass
+    /// --allow-nonreproducible.
+    ///
     /// Examples:
     ///   scx merge --base raw.h5ad --patch norm.h5ad:layers/normalized --output merged.h5ad
     ///   scx merge --config merge.yaml
