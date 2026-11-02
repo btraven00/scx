@@ -435,7 +435,13 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
         // ponytail: a missing string is written as "" (SeuratDisk has no NA for
         // plain character columns); write it as a factor if NA must survive.
         ColumnData::String(v) => {
-            write_strings(grp, name, v)?;
+            // The value at a missing position is a placeholder, not data.
+            let v: Vec<String> = v
+                .iter()
+                .enumerate()
+                .map(|(i, x)| if na(i) { String::new() } else { x.clone() })
+                .collect();
+            write_strings(grp, name, &v)?;
         }
         // SeuratDisk saves any factor as values + levels; `ordered` has no
         // H5Seurat encoding and is dropped.
