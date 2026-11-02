@@ -151,6 +151,12 @@ enum Cli {
         #[arg(long)]
         source_sha256: Option<String>,
 
+        /// Don't hash the output for the provenance sidecar (its
+        /// `output.sha256` is left out). Hashing reads the whole output once
+        /// more after conversion: about 1.7 s for 3 GB.
+        #[arg(long)]
+        no_output_hash: bool,
+
         /// gzip-compress `.h5ad` output. Pass `--compress` for the default
         /// level 6, or `--compress N` for level N (0..=9). Off by default.
         /// Ignored for `.h5seurat` output.
@@ -650,6 +656,7 @@ async fn run() -> anyhow::Result<()> {
             seuratdisk_compat,
             source_url,
             source_sha256: source_sha256_arg,
+            no_output_hash,
             compress,
             gene_major,
             transpose_mem,
@@ -750,7 +757,7 @@ async fn run() -> anyhow::Result<()> {
                 }
             };
 
-            let output_sha256 = if output_path.is_file() {
+            let output_sha256 = if output_path.is_file() && !no_output_hash {
                 Some(
                     provenance::sha256_file(output_path)
                         .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?,
