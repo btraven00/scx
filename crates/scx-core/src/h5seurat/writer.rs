@@ -298,22 +298,29 @@ fn seurat_init_resizable<T: hdf5::H5Type>(file: &File, path: &str) -> Result<()>
     Ok(())
 }
 
-/// obsm/varm entries as `(reduction name, matrix)`: `X_` stripped, sorted
-/// (HashMap order would change the file bytes). Two keys naming the same
-/// reduction (`X_pca` and `pca`) are an error, not an HDF5 "already exists".
+/// obsm/varm entries as `(reduction name, key, matrix)`: `X_` stripped,
+/// sorted (HashMap order would change the file bytes). varm `PCs` is
+/// scanpy's PCA loadings, so it goes to reduction `pca`, with obsm `X_pca`.
+/// Two keys naming the same reduction (`X_pca` and `pca`) are an error, not
+/// an HDF5 "already exists".
 pub(crate) fn reductions<'a>(
     map: &'a std::collections::HashMap<String, DenseMatrix>,
     slot: &str,
-) -> Result<Vec<(&'a str, &'a DenseMatrix)>> {
+) -> Result<Vec<(&'a str, &'a str, &'a DenseMatrix)>> {
     let mut out: Vec<_> = map
         .iter()
-        .map(|(k, m)| (k.strip_prefix("X_").unwrap_or(k), m))
+        .map(|(k, m)| match k.as_str() {
+            "PCs" if slot == "varm" => ("pca", k.as_str(), m),
+            _ => (k.strip_prefix("X_").unwrap_or(k), k.as_str(), m),
+        })
         .collect();
-    out.sort_by_key(|(name, _)| *name);
+    out.sort_by_key(|(name, _, _)| *name);
     if let Some(w) = out.windows(2).find(|w| w[0].0 == w[1].0) {
-        let name = w[0].0;
+        let (name, mut keys) = (w[0].0, [w[0].1, w[1].1]);
+        keys.sort();
         return Err(ScxError::InvalidFormat(format!(
-            "{slot} keys `{name}` and `X_{name}` both map to H5Seurat reduction `{name}`; rename one"
+            "{slot} keys `{}` and `{}` both map to H5Seurat reduction `{name}`; rename one",
+            keys[0], keys[1]
         )));
     }
     Ok(out)
@@ -362,6 +369,11 @@ pub(crate) fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<
     }
     Ok(())
 }
+
+/// Attribute on a reduction group naming the varm key its loadings came
+/// from, so the reader gives the key back exactly (`PCs` rather than
+/// `X_pca`); SeuratDisk ignores it.
+pub(crate) const VARM_KEY_ATTR: &str = "scx_varm_key";
 
 /// R's NA for integers and factor codes.
 const NA_INTEGER: i32 = i32::MIN;
@@ -520,7 +532,7 @@ impl DatasetWriter for H5SeuratWriter {
         if obsm.map.is_empty() {
             return Ok(());
         }
-        for (red_name, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
+        for (red_name, _, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
             let red_grp = crate::h5::create_group(&reds_grp, red_name)?;
             self.attr_reduction(&red_grp, red_name)?;
 
@@ -671,7 +683,7 @@ impl DatasetWriter for H5SeuratWriter {
             Ok(g) => g,
             Err(_) => crate::h5::create_group(&self.file, "reductions")?,
         };
-        for (red_name, mat) in crate::h5seurat::reductions(&varm.map, "varm")? {
+        for (red_name, key, mat) in crate::h5seurat::reductions(&varm.map, "varm")? {
             // reduction sub-group may already exist from write_obsm
             let red_grp = match reds_grp.group(red_name) {
                 Ok(g) => g,
@@ -681,6 +693,7 @@ impl DatasetWriter for H5SeuratWriter {
                     g
                 }
             };
+            crate::h5_str::write_str_attr(&red_grp, VARM_KEY_ATTR, key)?;
             let (n_vars, k) = mat.shape;
             // IR: (n_vars, k) row-major → H5Seurat: (k, n_vars)
             let mut buf = vec![0.0f64; n_vars * k];

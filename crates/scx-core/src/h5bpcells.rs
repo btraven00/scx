@@ -824,7 +824,7 @@ impl DatasetWriter for BpcellsH5Writer {
         });
 
         if let (Some(reds_grp), Some(obsm)) = (&reds_grp, &self.obsm) {
-            for (red_name, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
+            for (red_name, _, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
                 let red_grp = match reds_grp.group(red_name) {
                     Ok(g) => g,
                     Err(_) => crate::h5::create_group(reds_grp, red_name)?,
@@ -868,11 +868,12 @@ impl DatasetWriter for BpcellsH5Writer {
         }
 
         if let (Some(reds_grp), Some(varm)) = (&reds_grp, &self.varm) {
-            for (red_name, mat) in crate::h5seurat::reductions(&varm.map, "varm")? {
+            for (red_name, key, mat) in crate::h5seurat::reductions(&varm.map, "varm")? {
                 let red_grp = match reds_grp.group(red_name) {
                     Ok(g) => g,
                     Err(_) => crate::h5::create_group(reds_grp, red_name)?,
                 };
+                crate::h5_str::write_str_attr(&red_grp, crate::h5seurat::VARM_KEY_ATTR, key)?;
 
                 let (n_vars, k) = mat.shape;
                 let mut buf = vec![0.0f64; n_vars * k];

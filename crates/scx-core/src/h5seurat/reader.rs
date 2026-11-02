@@ -650,8 +650,12 @@ fn read_varm_sync(path: &Path, assay: &str) -> Result<Varm> {
             }
             full
         };
+        // scx records the varm key it wrote; otherwise name it after the
+        // reduction, as for obsm.
+        let key = crate::h5_str::read_str_attr(&red_grp, crate::h5seurat::VARM_KEY_ATTR)
+            .unwrap_or_else(|_| format!("X_{}", red_name.to_lowercase()));
         map.insert(
-            format!("X_{}", red_name.to_lowercase()),
+            key,
             DenseMatrix {
                 shape: (n_vars, k),
                 data,
