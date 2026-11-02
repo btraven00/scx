@@ -169,3 +169,55 @@ fn gene_major_into_a_layer() {
         dense(want.x_stream(), n_obs, n_vars)
     );
 }
+
+/// Bad gene-major arguments are refused before anything is read: a
+/// non-positive `--transpose-mem`, and a format that can't store X by gene.
+#[test]
+fn gene_major_arguments_are_checked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = fixture("tiny.h5ad");
+    let cases = [
+        (
+            tmp.path().join("a.h5ad"),
+            &["--gene-major", "--transpose-mem", "0"][..],
+            "--transpose-mem must be a positive",
+        ),
+        (
+            tmp.path().join("b.h5seurat"),
+            &["--gene-major"][..],
+            "--gene-major only applies to .h5ad output",
+        ),
+    ];
+    for (dst, extra, want) in cases {
+        let mut args = vec!["convert", s(&src), s(&dst)];
+        args.extend_from_slice(extra);
+        let out = scx(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{extra:?} was accepted");
+        assert!(err.contains(want), "{extra:?}: {err}");
+        assert!(!dst.exists(), "{extra:?} left {} behind", dst.display());
+    }
+}
+
+/// `scx inspect` says when X is gene-major and how to stream it; on
+/// cell-major input it shows per-cell stats, including obsp's.
+#[test]
+fn inspect_shows_the_x_layout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = fixture("tiny.h5ad");
+    let genes = tmp.path().join("genes.h5ad");
+    assert!(scx(&["convert", s(&src), s(&genes), "--gene-major"])
+        .status
+        .success());
+
+    let out = scx(&["inspect", s(&genes)]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("gene-major (CSC)"), "{text}");
+
+    let out = scx(&["inspect", s(&src)]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("gene-major"), "{text}");
+    assert!(text.contains("connectivities"), "{text}");
+}
