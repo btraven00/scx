@@ -1,6 +1,7 @@
 //! Property-based round trips: random datasets through every writer, read
 //! back with scx's readers, must come back as they went in.
 //!
+//! The comparison is `scx diff` (scx_core::diff), with exact floats.
 //! roundtrip.rs does this for the hand-made tiny fixtures; here proptest
 //! generates the datasets (shapes down to 0 cells or 0 genes, X at any
 //! sparsity, obs columns of every type, an embedding, any chunk size) and
@@ -13,13 +14,15 @@
 #[path = "common/convert.rs"]
 mod convert;
 
-use convert::{dense_x, out_path, Out};
+use convert::{out_path, Out};
 use futures::StreamExt;
 use proptest::prelude::*;
+use scx_core::diff::{diff, DiffOptions, Status};
 use scx_core::dtype::{DataType, TypedVec};
 use scx_core::ir::{
     Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, VarTable,
 };
+use scx_core::npy::SlotFilter;
 use scx_core::stream::{ChunkStream, DatasetReader};
 use std::collections::BTreeSet;
 
@@ -153,59 +156,34 @@ prop_compose! {
     }
 }
 
-/// Cell `i` of `col` as text, so storage types that hold the same value
-/// (int32/int64, string/categorical) compare equal.
-fn cell(col: &ColumnData, i: usize) -> String {
-    match col {
-        ColumnData::Int(v) => v[i].to_string(),
-        ColumnData::Int64(v) => v[i].to_string(),
-        ColumnData::Float(v) => format!("{:?}", v[i]),
-        ColumnData::String(v) => v[i].clone(),
-        ColumnData::Bool(v) => v[i].to_string(),
-        ColumnData::Categorical { codes, levels, .. } => levels[codes[i] as usize].clone(),
-    }
-}
-
-/// The column's cells as text, `na(column)` where missing.
-fn column_text(
-    obs: &ObsTable,
-    name: &str,
-    na: impl Fn(&ColumnData) -> String,
-) -> Option<Vec<String>> {
-    let col = obs.columns.iter().find(|c| c.name == name)?;
-    let present = |i: usize| col.mask.as_ref().is_none_or(|m| m[i]);
-    let na = na(&col.data);
-    Some(
-        (0..obs.index.len())
-            .map(|i| {
-                if present(i) {
-                    cell(&col.data, i)
-                } else {
-                    na.clone()
+/// What `out` is documented to store for `ds`, as its readers give it back:
+/// h5seurat writes a missing string as "" (SeuratDisk has no NA for
+/// character columns) and has no encoding for a categorical's `ordered`.
+/// Float NA as NaN, int64 as int32 and the like are notes, not differences,
+/// to `scx diff`, so they need nothing here.
+fn expected(mut ds: Dataset, out: Out) -> Dataset {
+    if matches!(out, Out::H5SeuratDgc | Out::H5SeuratBpcells) {
+        for col in &mut ds.obs.columns {
+            match &mut col.data {
+                ColumnData::String(v) => {
+                    if let Some(mask) = col.mask.take() {
+                        for (x, present) in v.iter_mut().zip(mask) {
+                            if !present {
+                                x.clear();
+                            }
+                        }
+                    }
                 }
-            })
-            .collect(),
-    )
-}
-
-/// How `out` stores a missing value of `col`'s type, as read back: float NA
-/// is NaN in h5ad and h5seurat (no mask), and h5seurat writes a missing
-/// string as "" (SeuratDisk has no NA for character columns).
-fn stored_na(out: Out, col: &ColumnData) -> String {
-    let seurat = matches!(out, Out::H5SeuratDgc | Out::H5SeuratBpcells);
-    match col {
-        ColumnData::Float(_) if !matches!(out, Out::Npy) => format!("{:?}", f64::NAN),
-        ColumnData::String(_) if seurat => String::new(),
-        _ => "NA".into(),
+                ColumnData::Categorical { ordered, .. } => *ordered = false,
+                _ => {}
+            }
+        }
     }
+    ds
 }
 
-/// What a writer is expected to keep besides shape, names and X.
-fn keeps_metadata(out: Out) -> bool {
-    !matches!(out, Out::BpcellsDir)
-}
-
-/// Write `ds` with `out`, read it back, and compare.
+/// Write `ds` with `out`, read it back, and require `scx diff` to find
+/// nothing, with exact float comparison.
 async fn check(ds: Dataset, out: Out) -> Result<(), TestCaseError> {
     let dir = tempfile::tempdir().unwrap();
     let path = out_path(dir.path(), out);
@@ -213,41 +191,27 @@ async fn check(ds: Dataset, out: Out) -> Result<(), TestCaseError> {
     let slot = convert::write(&mut Mem(ds.clone()), out, &path, chunk).await;
     let mut back = convert::open(&path, &slot, chunk).await;
 
-    prop_assert_eq!(back.shape(), ds.shape(), "shape");
-    let obs = back.obs().await.unwrap();
-    prop_assert_eq!(&obs.index, &ds.obs.index, "obs names");
-    prop_assert_eq!(
-        back.var().await.unwrap().index,
-        ds.var.index.clone(),
-        "var names"
-    );
-    let want: Vec<Vec<f64>> =
-        ds.x.iter()
-            .map(|r| r.iter().map(|&v| f64::from(v)).collect())
-            .collect();
-    prop_assert_eq!(dense_x(&mut *back).await, want, "X");
-
-    if keeps_metadata(out) {
-        for col in &ds.obs.columns {
-            let got = column_text(&obs, &col.name, |_| "NA".into());
-            prop_assert!(got.is_some(), "obs column {} missing", col.name);
-            prop_assert_eq!(
-                got.unwrap(),
-                column_text(&ds.obs, &col.name, |c| stored_na(out, c)).unwrap(),
-                "obs column {} ({:?})",
-                col.name,
-                std::mem::discriminant(&col.data)
-            );
-        }
-        let obsm = back.obsm().await.unwrap();
-        for (key, m) in &ds.obsm.map {
-            let got = obsm.map.get(key);
-            prop_assert!(got.is_some(), "obsm {} missing", key);
-            let got = got.unwrap();
-            prop_assert_eq!(got.shape, m.shape, "obsm {} shape", key);
-            prop_assert_eq!(&got.data, &m.data, "obsm {} values", key);
-        }
-    }
+    let opts = DiffOptions {
+        rtol: 0.0,
+        atol: 0.0,
+        chunk_size: chunk,
+        // A BPCells matrix directory holds X and the names only.
+        filter: if matches!(out, Out::BpcellsDir) {
+            SlotFilter::from_only("X,obs_index,var_index")
+        } else {
+            SlotFilter::all()
+        },
+        ..Default::default()
+    };
+    let report = diff(&mut Mem(expected(ds, out)), &mut *back, &opts)
+        .await
+        .unwrap();
+    let differing: Vec<_> = report
+        .slots
+        .iter()
+        .filter(|s| s.status != Status::Same)
+        .collect();
+    prop_assert!(differing.is_empty(), "{:#?}", differing);
     Ok(())
 }
 

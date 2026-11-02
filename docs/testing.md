@@ -107,11 +107,13 @@ These are pure Rust tests using the golden fixtures. They do not require the
 
 proptest generates random datasets and runs each through every writer (h5ad,
 both h5seurat writers, BPCells dir, npy snapshot), reads it back with scx's
-readers and requires it unchanged: shape, cell and gene names, X, obs columns
-of every type with missing values, and an embedding. Shapes go down to 0 cells
+readers and requires `scx diff` (exact floats) to find nothing: shape, cell
+and gene names, X, obs columns of every type with missing values, and an
+embedding. Shapes go down to 0 cells
 or 0 genes, and the chunk size is random, so chunk boundaries move. Each
-format's documented representation of a missing value is expected (`stored_na`):
-float NA as NaN in h5ad/h5seurat, a missing string as "" in h5seurat.
+format's documented changes are applied to the expected dataset first
+(`expected`): h5seurat stores a missing string as "" and drops a categorical's
+`ordered`; storage-type changes are notes to diff, not differences.
 
 - `PROPTEST_CASES=500 cargo test -p scx-core --test roundtrip_prop` for more
   cases than the default 32 per writer.
