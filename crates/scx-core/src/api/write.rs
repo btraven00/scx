@@ -570,7 +570,7 @@ fn csr_first(x: CsMatViewI<f32, u32>) -> Result<(), ScxError> {
 mod tests {
     use super::*;
     use crate::h5ad::H5AdReader;
-    use crate::ir::DenseMatrix;
+    use crate::ir::{Column, ColumnData, DenseMatrix};
     use crate::stream::DatasetReader;
     use ndarray::Array2;
     use sprs::{CsMatI, TriMatI};
@@ -1237,48 +1237,77 @@ mod tests {
         b.finalize().unwrap();
     }
 
-    /// Write the same dataset twice, a second apart, and require identical
-    /// bytes. HDF5 group timestamps have one-second resolution, and each fresh
-    /// `HashMap` iterates its eight obsm/varm keys in its own order, so either
-    /// leak makes the files differ.
-    fn assert_byte_reproducible(ext: &str, write: impl Fn(&Path, Embeddings, Varm)) {
+    /// Every slot kind, so each writer path that creates a group runs:
+    /// categorical + nullable columns, eight obsm/varm keys (a fresh `HashMap`
+    /// iterates them in its own order, so unsorted iteration shows as a byte
+    /// diff), nested uns, and the auxiliary sparse slots.
+    fn full_dataset() -> (ObsTable, VarTable, Embeddings, Varm, UnsTable) {
+        let (mut obs, mut var) = obs_var(4, 4);
+        obs.columns = vec![
+            Column::new(
+                "cluster",
+                ColumnData::Categorical {
+                    codes: vec![0, 1, 0, 1],
+                    levels: vec!["a".into(), "b".into()],
+                    ordered: false,
+                },
+            ),
+            Column::with_missing(
+                "score",
+                ColumnData::Float(vec![1.0, 0.0, 2.0, 3.0]),
+                [false, true, false, false],
+            ),
+        ];
+        var.columns = vec![Column::new("hv", ColumnData::Bool(vec![true; 4]))];
+        let mat = |j: usize| DenseMatrix {
+            shape: (4, 2),
+            data: vec![j as f64; 8],
+        };
+        let obsm = Embeddings {
+            map: (0..8).map(|j| (format!("X_e{j}"), mat(j))).collect(),
+        };
+        let varm = Varm {
+            map: (0..8).map(|j| (format!("e{j}"), mat(j))).collect(),
+        };
+        let uns = UnsTable {
+            raw: serde_json::json!({"params": {"k": 1, "names": ["a", "b"]}}),
+        };
+        (obs, var, obsm, varm, uns)
+    }
+
+    /// Write the same dataset twice and require identical bytes and no
+    /// timestamped group. Timestamps are checked on the file directly, so the
+    /// test needs no sleep to catch them.
+    fn assert_byte_reproducible(ext: &str, write: impl Fn(&Path)) {
         let dir = tempfile::tempdir().unwrap();
         let write_once = |i: u32| {
             let path = dir.path().join(format!("{i}.{ext}"));
-            let mat = |j: usize, rows: usize| DenseMatrix {
-                shape: (rows, 2),
-                data: vec![j as f64; rows * 2],
-            };
-            let obsm = Embeddings {
-                map: (0..8).map(|j| (format!("X_e{j}"), mat(j, 4))).collect(),
-            };
-            let varm = Varm {
-                map: (0..8).map(|j| (format!("e{j}"), mat(j, 3))).collect(),
-            };
-            write(&path, obsm, varm);
-            std::fs::read(path).unwrap()
+            write(&path);
+            path
         };
-        let first = write_once(1);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let (a, b) = (write_once(1), write_once(2));
+        crate::h5::assert_untimed(&a);
         assert!(
-            first == write_once(2),
+            std::fs::read(a).unwrap() == std::fs::read(b).unwrap(),
             "two writes of the same .{ext} differ"
         );
     }
 
     macro_rules! byte_reproducible_test {
-        ($name:ident, $ext:literal, $builder:ident, $opts:expr) => {
+        ($name:ident, $ext:literal, $builder:ident, $opts:expr, [$($sparse:literal),*]) => {
             #[test]
             fn $name() {
-                assert_byte_reproducible($ext, |path, obsm, varm| {
-                    let mut b = $builder::new(path, 4, 3, &$opts).unwrap();
-                    let (obs, var) = obs_var(4, 3);
+                assert_byte_reproducible($ext, |path| {
+                    let x = synthetic_csr(4, 4, 0.5);
+                    let (obs, var, obsm, varm, uns) = full_dataset();
+                    let mut b = $builder::new(path, 4, 4, &$opts).unwrap();
                     b.obs(obs).unwrap().var(var).unwrap();
                     b.add_obsm(obsm).unwrap().add_varm(varm).unwrap();
-                    for r in 0..4 {
-                        b.push_x_csr_chunk(r, [0, 1], [r as u32 % 3], [1.0])
-                            .unwrap();
-                    }
+                    b.add_uns(uns).unwrap();
+                    $(b.0.sparse_slot($sparse, "m", x.view(), 4).unwrap();)*
+                    let (indptr, indices, data) = x.clone().into_raw_storage();
+                    let indptr: Vec<u64> = indptr.into_iter().map(|p| p as u64).collect();
+                    b.push_x_csr_chunk(0, indptr, indices, data).unwrap();
                     b.finalize().unwrap();
                 });
             }
@@ -1289,18 +1318,34 @@ mod tests {
         h5ad_is_byte_reproducible,
         "h5ad",
         H5AdBuilder,
-        H5AdOptions::default()
+        H5AdOptions::default(),
+        ["layers", "obsp", "varp"]
     );
+    // "varp" takes begin_sparse's fallback path, a two-segment group path.
     byte_reproducible_test!(
         h5seurat_is_byte_reproducible,
         "h5seurat",
         H5SeuratBuilder,
-        BpcellsOptions::default()
+        BpcellsOptions::default(),
+        ["layers", "obsp", "varp"]
     );
     byte_reproducible_test!(
         bpcells_h5seurat_is_byte_reproducible,
         "h5seurat",
         BpcellsH5SeuratBuilder,
-        BpcellsOptions::default()
+        BpcellsOptions::default(),
+        ["layers", "obsp"]
+    );
+    // Without SeuratDisk compat, `graphs` is not pre-created, so obsp's
+    // `graphs/<name>` path used to create it as a timestamped parent.
+    byte_reproducible_test!(
+        bpcells_h5seurat_no_compat_is_byte_reproducible,
+        "h5seurat",
+        BpcellsH5SeuratBuilder,
+        BpcellsOptions {
+            seuratdisk_compat: false,
+            ..BpcellsOptions::default()
+        },
+        ["layers", "obsp"]
     );
 }
