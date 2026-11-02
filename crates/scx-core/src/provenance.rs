@@ -117,11 +117,16 @@ pub fn det_record(
     })
 }
 
-pub fn write_sidecar(record: &ProvenanceRecord, output: &Path) -> std::io::Result<()> {
+/// `<output>.prov.json`: where the non-deterministic provenance goes.
+pub fn sidecar_path(output: &Path) -> std::path::PathBuf {
     let mut s = output.as_os_str().to_owned();
     s.push(".prov.json");
+    s.into()
+}
+
+pub fn write_sidecar(record: &ProvenanceRecord, output: &Path) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
-    std::fs::write(Path::new(&s), json)
+    std::fs::write(sidecar_path(output), json)
 }
 
 #[cfg(test)]

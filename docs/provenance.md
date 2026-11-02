@@ -124,13 +124,11 @@ reference.
   "slots": {
     "layers/normalized": {
       "source_path": "results/normalized.h5ad",
-      "sha256": "b1c2e3f4…",
-      "added_at": "2026-04-25T10:04:12Z"
+      "sha256": "b1c2e3f4…"
     },
     "obsm/X_pca": {
       "source_path": "results/pca.h5ad",
-      "sha256": "c8d9e0f1…",
-      "added_at": "2026-04-25T10:04:13Z"
+      "sha256": "c8d9e0f1…"
     }
   },
   "tags": {
@@ -145,8 +143,27 @@ reference.
 | `scx_version` | `env!("CARGO_PKG_VERSION")` at compile time |
 | `base.sha256` | SHA-256 of base file bytes — immutable anchor |
 | `slots.<key>.sha256` | SHA-256 of the patch source file at the time of patching |
-| `slots.<key>.added_at` | UTC timestamp of the patch operation |
 | `tags` | `--tag key=value` flags, verbatim |
+
+### Sidecar — `<output>.prov.json`
+
+When each slot was patched in is a wall-clock time, so it goes in a sidecar
+next to the merged file rather than into `uns`; the merged file stays
+byte-reproducible. `merge --into` adds to the existing sidecar. `scx inspect`
+shows these times next to the slots.
+
+```json
+{
+  "scx_version": "0.2.0",
+  "slots": {
+    "layers/normalized": { "added_at": "2026-04-25T10:04:12Z" },
+    "obsm/X_pca": { "added_at": "2026-04-25T10:04:13Z" }
+  }
+}
+```
+
+Files merged by older scx versions keep `added_at` in `uns`; the next
+`merge --into` moves it to the sidecar.
 
 ### Storage
 

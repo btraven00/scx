@@ -169,13 +169,11 @@ the base file anchor and every slot that was patched in:
   "slots": {
     "layers/normalized": {
       "source_path": "results/normalized.h5ad",
-      "sha256": "b1c2e3f4…",
-      "added_at": "2026-04-25T10:04:12Z"
+      "sha256": "b1c2e3f4…"
     },
     "obsm/X_pca": {
       "source_path": "results/pca.h5ad",
-      "sha256": "c8d9e0f1…",
-      "added_at": "2026-04-25T10:04:13Z"
+      "sha256": "c8d9e0f1…"
     }
   },
   "tags": {
@@ -201,6 +199,10 @@ provenance slots (2 patched)
 
 Skipped slots (conflict=skip) are not recorded. Overwritten slots show the
 new source.
+
+The time each slot was added goes in the `<output>.prov.json` sidecar,
+not in the file, so the same merge gives identical bytes. See
+[provenance.md](provenance.md).
 
 ---
 
