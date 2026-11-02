@@ -15,6 +15,7 @@ pub mod bixverse;
 pub mod bpcells;
 pub mod concat;
 pub mod detect;
+pub mod diff;
 pub mod dtype;
 pub mod error;
 mod factory;
