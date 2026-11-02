@@ -62,6 +62,32 @@ adata = ad.read_h5ad("tiny.h5ad")
 np.allclose(totals, np.asarray(adata.X.sum(axis=1)).ravel())
 ```
 
+## Filtering genes in one pass
+
+A per-gene statistic needs every cell, but not all of them at once: add each
+chunk's contribution as it streams by. Counting the cells in which each gene
+is nonzero gives the usual "detected in at least one cell" filter, which is
+what `rowSums(counts(sce) > 0) > 0` computes on a lazy matrix in R. Stored
+zeros are left out with `chunk.data != 0`.
+
+```{python}
+n_cells = np.zeros(info["n_vars"], dtype=np.int64)
+for chunk in pk.open_stream("tiny.h5ad", chunk_size=2):
+    n_cells += np.bincount(chunk.indices[chunk.data != 0], minlength=info["n_vars"])
+
+keep = n_cells > 0
+dict(zip(info["var_names"], n_cells.tolist()))
+```
+
+The same counts from the matrix in memory:
+
+```{python}
+np.array_equal(n_cells, np.asarray((adata.X > 0).sum(axis=0)).ravel())
+```
+
+`keep` can then select genes wherever they are used, e.g.
+`adata[:, keep]` once the data does fit, or the `var` mask of a later write.
+
 ## Reading only some cells
 
 `where` selects cells by their `obs` values and `rows` by position. On h5ad,
@@ -80,6 +106,38 @@ np.flatnonzero(adata.obs["cell_type"] == "T").tolist()
 ```{python}
 for chunk in pk.open_stream("tiny.h5ad", rows=[0, 1, 4]):
     print(chunk.row_offset, chunk.nrows)
+```
+
+## Streaming by gene
+
+Some work goes gene by gene over every cell: one model per gene, or
+per-gene statistics too wide to accumulate. Rows of a cell-major matrix hold
+genes scattered across every chunk, so for this the matrix is first written
+stored by gene (CSC). `convert(..., gene_major=True)` does that, in a bounded
+memory budget (`transpose_mem`, in GB); anndata reads the result as a
+`csc_matrix`.
+
+```{python}
+pk.convert("tiny.h5ad", "tiny_by_gene.h5ad", gene_major=True)
+pk.inspect("tiny_by_gene.h5ad")["x_axis"]
+```
+
+`open_stream(..., axis="var")` then hands out blocks of whole genes. Each
+chunk's `to_scipy()` is a `csc_array` of every cell by the block's genes, and
+`var_offset` is its first gene.
+
+```{python}
+for chunk in pk.open_stream("tiny_by_gene.h5ad", axis="var", chunk_size=2):
+    Y = chunk.to_scipy()
+    means = np.asarray(Y.mean(axis=0), dtype=float).ravel()
+    print(chunk.var_offset, chunk.ncols, Y.shape, means.round(2).tolist())
+```
+
+`genes` selects genes the way `rows` selects cells, as `(start, stop)` ranges
+or indices, so independent jobs can each take a slice of the genes:
+
+```{python}
+[(c.var_offset, c.ncols) for c in pk.open_stream("tiny_by_gene.h5ad", axis="var", genes=[(3, 5)])]
 ```
 
 See [`open_stream`](../reference/python/open_stream.qmd) for every option.

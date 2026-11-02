@@ -87,6 +87,7 @@ async fn convert(
     skip_layer: Option<&str>,
     raw_counts: Option<&SparseMatrixMeta>,
     chunk_size: usize,
+    csc_mem: Option<usize>,
 ) -> anyhow::Result<()> {
     writer.write_obs(&reader.obs().await?).await?;
     writer.write_var(&reader.var().await?).await?;
@@ -123,9 +124,14 @@ async fn convert(
         writer.end_sparse().await?;
     }
 
-    let mut stream = reader.x_stream();
-    while let Some(chunk) = stream.next().await {
-        writer.write_x_chunk(&chunk?).await?;
+    if let Some(mem) = csc_mem {
+        // Gene-major X, holding at most `mem` bytes of transposed nonzeros.
+        scx_core::transpose::write_x_csc(reader, writer, mem).await?;
+    } else {
+        let mut stream = reader.x_stream();
+        while let Some(chunk) = stream.next().await {
+            writer.write_x_chunk(&chunk?).await?;
+        }
     }
     writer.finalize().await?;
     Ok(())
@@ -135,8 +141,11 @@ async fn convert(
 /// `counts` layer, or a raw.X with X's genes, X is taken to be normalised and
 /// goes to the `data` slot (`scx_core::h5seurat::auto_counts_source`).
 /// H5AD output writes the matrix to `x_slot` (`"X"` or `"layers/<name>"`).
+/// `transpose_mem` (bytes), when set, writes X gene-major (CSC), as
+/// `scx convert --gene-major` does; H5AD output only.
 #[pyfunction]
-#[pyo3(signature = (input, output, chunk_size, dtype, assay, layer, x_slot = "X"))]
+#[pyo3(signature = (input, output, chunk_size, dtype, assay, layer, x_slot = "X", transpose_mem = None))]
+#[allow(clippy::too_many_arguments)]
 fn scx_convert(
     input: &str,
     output: &str,
@@ -145,9 +154,16 @@ fn scx_convert(
     assay: &str,
     layer: &str,
     x_slot: &str,
+    transpose_mem: Option<usize>,
 ) -> PyResult<()> {
     let run = || -> anyhow::Result<()> {
         let dtype = dtype.parse::<DataType>()?;
+        let is_h5ad = Path::new(output)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("h5ad"));
+        if transpose_mem.is_some() && !is_h5ad {
+            anyhow::bail!("gene_major only applies to .h5ad output");
+        }
         let mut reader = open_reader(input, stream_opts(chunk_size, assay, layer))?;
         let (n_obs, n_vars) = reader.shape();
         let layer_metas = block_on(reader.layer_metas())?;
@@ -185,6 +201,7 @@ fn scx_convert(
             skip,
             raw_counts,
             chunk_size,
+            transpose_mem,
         ))
     };
     run().map_err(py_err)
