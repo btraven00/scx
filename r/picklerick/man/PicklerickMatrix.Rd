@@ -39,8 +39,8 @@ format scx reads.}
 \item{layer}{Name of a layer to expose instead of \code{X} (h5ad and Zarr).
 \code{NULL} (default) exposes \code{X}.}
 
-\item{chunk_size}{Cells per internal read chunk; also the seed's
-\code{chunkdim()} width, which block processing follows.}
+\item{chunk_size}{Cells per internal read chunk. For formats other than
+h5ad and Zarr, also the block width in cells (the seed's \code{chunkdim()}).}
 
 \item{x}{A \code{PicklerickMatrixSeed}.}
 
@@ -59,11 +59,20 @@ blocks are read on demand through scx. Column (cell) selections read only
 the selected cells from disk on h5ad and Zarr stores; other formats read
 the whole matrix per block and keep the selection.
 }
+\details{
+Block-wise operations (\code{rowSums()}, \code{colSums()}, \code{blockApply()}, ...) take
+every feature for a range of cells per block. On h5ad and Zarr the number
+of cells per block follows DelayedArray's block size, so
+\code{DelayedArray::setAutoBlockSize()} sets the peak memory, as for HDF5Array
+seeds. Other formats read the whole matrix per block, so their blocks are
+\code{chunk_size} cells wide, to keep the number of passes down.
+}
 \examples{
 \dontrun{
 m <- PicklerickMatrix("pbmc.zarr")
 dim(m)
 m[1:10, 1:5]                       # reads 5 cells
-DelayedArray::colSums(m)           # block-wise, chunk_size cells at a time
+DelayedArray::colSums(m)           # block-wise
+DelayedArray::setAutoBlockSize(50e6) # smaller blocks, lower peak memory
 }
 }

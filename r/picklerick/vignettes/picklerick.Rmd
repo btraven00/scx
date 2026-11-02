@@ -199,7 +199,8 @@ DelayedArray::seed(x)
 
 Selecting cells reads only those cells from the store: the row pointer is
 loaded, then just the selected rows' slices of the values and column indices.
-Block operations walk the matrix `chunk_size` cells at a time.
+Block operations read one block of cells at a time, every gene of those
+cells.
 
 ```{r}
 x[, c("cell2", "cell5")]
@@ -210,10 +211,56 @@ DelayedArray::colSums(x)
 `PicklerickMatrix()` can also be built directly, and can expose a layer.
 
 ```{r}
-m <- PicklerickMatrix(zarr, layer = "counts", chunk_size = 2L)
+m <- PicklerickMatrix(zarr, layer = "counts")
 m
-DelayedArray::chunkdim(DelayedArray::seed(m))
 ```
+
+## Filtering without loading the matrix
+
+Expressions on a `DelayedMatrix` are recorded, not computed, and reductions
+run block by block. A gene filter therefore never holds the whole matrix,
+and the filtered object stays on disk:
+
+```{r}
+keep <- DelayedArray::rowSums(x > 0) > 0   # genes seen in at least one cell
+filtered <- lazy[keep, ]
+dim(filtered)
+class(SummarizedExperiment::assay(filtered, "X"))
+```
+
+Most Bioconductor tools (scuttle's normalisation, scran, ...) work on a
+`DelayedMatrix` in the same block-wise way, until something asks for the
+values in memory.
+
+## Controlling peak memory
+
+Peak memory is set by the block size, not by the size of the data. For an
+`.h5ad` or Zarr store, `DelayedArray::setAutoBlockSize()` sets it, for both
+`PicklerickMatrix()` and HDF5Array's seed (default 100 MB):
+
+```{r}
+old <- DelayedArray::getAutoBlockSize()
+# Room for two cells per block (8 bytes per value, every gene): on this tiny
+# matrix that makes several blocks of whole cells.
+DelayedArray::setAutoBlockSize(8 * nrow(x) * 2)
+DelayedArray::defaultAutoGrid(x)
+DelayedArray::setAutoBlockSize(old)
+```
+
+On a 100,000-cell subset of the Human Lung Cell Atlas (28,024 genes,
+194 million nonzeros), the filter above took, with R's own ~0.6 GB included:
+
+| | peak memory | time |
+|---|---|---|
+| eager `read_h5ad()` | 5.4 GB | 14.5 s |
+| `PicklerickMatrix()`, 10 MB blocks | 0.68 GB | 18.8 s |
+| `PicklerickMatrix()`, 100 MB blocks (default) | 0.88 GB | 16.4 s |
+| HDF5Array seed, 100 MB blocks | 0.97 GB | 11.2 s |
+
+Smaller blocks lower the peak a little and add per-block overhead; past
+~100 MB, larger blocks cost memory without being faster. Formats other than
+`.h5ad` and Zarr can't yet read a range of cells on its own, so their blocks
+are `chunk_size` cells wide and each block reads through the matrix.
 
 # Writing
 

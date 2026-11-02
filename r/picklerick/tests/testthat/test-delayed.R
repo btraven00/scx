@@ -19,7 +19,9 @@ for (name in c("small.h5ad", "small_v3.zarr", "small_v2.zarr")) {
     expect_identical(dim(m), dim(full))
     expect_identical(dimnames(m), dimnames(full))
     expect_true(DelayedArray::is_sparse(m))
-    expect_identical(DelayedArray::chunkdim(DelayedArray::seed(m)), c(nrow(full), 7L))
+    # h5ad and Zarr read cell ranges: one-cell chunks, blocks sized by
+    # DelayedArray's block size.
+    expect_identical(DelayedArray::chunkdim(DelayedArray::seed(m)), c(nrow(full), 1L))
 
     expect_equal(as.matrix(m), as.matrix(full))
     # Sorted, unsorted, duplicated and single-cell column selections, with
@@ -72,4 +74,29 @@ test_that("read_zarr(lazy = TRUE) wraps X in a PicklerickMatrix", {
   expect_equal(as.matrix(x[, 1:5]), as.matrix(eager[, 1:5]))
   expect_identical(SummarizedExperiment::colData(sce)$cluster,
                    SummarizedExperiment::colData(read_zarr(path))$cluster)
+})
+
+# DelayedArray's block size sets how many cells a block reads (and so the
+# peak memory) on h5ad and Zarr; a format without row-range reads keeps
+# chunk_size-wide blocks, so a block-wise pass doesn't reread the matrix per
+# few cells.
+test_that("block width follows setAutoBlockSize() where cells can be read by range", {
+  m <- PicklerickMatrix(delayed_fixture("small.h5ad"), chunk_size = 7L)
+  old <- DelayedArray::getAutoBlockSize()
+  on.exit(DelayedArray::setAutoBlockSize(old))
+  width <- function(bytes) {
+    DelayedArray::setAutoBlockSize(bytes)
+    ncol(DelayedArray::defaultAutoGrid(m)[[1L]])
+  }
+  # Dense doubles: 8 bytes per element, nrow(m) per cell.
+  expect_identical(width(8 * nrow(m) * 3), 3L)
+  expect_identical(width(8 * nrow(m) * 25), 25L)
+  expect_equal(DelayedArray::rowSums(m), Matrix::rowSums(as(as.matrix(m), "dgCMatrix")))
+
+  tenx <- file.path(SCX_ROOT, "tests", "fixtures", "tiny", "tiny_10x.h5")
+  skip_if_no_fixture(tenx)
+  t10 <- PicklerickMatrix(tenx, chunk_size = 2L)
+  expect_identical(DelayedArray::chunkdim(DelayedArray::seed(t10)), c(nrow(t10), 2L))
+  DelayedArray::setAutoBlockSize(8)
+  expect_identical(ncol(DelayedArray::defaultAutoGrid(t10)[[1L]]), 2L)
 })
