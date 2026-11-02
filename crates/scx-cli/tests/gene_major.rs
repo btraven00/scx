@@ -221,3 +221,38 @@ fn inspect_shows_the_x_layout() {
     assert!(!text.contains("gene-major"), "{text}");
     assert!(text.contains("connectivities"), "{text}");
 }
+
+/// Gene-major X written compressed goes through the parallel-deflate
+/// appender like row-major X does; it must read back as the same matrix.
+#[test]
+fn compressed_gene_major_matches_plain_convert() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (plain, genes) = (tmp.path().join("plain.h5ad"), tmp.path().join("genes.h5ad"));
+    let src = fixture("tiny.h5ad");
+    assert!(scx(&["convert", s(&src), s(&plain)]).status.success());
+    let out = scx(&[
+        "convert",
+        s(&src),
+        s(&genes),
+        "--gene-major",
+        "--compress",
+        "4",
+        "--transpose-mem",
+        "1e-8",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut p = H5AdReader::open(&plain, 3).unwrap();
+    let mut g = H5AdReader::open(&genes, 3).unwrap();
+    let (n_obs, n_vars) = p.shape();
+    let want = dense(p.x_stream(), n_obs, n_vars);
+    let by_gene = dense(
+        g.x_stream_cols(std::iter::once(0..n_vars).collect()),
+        n_vars,
+        n_obs,
+    );
+    assert_eq!(t(&by_gene, n_vars, n_obs), want);
+}
