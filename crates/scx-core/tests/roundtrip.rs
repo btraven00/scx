@@ -238,6 +238,33 @@ async fn h5ad_to_h5seurat_keeps_counts_and_obsm() {
     assert!(back.obsm().await.unwrap().map.contains_key("X_pca"));
 }
 
+/// Regression: varm `PCs` (scanpy's PCA loadings) was written as its own
+/// reduction `PCs`, with no embeddings, and read back as `X_pcs`. It now goes
+/// to reduction `pca` beside `X_pca`'s embeddings and reads back as `PCs`.
+#[tokio::test]
+async fn h5ad_to_h5seurat_keeps_varm_pcs() {
+    let mut src = open(&tiny("tiny.h5ad"), "counts").await;
+    let want = src.varm().await.unwrap().map["PCs"].clone();
+    for out in [Out::H5SeuratDgc, Out::H5SeuratBpcells] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = out_path(dir.path(), out);
+        let slot = write(&mut *open(&tiny("tiny.h5ad"), "counts").await, out, &path).await;
+        let f = hdf5::File::open(&path).unwrap();
+        let reds = f.group("reductions").unwrap().member_names().unwrap();
+        assert_eq!(reds, ["pca"], "{out:?}");
+        assert!(
+            f.dataset("reductions/pca/feature.loadings").is_ok(),
+            "{out:?}"
+        );
+        drop(f);
+        let varm = open(&path, &slot).await.varm().await.unwrap();
+        let keys: Vec<&String> = varm.map.keys().collect();
+        assert_eq!(keys, ["PCs"], "{out:?}");
+        assert_eq!(varm.map["PCs"].shape, want.shape, "{out:?}");
+        assert_eq!(varm.map["PCs"].data, want.data, "{out:?}");
+    }
+}
+
 #[tokio::test]
 async fn h5ad_to_h5seurat_keeps_categorical_na() {
     let (_dir, mut back) = convert("tiny.h5ad", Out::H5SeuratDgc).await;
