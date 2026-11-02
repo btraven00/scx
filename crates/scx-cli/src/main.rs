@@ -232,7 +232,7 @@ enum Cli {
     ///   obs_index_unique: true
     #[command(verbatim_doc_comment)]
     Validate {
-        /// Input file (.h5ad)
+        /// Input file or directory, in any format scx reads
         input: String,
 
         /// Path to YAML schema file
@@ -462,6 +462,29 @@ fn main() {
     }
 }
 
+/// Check `input` against the YAML schema at `schema`.
+async fn validate_file(
+    input: &str,
+    schema: &str,
+) -> anyhow::Result<scx_core::validate::ValidationReport> {
+    let schema_src = std::fs::read_to_string(schema)
+        .map_err(|e| anyhow::anyhow!("cannot read schema '{schema}': {e}"))?;
+    let schema_parsed: ValidationSchema = serde_yaml::from_str(&schema_src)
+        .map_err(|e| anyhow::anyhow!("invalid schema '{schema}': {e}"))?;
+    let opts = scx_core::OpenOptions {
+        metadata_only: true,
+        ..scx_core::OpenOptions::new(1000)
+    };
+    let mut reader = scx_core::open(input, &opts)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+    let report = run_validation(&mut *reader, &schema_parsed, input, schema).await?;
+    if report.checks.is_empty() {
+        anyhow::bail!("schema '{schema}' has no checks");
+    }
+    Ok(report)
+}
+
 /// Drive the async CLI to completion.
 ///
 /// With `net`, object-store backends (S3/GCS/HTTP) need a live tokio reactor, so
@@ -494,26 +517,21 @@ async fn run() -> anyhow::Result<()> {
             schema,
             json,
         } => {
-            let schema_src = std::fs::read_to_string(&schema)
-                .map_err(|e| anyhow::anyhow!("cannot read schema '{schema}': {e}"))?;
-            let schema_parsed: ValidationSchema = serde_yaml::from_str(&schema_src)
-                .map_err(|e| anyhow::anyhow!("invalid schema '{schema}': {e}"))?;
-
-            let opts = scx_core::OpenOptions {
-                metadata_only: true,
-                ..scx_core::OpenOptions::new(1000)
+            // Exit 1: the file failed a check. Exit 2: validation couldn't
+            // run (unreadable file, bad or empty schema), so a pipeline can
+            // tell the two apart.
+            let report = match validate_file(&input, &schema).await {
+                Ok(report) => report,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
             };
-            let mut reader = scx_core::open(&input, &opts)
-                .await
-                .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
-            let report = run_validation(&mut *reader, &schema_parsed, &input, &schema).await?;
-
             if json {
                 print_report_json(&report);
             } else {
                 print_report_human(&report);
             }
-
             if !report.passed() {
                 std::process::exit(1);
             }

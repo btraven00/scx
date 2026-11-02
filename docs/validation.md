@@ -2,40 +2,36 @@
 
 ## Motivation
 
-Snakemake pipelines produce one h5ad per stage. `scx validate` checks that each
+Snakemake pipelines produce one file per stage. `scx validate` checks that each
 output matches expectations before the next rule runs — catching shape regressions,
-missing slots, or wrong dtypes early rather than at conversion time.
+missing slots, or wrong dtypes early rather than at conversion time. It reads any
+format `scx convert` reads; slot names are the ones that format's reader exposes
+(see `scx inspect`).
 
-Validation is metadata-only by default: shape, slot names, dtypes, and index
-properties are all readable without touching matrix data.
+Validation is metadata-only: shape, slot names, dtypes, and index properties are
+all readable without touching matrix data.
 
 ---
 
 ## CLI
 
 ```sh
-# Schema file (preferred — reusable across samples)
 scx validate results/normalized.h5ad --schema schemas/after_normalization.yaml
-
-# Inline flags (quick one-offs)
-scx validate results/normalized.h5ad \
-  --has-layer normalized \
-  --min-obs 1000 \
-  --dtype f32
-
-# Exit non-zero on failure (Snakemake integration)
-scx validate results/normalized.h5ad --schema schemas/after_normalization.yaml \
-  || { echo "validation failed"; exit 1; }
+scx validate results/normalized.h5ad --schema schemas/after_normalization.yaml --json
 ```
 
-Exits `0` on pass, `1` on validation failure, `2` on file-not-found / parse error.
-Prints a structured report to stdout (one line per check, PASS/FAIL prefix).
+Exits `0` when every check passes, `1` when a check fails, and `2` when
+validation can't run: the file can't be opened, or the schema can't be read, is
+malformed, has an unknown key (a typo such as `obps:` is an error, not a silently
+skipped check), or has no checks. Prints a structured report to stdout (one line
+per check, PASS/FAIL prefix); errors go to stderr.
 
 ---
 
 ## Schema file format
 
-YAML. All fields are optional — omit what you don't need.
+YAML. Every field is optional, but a schema needs at least one, and any other
+key is an error.
 
 ```yaml
 # schemas/after_normalization.yaml
@@ -67,12 +63,6 @@ x_dtype: f32         # f32 | f64 | i32 | u32
 # --- Index integrity (metadata-only checks) ---
 obs_index_unique: true
 var_index_unique: true
-
-# --- Data checks (require matrix scan, opt-in) ---
-check_finite: false          # scan X for NaN / Inf
-check_finite_layers:         # scan specific layers instead of X
-  - normalized
-check_sorted_indices: false  # verify CSR indices are sorted per row
 ```
 
 ### Qualifier syntax for numeric fields
@@ -93,15 +83,16 @@ Applies to `obs` and `vars`. Plain integers are treated as `==`.
 ## Output format
 
 ```
-PASS  shape           8312 obs × 33694 vars  (>= 1000 obs, >= 500 vars)
-PASS  x_dtype         f32
-PASS  layers          normalized
-PASS  obsm            X_pca, X_umap
-PASS  obsp            connectivities, distances
-PASS  var_columns     highly_variable, dispersions, dispersions_norm
-FAIL  obs_columns     missing: leiden
-PASS  obs_index       unique
-PASS  var_index       unique
+PASS  obs                  8312  (>= 1000)
+PASS  vars                 33694  (>= 500)
+PASS  x_dtype              f32
+PASS  layers               normalized
+PASS  obsm                 X_pca, X_umap
+PASS  obsp                 connectivities, distances
+PASS  var_columns          highly_variable, dispersions, dispersions_norm
+FAIL  obs_columns          missing: leiden
+PASS  obs_index_unique     unique
+PASS  var_index_unique     unique
 
 1 check failed.
 ```
@@ -112,7 +103,7 @@ Machine-readable JSON output with `--json`:
 {
   "file": "results/normalized.h5ad",
   "schema": "schemas/after_normalization.yaml",
-  "passed": 8,
+  "passed": 9,
   "failed": 1,
   "checks": [
     { "name": "obs_columns", "status": "FAIL", "detail": "missing: leiden" }
@@ -124,7 +115,7 @@ Machine-readable JSON output with `--json`:
 
 ## Cost model
 
-All checks below run without reading any matrix data:
+No check reads matrix data:
 
 | Check | Data read |
 |-------|-----------|
@@ -132,14 +123,6 @@ All checks below run without reading any matrix data:
 | `layers` / `obsm` / `obsp` / `var_columns` / `obs_columns` | group/dataset names only |
 | `x_dtype` | X/data dtype attribute only |
 | `obs_index_unique` / `var_index_unique` | index string array |
-
-Opt-in data scans:
-
-| Check | Data read |
-|-------|-----------|
-| `check_finite` | full X data array |
-| `check_finite_layers` | named layer data arrays |
-| `check_sorted_indices` | X/indices array |
 
 ---
 
