@@ -11,9 +11,9 @@
 # reads the same layout the same way; this one exists for Zarr v3 and the
 # other formats, which have no R seed.
 #
-# ponytail: the file is reopened per block, so the row pointer (8 bytes per
-# cell) is reread each time; cache it in the seed if blockApply over a
-# multi-million-cell store shows it in a profile.
+# The file is reopened for every block. Measured on 100k cells (h5ad): 200
+# opens take 0.13 s, against 2 s reading the same cells, so a cached reader
+# isn't worth the serialisation and fork-safety it would need.
 
 #' DelayedArray seed backed by the scx engine
 #'
@@ -22,12 +22,19 @@
 #' the selected cells from disk on h5ad and Zarr stores; other formats read
 #' the whole matrix per block and keep the selection.
 #'
+#' Block-wise operations (`rowSums()`, `colSums()`, `blockApply()`, ...) take
+#' every feature for a range of cells per block. On h5ad and Zarr the number
+#' of cells per block follows DelayedArray's block size, so
+#' `DelayedArray::setAutoBlockSize()` sets the peak memory, as for HDF5Array
+#' seeds. Other formats read the whole matrix per block, so their blocks are
+#' `chunk_size` cells wide, to keep the number of passes down.
+#'
 #' @param path Path to an `.h5ad` file, `.zarr` directory, or any other
 #'   format scx reads.
 #' @param layer Name of a layer to expose instead of `X` (h5ad and Zarr).
 #'   `NULL` (default) exposes `X`.
-#' @param chunk_size Cells per internal read chunk; also the seed's
-#'   `chunkdim()` width, which block processing follows.
+#' @param chunk_size Cells per internal read chunk. For formats other than
+#'   h5ad and Zarr, also the block width in cells (the seed's `chunkdim()`).
 #' @return `PicklerickMatrix()` returns a `DelayedMatrix`;
 #'   `PicklerickMatrixSeed()` the underlying seed.
 #' @examples
@@ -35,7 +42,8 @@
 #' m <- PicklerickMatrix("pbmc.zarr")
 #' dim(m)
 #' m[1:10, 1:5]                       # reads 5 cells
-#' DelayedArray::colSums(m)           # block-wise, chunk_size cells at a time
+#' DelayedArray::colSums(m)           # block-wise
+#' DelayedArray::setAutoBlockSize(50e6) # smaller blocks, lower peak memory
 #' }
 #' @export
 PicklerickMatrix <- function(path, layer = NULL, chunk_size = 5000L) {
@@ -51,7 +59,9 @@ setClass("PicklerickMatrixSeed",
     layer      = "character",
     dim        = "integer",
     dimnames   = "list",
-    chunk_size = "integer"
+    chunk_size = "integer",
+    # Reads only the requested cells (h5ad, Zarr); see chunkdim().
+    row_ranges = "logical"
   )
 )
 
@@ -66,7 +76,8 @@ PicklerickMatrixSeed <- function(path, layer = NULL, chunk_size = 5000L) {
     layer      = layer,
     dim        = c(info$n_vars, info$n_obs),
     dimnames   = list(info$var_index, info$obs_index),
-    chunk_size = max(1L, as.integer(chunk_size))
+    chunk_size = max(1L, as.integer(chunk_size)),
+    row_ranges = isTRUE(info$row_ranges)
   )
 }
 
@@ -85,6 +96,8 @@ setMethod("dimnames", "PicklerickMatrixSeed", function(x) x@dimnames)
 setMethod("show", "PicklerickMatrixSeed", function(object) {
   cat(sprintf("<PicklerickMatrixSeed> %d x %d (features x cells), chunk_size %d\n",
               object@dim[[1L]], object@dim[[2L]], object@chunk_size))
+  cat("  blocks:", if (object@row_ranges) "sized by DelayedArray::getAutoBlockSize()"
+      else sprintf("%d cells (no row-range reads for this format)", object@chunk_size), "\n")
   cat("  path:  ", object@path, "\n", sep = "")
   cat("  matrix:", if (nzchar(object@layer)) paste0("layers/", object@layer) else "X", "\n")
 })
@@ -96,7 +109,11 @@ setMethod("is_sparse", "PicklerickMatrixSeed", function(x) TRUE)
 #' @rdname PicklerickMatrix
 #' @export
 setMethod("chunkdim", "PicklerickMatrixSeed", function(x) {
-  c(x@dim[[1L]], min(x@chunk_size, x@dim[[2L]]))
+  # One-cell chunks let DelayedArray size blocks from getAutoBlockSize(),
+  # when any cell range is cheap to read. Otherwise every block is a full
+  # pass over the matrix, so blocks are chunk_size cells wide.
+  width <- if (x@row_ranges) 1L else x@chunk_size
+  c(x@dim[[1L]], min(width, x@dim[[2L]]))
 })
 
 # Sorted unique 1-based cell indices -> 0-based half-open ranges, as the two
