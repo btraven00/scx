@@ -778,7 +778,7 @@ impl DatasetWriter for H5SeuratWriter {
         tracing::info!(
             n_obs  = self.n_obs,
             n_vars = self.n_vars,
-            nnz    = self.x_indptr.last().copied().unwrap_or(0),
+            nnz    = self.file.dataset(&format!("{layer_path}/indices"))?.size(),
             assay  = %self.assay,
             layer  = %self.layer,
             "h5seurat finalized"
