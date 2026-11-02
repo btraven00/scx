@@ -235,8 +235,9 @@ values in memory.
 ## Controlling peak memory
 
 Peak memory is set by the block size, not by the size of the data. For an
-`.h5ad` or Zarr store, `DelayedArray::setAutoBlockSize()` sets it, for both
-`PicklerickMatrix()` and HDF5Array's seed (default 100 MB):
+`.h5ad`, Zarr store, `.h5seurat` (dgCMatrix) or 10x `.h5`,
+`DelayedArray::setAutoBlockSize()` sets it, for both `PicklerickMatrix()`
+and HDF5Array's seed (default 100 MB):
 
 ```{r}
 old <- DelayedArray::getAutoBlockSize()
@@ -258,9 +259,9 @@ On a 100,000-cell subset of the Human Lung Cell Atlas (28,024 genes,
 | HDF5Array seed, 100 MB blocks | 0.97 GB | 11.2 s |
 
 Smaller blocks lower the peak a little and add per-block overhead; past
-~100 MB, larger blocks cost memory without being faster. Formats other than
-`.h5ad` and Zarr can't yet read a range of cells on its own, so their blocks
-are `chunk_size` cells wide and each block reads through the matrix.
+~100 MB, larger blocks cost memory without being faster. BPCells and
+MatrixMarket can't yet read a range of cells on its own, so their blocks are
+`chunk_size` cells wide and each block reads through the matrix.
 
 # Writing
 

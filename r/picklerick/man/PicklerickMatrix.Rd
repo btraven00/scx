@@ -39,8 +39,9 @@ format scx reads.}
 \item{layer}{Name of a layer to expose instead of \code{X} (h5ad and Zarr).
 \code{NULL} (default) exposes \code{X}.}
 
-\item{chunk_size}{Cells per internal read chunk. For formats other than
-h5ad and Zarr, also the block width in cells (the seed's \code{chunkdim()}).}
+\item{chunk_size}{Cells per internal read chunk. For formats that can't
+read a range of cells directly (BPCells, MatrixMarket), also the block
+width in cells (the seed's \code{chunkdim()}).}
 
 \item{x}{A \code{PicklerickMatrixSeed}.}
 
@@ -56,13 +57,15 @@ vector or \code{NULL} for all, as \code{S4Arrays::extract_array()} passes it.}
 \description{
 \code{PicklerickMatrix()} returns a \code{DelayedMatrix} (features x cells) whose
 blocks are read on demand through scx. Column (cell) selections read only
-the selected cells from disk on h5ad and Zarr stores; other formats read
-the whole matrix per block and keep the selection.
+the selected cells from disk on h5ad, Zarr, h5seurat (dgCMatrix) and 10x
+HDF5; other formats (BPCells, MatrixMarket) read the whole matrix per
+block and keep the selection.
 }
 \details{
 Block-wise operations (\code{rowSums()}, \code{colSums()}, \code{blockApply()}, ...) take
-every feature for a range of cells per block. On h5ad and Zarr the number
-of cells per block follows DelayedArray's block size, so
+every feature for a range of cells per block. Where cells are read by range
+(h5ad, Zarr, h5seurat with dgCMatrix, 10x HDF5), the number of cells per
+block follows DelayedArray's block size, so
 \code{DelayedArray::setAutoBlockSize()} sets the peak memory, as for HDF5Array
 seeds. Other formats read the whole matrix per block, so their blocks are
 \code{chunk_size} cells wide, to keep the number of passes down.
