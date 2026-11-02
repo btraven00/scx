@@ -491,6 +491,15 @@ async fn test_slot_parity_roundtrip() {
     writer.finalize().await.unwrap();
     drop(writer);
 
+    // Layers and graphs keep the source dtype (f32 here); they used to be
+    // widened to f64, which doubled the size of a counts layer.
+    let f = hdf5::File::open(&path).unwrap();
+    for ds in ["assays/RNA/data/data", "graphs/knn/data"] {
+        let d = f.dataset(ds).unwrap();
+        assert!(d.dtype().unwrap().is::<f32>(), "{ds} is not f32");
+    }
+    drop(f);
+
     // Re-read and verify
     let mut reader = H5SeuratReader::open(&path, 100, None, None).unwrap();
     assert_eq!(reader.shape(), (n_obs, n_vars));

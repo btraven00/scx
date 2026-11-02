@@ -8,7 +8,7 @@ use ndarray::{s, Array1, Array2};
 
 use crate::h5_str::{write_str_array_attr, write_strings};
 use crate::{
-    dtype::DataType,
+    dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
@@ -56,6 +56,8 @@ struct SparseWriteState {
     indptr: Vec<u64>,
     /// Shape of the matrix: (nrows, ncols).
     shape: (usize, usize),
+    /// Value dtype, taken from the first chunk; `data` is created then.
+    dtype: Option<DataType>,
 }
 
 pub struct H5SeuratWriter {
@@ -133,12 +135,7 @@ impl H5SeuratWriter {
         // Resizable datasets for streaming x-chunk writes.
         let data_path = format!("assays/{assay}/{layer}/data");
         let indices_path = format!("assays/{assay}/{layer}/indices");
-        match dtype {
-            DataType::F32 => seurat_init_resizable::<f32>(&file, &data_path)?,
-            DataType::F64 => seurat_init_resizable::<f64>(&file, &data_path)?,
-            DataType::I32 => seurat_init_resizable::<i32>(&file, &data_path)?,
-            DataType::U32 => seurat_init_resizable::<u32>(&file, &data_path)?,
-        }
+        seurat_init_values(&file, &data_path, dtype)?;
         seurat_init_resizable::<i32>(&file, &indices_path)?;
 
         Ok(Self {
@@ -220,6 +217,27 @@ pub(crate) fn reductions<'a>(
         )));
     }
     Ok(out)
+}
+
+fn seurat_init_values(file: &File, path: &str, dtype: DataType) -> Result<()> {
+    match dtype {
+        DataType::F32 => seurat_init_resizable::<f32>(file, path),
+        DataType::F64 => seurat_init_resizable::<f64>(file, path),
+        DataType::I32 => seurat_init_resizable::<i32>(file, path),
+        DataType::U32 => seurat_init_resizable::<u32>(file, path),
+    }
+}
+
+/// Write `v` into `ds[at..at + v.len()]` in its own dtype.
+fn write_typed_slice(ds: &hdf5::Dataset, v: &TypedVec, at: usize) -> Result<()> {
+    let r = s![at..at + v.len()];
+    match v {
+        TypedVec::F32(x) => ds.write_slice(x.as_slice(), r)?,
+        TypedVec::F64(x) => ds.write_slice(x.as_slice(), r)?,
+        TypedVec::I32(x) => ds.write_slice(x.as_slice(), r)?,
+        TypedVec::U32(x) => ds.write_slice(x.as_slice(), r)?,
+    }
+    Ok(())
 }
 
 /// Write a SeuratDisk data.frame group (`meta.data`, `meta.features`): its
@@ -451,14 +469,15 @@ impl DatasetWriter for H5SeuratWriter {
 
         crate::h5::create_group(&self.file, &group_path)?;
 
-        // Pre-create resizable data/indices datasets so chunks can be appended.
-        seurat_init_resizable::<f64>(&self.file, &format!("{group_path}/data"))?;
+        // Pre-create indices so chunks can be appended; `data` waits for the
+        // first chunk, so it keeps the source dtype.
         seurat_init_resizable::<i32>(&self.file, &format!("{group_path}/indices"))?;
 
         self.sparse_state = Some(SparseWriteState {
             group_path,
             indptr: vec![0u64],
             shape: meta.shape,
+            dtype: None,
         });
         Ok(())
     }
@@ -470,14 +489,18 @@ impl DatasetWriter for H5SeuratWriter {
 
         let csr = &chunk.data;
         let nnz = csr.indices.len();
+        let data_path = format!("{}/data", state.group_path);
+        if state.dtype.is_none() {
+            seurat_init_values(&self.file, &data_path, csr.data.dtype())?;
+            state.dtype = Some(csr.data.dtype());
+        }
 
         if nnz > 0 {
-            let data_ds = self.file.dataset(&format!("{}/data", state.group_path))?;
+            let data_ds = self.file.dataset(&data_path)?;
             let old_len = data_ds.shape()[0];
             let new_len = old_len + nnz;
             data_ds.resize(new_len)?;
-            let vals: Vec<f64> = csr.data.to_f64();
-            data_ds.write_slice(&Array1::from_vec(vals), s![old_len..new_len])?;
+            write_typed_slice(&data_ds, &csr.data, old_len)?;
 
             let idx_ds = self
                 .file
@@ -501,6 +524,14 @@ impl DatasetWriter for H5SeuratWriter {
         })?;
 
         let grp = self.file.group(&state.group_path)?;
+        if state.dtype.is_none() {
+            // No chunks at all: an empty matrix, so the dtype is moot.
+            seurat_init_values(
+                &self.file,
+                &format!("{}/data", state.group_path),
+                DataType::F32,
+            )?;
+        }
 
         // Write indptr.
         let max_ptr = state.indptr.iter().copied().max().unwrap_or(0);
