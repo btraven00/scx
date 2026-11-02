@@ -855,6 +855,8 @@ async fn dgcmatrix_copies_h5ad_csr_as_stored() {
         }
         w.finalize().await.unwrap();
         drop(w);
+        // The copied counts group is created untimed (reproducible output).
+        crate::h5::assert_untimed(tmp.path());
 
         let (s, o) = (File::open(&src).unwrap(), File::open(tmp.path()).unwrap());
         for (group, slot) in groups {

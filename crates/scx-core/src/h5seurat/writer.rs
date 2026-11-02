@@ -803,7 +803,7 @@ impl DatasetWriter for H5SeuratWriter {
         let grp = if is_x {
             self.file.group(&path)?
         } else {
-            self.file.create_group(&path)?
+            crate::h5::create_group(&self.file, &path)?
         };
         // Copy under temporary names, renamed once all three are in.
         let tmp = |name: &str| format!("{name}.copy");
