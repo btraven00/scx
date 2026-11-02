@@ -75,6 +75,7 @@ enum Cli {
     ///   .h5seurat  — SeuratDisk H5Seurat
     ///   .bpcells   — BPCells matrix directory (X + dimnames only)
     ///   .zarr      — AnnData Zarr v3 store (directory)
+    #[command(verbatim_doc_comment)]
     Convert {
         /// Input file
         input: String,
@@ -210,6 +211,7 @@ enum Cli {
     ///   obsm: [X_pca]
     ///   x_dtype: f32
     ///   obs_index_unique: true
+    #[command(verbatim_doc_comment)]
     Validate {
         /// Input file (.h5ad)
         input: String,
@@ -239,6 +241,7 @@ enum Cli {
     ///   obs, obs:col_name, var, var:col_name
     ///   obsm, obsm:key, varm, varm:key
     ///   layers, layers:key, obsp, obsp:key, varp, varp:key
+    #[command(verbatim_doc_comment)]
     Snapshot {
         /// Input file (.h5seurat, .h5ad, …)
         input: String,
@@ -283,6 +286,7 @@ enum Cli {
     ///   scx export merged.h5ad --slot obs --output cells.csv
     ///   scx export merged.h5ad --slot var --output genes.parquet
     ///   scx export merged.h5ad --slot obsm/X_pca --output pca.csv
+    #[command(verbatim_doc_comment)]
     Export {
         /// Input file (h5ad or h5seurat)
         input: String,
@@ -318,6 +322,7 @@ enum Cli {
     /// Examples:
     ///   scx concat a.h5ad b.h5ad -o all.h5ad --label sample
     ///   scx concat s*.h5ad -o all.h5ad --join outer --index-unique -
+    #[command(verbatim_doc_comment)]
     Concat {
         /// Input files (two or more)
         #[arg(required = true, num_args = 1..)]
@@ -383,6 +388,7 @@ enum Cli {
     /// Examples:
     ///   scx merge --base raw.h5ad --patch norm.h5ad:layers/normalized --output merged.h5ad
     ///   scx merge --config merge.yaml
+    #[command(verbatim_doc_comment)]
     Merge {
         /// Base file to copy (create mode; mutually exclusive with --into)
         #[arg(long, conflicts_with = "into")]
