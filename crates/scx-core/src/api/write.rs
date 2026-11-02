@@ -1336,6 +1336,40 @@ mod tests {
         BpcellsOptions::default(),
         ["layers", "obsp"]
     );
+    /// `X_pca` and `pca` both become H5Seurat reduction `pca`: both writers
+    /// must name the clash instead of failing inside HDF5.
+    #[test]
+    fn h5seurat_rejects_colliding_reduction_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let obsm = || Embeddings {
+            map: ["X_pca", "pca"]
+                .map(|k| {
+                    let m = DenseMatrix {
+                        shape: (4, 2),
+                        data: vec![0.0; 8],
+                    };
+                    (k.to_string(), m)
+                })
+                .into(),
+        };
+        let opts = BpcellsOptions::default();
+        let check = |err: ScxError| {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("both map to H5Seurat reduction `pca`"),
+                "{msg}"
+            );
+        };
+        let p = dir.path().join("a.h5seurat");
+        let mut b = H5SeuratBuilder::new(&p, 4, 4, &opts).unwrap();
+        check(b.add_obsm(obsm()).err().unwrap());
+        // BPCells writes obsm at finalize.
+        let p = dir.path().join("b.h5seurat");
+        let mut b = BpcellsH5SeuratBuilder::new(&p, 4, 4, &opts).unwrap();
+        b.add_obsm(obsm()).unwrap();
+        check(b.finalize().err().unwrap());
+    }
+
     // Without SeuratDisk compat, `graphs` is not pre-created, so obsp's
     // `graphs/<name>` path used to create it as a timestamped parent.
     byte_reproducible_test!(

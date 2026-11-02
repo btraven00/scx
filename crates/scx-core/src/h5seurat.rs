@@ -9,8 +9,8 @@ mod writer;
 
 pub use reader::{open_h5seurat, H5SeuratReader};
 pub(crate) use writer::seurat_write_meta_cols;
-pub(crate) use writer::seurat_write_uns;
 pub use writer::H5SeuratWriter;
+pub(crate) use writer::{reductions, seurat_write_uns};
 
 use crate::error::Result;
 use crate::ir::SparseMatrixMeta;
