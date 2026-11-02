@@ -9,7 +9,7 @@ use scx_core::{
     detect::{self, Format},
     dtype::{DataType, TypedVec},
     h5ad::H5AdWriter,
-    h5seurat::H5SeuratWriter,
+    h5seurat::{auto_counts_source, CountsSource, H5SeuratWriter},
     ir::{mask_to_ranges, Column, MatrixChunk, SparseMatrixMeta},
     stream::{DatasetReader, DatasetWriter},
     zarr_ad::ZarrAdWriter,
@@ -84,6 +84,7 @@ async fn convert(
     writer: &mut dyn DatasetWriter,
     layer_metas: &[SparseMatrixMeta],
     skip_layer: Option<&str>,
+    raw_counts: Option<&SparseMatrixMeta>,
     chunk_size: usize,
 ) -> anyhow::Result<()> {
     writer.write_obs(&reader.obs().await?).await?;
@@ -98,6 +99,15 @@ async fn convert(
         }
         writer.begin_sparse("layers", &meta.name, meta).await?;
         let mut stream = reader.layer_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            writer.write_sparse_chunk(&chunk?).await?;
+        }
+        writer.end_sparse().await?;
+    }
+    // AnnData's raw.X is the counts of a normalised X: Seurat's `counts` slot.
+    if let Some(meta) = raw_counts {
+        writer.begin_sparse("layers", "counts", meta).await?;
+        let mut stream = reader.raw_stream(meta, chunk_size);
         while let Some(chunk) = stream.next().await {
             writer.write_sparse_chunk(&chunk?).await?;
         }
@@ -121,7 +131,8 @@ async fn convert(
 }
 
 /// H5Seurat output follows `scx convert --x-slot auto`: when the source has a
-/// `counts` layer, X is taken to be normalised and goes to the `data` slot.
+/// `counts` layer, or a raw.X with X's genes, X is taken to be normalised and
+/// goes to the `data` slot (`scx_core::h5seurat::auto_counts_source`).
 /// H5AD output writes the matrix to `x_slot` (`"X"` or `"layers/<name>"`).
 #[pyfunction]
 #[pyo3(signature = (input, output, chunk_size, dtype, assay, layer, x_slot = "X"))]
@@ -143,12 +154,21 @@ fn scx_convert(
         let is_seurat = output
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("h5seurat"));
+        let counts_source = if is_seurat {
+            block_on(auto_counts_source(&mut *reader, &layer_metas))?
+        } else {
+            None
+        };
         let slot = if !is_seurat {
             x_slot
-        } else if layer_metas.iter().any(|m| m.name == "counts") {
+        } else if counts_source.is_some() {
             "data"
         } else {
             "counts"
+        };
+        let raw_counts = match &counts_source {
+            Some(CountsSource::Raw(meta)) => Some(meta),
+            _ => None,
         };
         let mut writer = create_writer(output, n_obs, n_vars, dtype, assay, slot)?;
         // A source layer with the destination's name can't coexist with it.
@@ -162,6 +182,7 @@ fn scx_convert(
             &mut *writer,
             &layer_metas,
             skip,
+            raw_counts,
             chunk_size,
         ))
     };

@@ -14,7 +14,7 @@ use scx_core::{
     detect::Format,
     dtype::{DataType, TypedVec},
     h5ad::H5AdWriter,
-    h5seurat::H5SeuratWriter,
+    h5seurat::{auto_counts_source, CountsSource, H5SeuratWriter},
     zarr_ad::ZarrAdWriter,
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
@@ -84,15 +84,19 @@ async fn do_convert(
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
     // H5Seurat output follows `scx convert --x-slot auto`: with a `counts`
-    // layer in the source, X is taken to be normalised and goes to `data`,
-    // and the layer keeps the `counts` slot. A source layer named like X's
-    // slot is skipped, as the two cannot coexist.
-    let has_counts = layer_metas.iter().any(|m| m.name == "counts");
+    // layer, or a raw.X with X's genes, X is taken to be normalised and goes
+    // to `data`, and the layer or raw.X fills `counts`. A source layer named
+    // like X's slot is skipped, as the two cannot coexist.
+    let counts_source = if ext.as_deref() == Some("h5seurat") {
+        auto_counts_source(reader, &layer_metas).await?
+    } else {
+        None
+    };
     let (mut writer, skip_layer): (Box<dyn DatasetWriter>, Option<&str>) = match ext.as_deref() {
         Some("h5ad") => (Box::new(H5AdWriter::create(output, n_obs, n_vars, dtype)?), None),
         Some("zarr") => (Box::new(ZarrAdWriter::create(output, n_obs, n_vars, dtype)?), None),
         Some("h5seurat") => {
-            let slot = if has_counts { "data" } else { "counts" };
+            let slot = if counts_source.is_some() { "data" } else { "counts" };
             let w = H5SeuratWriter::create(
                 output, n_obs, n_vars, dtype, Some(assay), Some(slot), None, false,
             )?;
@@ -115,6 +119,14 @@ async fn do_convert(
         }
         writer.begin_sparse("layers", &meta.name, meta).await?;
         let mut stream = reader.layer_stream(meta, n_obs);
+        while let Some(chunk) = stream.next().await {
+            writer.write_sparse_chunk(&chunk?).await?;
+        }
+        writer.end_sparse().await?;
+    }
+    if let Some(CountsSource::Raw(meta)) = &counts_source {
+        writer.begin_sparse("layers", "counts", meta).await?;
+        let mut stream = reader.raw_stream(meta, n_obs);
         while let Some(chunk) = stream.next().await {
             writer.write_sparse_chunk(&chunk?).await?;
         }

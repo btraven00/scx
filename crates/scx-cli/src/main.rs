@@ -122,10 +122,11 @@ enum Cli {
         /// (default). H5AD: X (= auto) or layers/<name>, which writes the
         /// matrix there and leaves /X absent.
         ///
-        /// auto (H5Seurat): if the source has a layer named "counts", X is
-        /// assumed to be normalised and goes into the "data" slot; otherwise
-        /// X goes into "counts". A source layer with the target's name is
-        /// skipped.
+        /// auto (H5Seurat): if the source has a layer named "counts", or an
+        /// AnnData raw.X with X's cells and genes, X is assumed to be
+        /// normalised and goes into the "data" slot, and that layer or raw.X
+        /// goes into "counts"; otherwise X goes into "counts". A source layer
+        /// with the target's name is skipped.
         #[arg(long, default_value = "auto")]
         x_slot: String,
 
@@ -948,20 +949,29 @@ async fn convert_with_reader(
     };
 
     // Resolve the effective X slot.
-    // H5Seurat auto: if source has a "counts" layer, X is assumed normalised → goes to "data".
+    // H5Seurat auto: if the source has a "counts" layer or a matching raw.X, X
+    // is assumed normalised → goes to "data" (scx_core::h5seurat::auto_counts_source).
     // H5AD auto: "/X". Anything explicit is passed to the writer as-is.
+    let counts_source = if is_h5seurat && x_slot == "auto" {
+        scx_core::h5seurat::auto_counts_source(reader, &layer_metas).await?
+    } else {
+        None
+    };
     let effective_x_slot: &str = match (is_h5seurat, x_slot) {
-        (true, "auto") => {
-            if layer_metas.iter().any(|m| m.name == "counts") {
+        (true, "auto") => match &counts_source {
+            Some(src) => {
+                let from = match src {
+                    scx_core::h5seurat::CountsSource::Layer => "'counts' layer",
+                    scx_core::h5seurat::CountsSource::Raw(_) => "raw.X",
+                };
                 tracing::info!(
-                    "source has a 'counts' layer — writing X to 'data' slot, \
-                     'counts' layer to 'counts' slot (use --x-slot counts to override)"
+                    "writing X to 'data' slot, {from} to 'counts' slot \
+                     (use --x-slot counts to override)"
                 );
                 "data"
-            } else {
-                out_layer
             }
-        }
+            None => out_layer,
+        },
         (false, "auto") => "X",
         (_, other) => other,
     };
@@ -1082,6 +1092,17 @@ async fn convert_with_reader(
         tracing::info!(name = %meta.name, shape = ?meta.shape, "streaming layer");
         writer.begin_sparse("layers", &meta.name, meta).await?;
         let mut stream = reader.layer_stream(meta, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            writer.write_sparse_chunk(&chunk?).await?;
+        }
+        writer.end_sparse().await?;
+    }
+
+    // AnnData's raw.X is the counts of a normalised X: Seurat's `counts` slot.
+    if let Some(scx_core::h5seurat::CountsSource::Raw(meta)) = &counts_source {
+        tracing::info!(shape = ?meta.shape, "streaming raw.X into 'counts'");
+        writer.begin_sparse("layers", "counts", meta).await?;
+        let mut stream = reader.raw_stream(meta, chunk_size);
         while let Some(chunk) = stream.next().await {
             writer.write_sparse_chunk(&chunk?).await?;
         }

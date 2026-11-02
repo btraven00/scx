@@ -145,6 +145,22 @@ pub trait DatasetReader: Send {
         Ok(Vec::new())
     }
 
+    /// AnnData's `raw.X`, when it has exactly X's cells and genes and so can
+    /// stand in as X's counts. `None` for formats without `raw`, and when
+    /// `raw` keeps a different gene set. Stream it with `raw_stream`.
+    async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {
+        Ok(None)
+    }
+
+    /// Stream row-chunks of `raw.X`. `meta` must come from `raw_meta()`.
+    fn raw_stream<'a>(
+        &'a self,
+        _meta: &'a SparseMatrixMeta,
+        _chunk_size: usize,
+    ) -> ChunkStream<'a> {
+        no_such_matrix("raw")
+    }
+
     /// Stream row-chunks for the named layer.  `meta` must come from `layer_metas()`.
     ///
     /// The default is for formats without any: it yields an error, since
