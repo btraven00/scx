@@ -194,11 +194,12 @@ def open_stream(
     consumer, so peak memory is bounded by the chunk size, not the file.
 
     ``rows`` and ``where`` select rows; with both, a row must satisfy both.
-    On h5ad and Zarr only the selected rows are read (the row pointer is
-    loaded, then just their slices of ``data``/``indices``), so filtering
-    costs what the matching rows cost. Chunks never span a gap in the
-    selection, and ``chunk.row_offset`` is each chunk's first row in the
-    full matrix.
+    On h5ad, Zarr, h5seurat (dgCMatrix) and 10x HDF5 only the selected rows
+    are read (the row pointer is loaded, then just their slices of
+    ``data``/``indices``), so filtering costs what the matching rows cost;
+    BPCells and MatrixMarket input is still read through. Chunks never span
+    a gap in the selection, and ``chunk.row_offset`` is each chunk's first
+    row in the full matrix.
 
     ``axis="var"`` streams blocks of whole genes over every cell, for
     per-gene work such as one GLM per gene. It needs X stored by gene: an

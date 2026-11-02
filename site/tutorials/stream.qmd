@@ -64,10 +64,11 @@ np.allclose(totals, np.asarray(adata.X.sum(axis=1)).ravel())
 
 ## Reading only some cells
 
-`where` selects cells by their `obs` values and `rows` by position. On h5ad
-and Zarr files only the selected rows are read from disk, so a filter costs
-what the matching cells cost. A chunk never spans a gap in the selection, and
-`row_offset` still refers to the full matrix.
+`where` selects cells by their `obs` values and `rows` by position. On h5ad,
+Zarr, h5seurat (dgCMatrix) and 10x HDF5 files only the selected rows are read
+from disk, so a filter costs what the matching cells cost; BPCells and
+MatrixMarket input is still read through. A chunk never spans a gap in the
+selection, and `row_offset` still refers to the full matrix.
 
 ```{python}
 for chunk in pk.open_stream("tiny.h5ad", where={"cell_type": "T"}):
