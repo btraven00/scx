@@ -244,6 +244,67 @@ enum Cli {
         json: bool,
     },
 
+    /// Compare two datasets slot by slot
+    ///
+    /// Reads A and B (any formats scx reads) and reports, per slot, whether
+    /// they are the same, the same within tolerance, different, or present
+    /// on one side only. Matrices are streamed. What conversion legitimately
+    /// changes (storage dtype, categorical level order) is a NOTE, not a
+    /// difference; empty and absent slots compare equal.
+    ///
+    /// Exits 0 when everything compared is the same, 1 when something
+    /// differs or couldn't be compared, 2 when the comparison couldn't run.
+    /// See docs/diff.md.
+    #[command(verbatim_doc_comment)]
+    Diff {
+        /// First dataset (A)
+        a: String,
+
+        /// Second dataset (B)
+        b: String,
+
+        /// Relative tolerance for floats: |a - b| <= atol + rtol * |b|
+        #[arg(long, default_value_t = 1e-6)]
+        rtol: f64,
+
+        /// Absolute tolerance for floats
+        #[arg(long, default_value_t = 0.0)]
+        atol: f64,
+
+        /// Require floats to match exactly (rtol = atol = 0)
+        #[arg(long)]
+        exact: bool,
+
+        /// Compare only these slots (same syntax as convert --only)
+        #[arg(long)]
+        only: Option<String>,
+
+        /// Skip these slots (same syntax as convert --exclude)
+        #[arg(long)]
+        exclude: Option<String>,
+
+        /// Pair matrix slots whose names differ, as A=B (repeatable), e.g.
+        /// --map X=layers/data --map raw=X. Names: X, raw, layers/<n>, obsp/<n>
+        #[arg(long = "map", value_name = "A=B")]
+        map: Vec<String>,
+
+        /// Match cells and genes by index name or by position
+        #[arg(long, default_value = "name", value_parser = ["name", "position"])]
+        by: String,
+
+        /// Mismatching entries listed per slot
+        #[arg(long, default_value_t = 5)]
+        max_examples: usize,
+
+        /// Rows per streamed chunk
+        #[arg(long, default_value_t = 5000)]
+        chunk_size: usize,
+
+        /// Emit the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Dump a materialised IR snapshot to a directory of NPY files
     ///
     /// Reads the input file and writes raw-binary NPY arrays plus a
@@ -485,6 +546,63 @@ async fn validate_file(
     Ok(report)
 }
 
+/// Open A and B and compare them.
+async fn run_diff(
+    a: &str,
+    b: &str,
+    map: &[String],
+    mut opts: scx_core::diff::DiffOptions,
+) -> anyhow::Result<scx_core::diff::DiffReport> {
+    for m in map {
+        let (x, y) = m
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--map '{m}': expected A=B, e.g. X=layers/data"))?;
+        opts.map.push((x.trim().to_string(), y.trim().to_string()));
+    }
+    let open_opts = scx_core::OpenOptions::new(opts.chunk_size);
+    let mut ra = scx_core::open(a, &open_opts)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open '{a}': {e}"))?;
+    let mut rb = scx_core::open(b, &open_opts)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open '{b}': {e}"))?;
+    Ok(scx_core::diff::diff(&mut *ra, &mut *rb, &opts).await?)
+}
+
+fn print_diff_human(report: &scx_core::diff::DiffReport) {
+    use scx_core::diff::Status;
+    for s in &report.slots {
+        let label = format!("{:<7}", s.status.label());
+        let label = match s.status {
+            Status::Same => label.if_supports_color(Stdout, |t| t.green()).to_string(),
+            _ => label.if_supports_color(Stdout, |t| t.red()).to_string(),
+        };
+        println!("{label} {:<20} {}", s.slot, s.summary);
+        for d in &s.details {
+            println!("{:8} {d}", "");
+        }
+        for n in &s.notes {
+            let note = format!("{:<7}", "NOTE");
+            println!(
+                "{} {:<20} {n}",
+                note.if_supports_color(Stdout, |t| t.yellow()),
+                s.slot
+            );
+        }
+    }
+    println!();
+    let n = report.n_differing();
+    if n == 0 {
+        println!("All {} slots the same.", report.slots.len());
+    } else {
+        println!(
+            "{n} slot{} differ{}.",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "s" } else { "" }
+        );
+    }
+}
+
 /// Drive the async CLI to completion.
 ///
 /// With `net`, object-store backends (S3/GCS/HTTP) need a live tokio reactor, so
@@ -533,6 +651,56 @@ async fn run() -> anyhow::Result<()> {
                 print_report_human(&report);
             }
             if !report.passed() {
+                std::process::exit(1);
+            }
+        }
+
+        Cli::Diff {
+            a,
+            b,
+            rtol,
+            atol,
+            exact,
+            only,
+            exclude,
+            map,
+            by,
+            max_examples,
+            chunk_size,
+            json,
+        } => {
+            let filter = match (only.as_deref(), exclude.as_deref()) {
+                (Some(o), _) => SlotFilter::from_only(o),
+                (_, Some(e)) => SlotFilter::from_exclude(e),
+                _ => SlotFilter::all(),
+            };
+            let opts = scx_core::diff::DiffOptions {
+                rtol: if exact { 0.0 } else { rtol },
+                atol: if exact { 0.0 } else { atol },
+                by: if by == "position" {
+                    scx_core::diff::MatchBy::Position
+                } else {
+                    scx_core::diff::MatchBy::Name
+                },
+                max_examples,
+                chunk_size,
+                filter,
+                map: Vec::new(),
+            };
+            // 2: the comparison couldn't run; 1: the datasets differ.
+            let report = match run_diff(&a, &b, &map, opts).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_diff_human(&report);
+            }
+            if !report.equal() {
                 std::process::exit(1);
             }
         }
