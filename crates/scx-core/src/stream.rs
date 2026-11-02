@@ -240,6 +240,15 @@ pub trait DatasetReader: Send {
         )
     }
 
+    /// Whether [`x_stream_rows`](Self::x_stream_rows) reads only the requested
+    /// rows from storage, so a range costs about its own size. `false`: it
+    /// passes over the whole matrix (the default, or a format that decodes
+    /// everything on open), which a caller reading many small ranges, such as
+    /// a block-wise R seed, should avoid.
+    fn reads_row_ranges(&self) -> bool {
+        false
+    }
+
     /// Stream only the rows in `ranges` (any order; overlaps are merged), as
     /// chunks of up to the reader's chunk size that never span two ranges.
     /// Each chunk's `row_offset` is its first row's index in the full matrix.

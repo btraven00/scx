@@ -8,8 +8,8 @@ use hdf5::File;
 
 use crate::h5::{read_csr_rows, read_u64, value_dtype};
 use crate::h5_str::{read_str_1d, read_str_attr, read_strings};
-use crate::stream::row_chunks;
 use crate::stream::ChunkStream;
+use crate::stream::{row_chunks, row_range_chunks};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -849,6 +849,17 @@ impl DatasetReader for H5SeuratReader {
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
+        let n_obs = self.n_obs;
+        self.x_stream_rows(vec![0..n_obs])
+    }
+
+    /// dgCMatrix reads only the requested cells' slices; BPCells decodes the
+    /// whole matrix when opened, then slices it.
+    fn reads_row_ranges(&self) -> bool {
+        matches!(self.x_backend, XBackend::DgCMatrix { .. })
+    }
+
+    fn x_stream_rows(&mut self, ranges: Vec<std::ops::Range<usize>>) -> ChunkStream<'_> {
         match &self.x_backend {
             XBackend::DgCMatrix { indptr, dtype } => {
                 let path = self.path.clone();
@@ -858,7 +869,7 @@ impl DatasetReader for H5SeuratReader {
                 let chunk_size = self.chunk_size;
                 let dtype = *dtype;
 
-                row_chunks(n_obs, chunk_size, move |rows| {
+                row_range_chunks(n_obs, ranges, chunk_size, move |rows| {
                     let (cell_start, cell_end) = (rows.start, rows.end);
                     File::open(&path).map_err(ScxError::from).and_then(|file| {
                         read_csr_rows(&file, &x_path, indptr, cell_start..cell_end, n_vars, dtype)
@@ -883,7 +894,7 @@ impl DatasetReader for H5SeuratReader {
                     }
                 };
 
-                row_chunks(n_obs, chunk_size, move |rows| {
+                row_range_chunks(n_obs, ranges, chunk_size, move |rows| {
                     let (cell_start, cell_end) = (rows.start, rows.end);
                     bp_reader.read_chunk(cell_start, cell_end)
                 })
