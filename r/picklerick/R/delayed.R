@@ -19,12 +19,14 @@
 #'
 #' `PicklerickMatrix()` returns a `DelayedMatrix` (features x cells) whose
 #' blocks are read on demand through scx. Column (cell) selections read only
-#' the selected cells from disk on h5ad and Zarr stores; other formats read
-#' the whole matrix per block and keep the selection.
+#' the selected cells from disk on h5ad, Zarr, h5seurat (dgCMatrix) and 10x
+#' HDF5; other formats (BPCells, MatrixMarket) read the whole matrix per
+#' block and keep the selection.
 #'
 #' Block-wise operations (`rowSums()`, `colSums()`, `blockApply()`, ...) take
-#' every feature for a range of cells per block. On h5ad and Zarr the number
-#' of cells per block follows DelayedArray's block size, so
+#' every feature for a range of cells per block. Where cells are read by range
+#' (h5ad, Zarr, h5seurat with dgCMatrix, 10x HDF5), the number of cells per
+#' block follows DelayedArray's block size, so
 #' `DelayedArray::setAutoBlockSize()` sets the peak memory, as for HDF5Array
 #' seeds. Other formats read the whole matrix per block, so their blocks are
 #' `chunk_size` cells wide, to keep the number of passes down.
@@ -33,8 +35,9 @@
 #'   format scx reads.
 #' @param layer Name of a layer to expose instead of `X` (h5ad and Zarr).
 #'   `NULL` (default) exposes `X`.
-#' @param chunk_size Cells per internal read chunk. For formats other than
-#'   h5ad and Zarr, also the block width in cells (the seed's `chunkdim()`).
+#' @param chunk_size Cells per internal read chunk. For formats that can't
+#'   read a range of cells directly (BPCells, MatrixMarket), also the block
+#'   width in cells (the seed's `chunkdim()`).
 #' @return `PicklerickMatrix()` returns a `DelayedMatrix`;
 #'   `PicklerickMatrixSeed()` the underlying seed.
 #' @examples
@@ -60,7 +63,7 @@ setClass("PicklerickMatrixSeed",
     dim        = "integer",
     dimnames   = "list",
     chunk_size = "integer",
-    # Reads only the requested cells (h5ad, Zarr); see chunkdim().
+    # Reads only the requested cells (scx's reads_row_ranges()); see chunkdim().
     row_ranges = "logical"
   )
 )

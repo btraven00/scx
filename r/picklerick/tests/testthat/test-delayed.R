@@ -93,10 +93,19 @@ test_that("block width follows setAutoBlockSize() where cells can be read by ran
   expect_identical(width(8 * nrow(m) * 25), 25L)
   expect_equal(DelayedArray::rowSums(m), Matrix::rowSums(as(as.matrix(m), "dgCMatrix")))
 
-  tenx <- file.path(SCX_ROOT, "tests", "fixtures", "tiny", "tiny_10x.h5")
-  skip_if_no_fixture(tenx)
-  t10 <- PicklerickMatrix(tenx, chunk_size = 2L)
-  expect_identical(DelayedArray::chunkdim(DelayedArray::seed(t10)), c(nrow(t10), 2L))
+  tiny <- function(f) {
+    p <- file.path(SCX_ROOT, "tests", "fixtures", "tiny", f)
+    skip_if_no_fixture(p)
+    p
+  }
+  # 10x and h5seurat (dgCMatrix) read cell ranges too: one-cell chunks.
+  for (f in c("tiny_10x.h5", "tiny_v5.h5seurat")) {
+    s <- PicklerickMatrixSeed(tiny(f), chunk_size = 2L)
+    expect_identical(DelayedArray::chunkdim(s), c(nrow(s), 1L), info = f)
+  }
+  # BPCells decodes its whole matrix per read: chunk_size-wide blocks.
+  bp <- PicklerickMatrix(tiny("tiny_v5_bpcells.h5seurat"), chunk_size = 2L)
+  expect_identical(DelayedArray::chunkdim(DelayedArray::seed(bp)), c(nrow(bp), 2L))
   DelayedArray::setAutoBlockSize(8)
-  expect_identical(ncol(DelayedArray::defaultAutoGrid(t10)[[1L]]), 2L)
+  expect_identical(ncol(DelayedArray::defaultAutoGrid(bp)[[1L]]), 2L)
 })
