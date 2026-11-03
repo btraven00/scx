@@ -43,6 +43,13 @@ pub fn is_network_url(s: &str) -> bool {
     }
 }
 
+/// Whether a network location is read in place by byte ranges (Parquet, by
+/// its `.parquet` name) rather than downloaded whole first.
+pub fn reads_by_range(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or_default();
+    path.to_ascii_lowercase().ends_with(".parquet")
+}
+
 /// Resolve a location string to an object-store handle and the key within it.
 ///
 /// Reused by every network reader: construct the store here, hand the

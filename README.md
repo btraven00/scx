@@ -37,12 +37,16 @@ build can opt out with `--no-default-features` — see
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
 | MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
 | Parquet, local or S3/GCS/HTTP (build with `--features net`) | ✓ | |
-| Seurat `.rds` / `.rda` (counts + meta.data; v3/v4 `Assay`, v5 `Assay5`; URLs with `--features net`) | ✓ | |
+| Seurat `.rds` / `.rda` (counts + meta.data; v3/v4 `Assay`, v5 `Assay5`) | ✓ | |
 | bixverse binary sparse store, v3 and v4 (build with `--features bixverse`) | ✓ | |
 
 Any readable format converts to any writable one: everything goes through a
 single internal representation. Input is detected by content; output by
 extension (`.h5ad`, `.h5seurat`, `.zarr`, `.bpcells`).
+
+With `--features net`, the input can also be a URL (`https://`, `s3://`,
+`gs://`, …). Parquet is read in place by byte ranges; any other single-file
+format is downloaded to a temporary file first, and its SHA-256 recorded.
 
 ## Usage
 

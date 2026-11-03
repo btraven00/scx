@@ -59,21 +59,26 @@ impl Default for OpenOptions {
 /// Detect the format of `input` and open the matching [`DatasetReader`].
 ///
 /// `input` is a filesystem path, or — with the `net` feature — an object-store
-/// URL (`s3://`, `https://`, …): an `.rds`/`.rda` URL is downloaded and read as
-/// a Seurat object, anything else is routed to the Parquet reader.
+/// URL (`s3://`, `https://`, …): a `.parquet` URL is read in place by byte
+/// ranges; anything else is downloaded to a temporary file (hashed on the way,
+/// see [`DatasetReader::source_hash`]), detected by content and read from there.
 pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetReader + Send>> {
     #[cfg(feature = "net")]
     if crate::net::is_network_url(input) {
-        if crate::rds::is_rds_name(input) {
-            let spool = crate::rds::spool(input).await?;
-            return Ok(Box::new(crate::rds::RdsSeuratReader::open_spooled(
-                spool,
-                opts.chunk_size,
-                opts.assay.as_deref(),
-                opts.layer.as_deref(),
-            )?));
+        if crate::net::reads_by_range(input) {
+            return open_parquet(input, opts).await;
         }
-        return open_parquet(input, opts).await;
+        let spool = crate::spool::spool(input).await?;
+        let path = spool.path().to_str().ok_or_else(|| {
+            ScxError::InvalidFormat(format!("temporary path for '{input}' is not UTF-8"))
+        })?;
+        let inner = Box::pin(open(path, opts)).await.map_err(|e| match e {
+            ScxError::InvalidFormat(m) if m.starts_with("could not detect format") => {
+                ScxError::InvalidFormat(format!("could not detect the format of '{input}'"))
+            }
+            e => e,
+        })?;
+        return Ok(Box::new(crate::spool::Spooled::new(inner, spool)));
     }
 
     #[cfg(not(feature = "net"))]
