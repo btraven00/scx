@@ -33,3 +33,9 @@ import anndata as ad
 
 ad.read_h5ad("tiny_py.h5ad")
 ```
+
+```{python}
+#| label: py-where
+pk.convert("tiny_v4.h5seurat", "tcells_py.h5ad", where={"cell_type": "T"})
+ad.read_h5ad("tcells_py.h5ad").obs[["cell_type", "donor"]]
+```
