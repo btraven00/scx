@@ -1426,7 +1426,9 @@ async fn convert_with_reader(
     // been computing alongside everything above.
     let source_sha256 = source_sha256
         .join()
-        .map_err(|_| anyhow::anyhow!("source hashing thread panicked"))??;
+        .map_err(|_| anyhow::anyhow!("source hashing thread panicked"))??
+        // A remote source was hashed by the reader as it downloaded.
+        .or_else(|| reader.source_hash());
     if write_uns {
         let prov = scx_core::provenance::det_record(
             source_path,

@@ -106,18 +106,27 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// A downloaded copy of a remote file, deleted when dropped.
-pub struct Spool(pub(crate) std::path::PathBuf);
+pub struct Spool {
+    path: std::path::PathBuf,
+    /// `"sha256:<hex>"` of the downloaded bytes, hashed as they arrived.
+    hash: String,
+}
 
 impl Spool {
     /// Where the copy is on disk.
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+
+    /// `"sha256:<hex>"` of the downloaded bytes.
+    pub fn hash(&self) -> &str {
+        &self.hash
     }
 }
 
 impl Drop for Spool {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -129,6 +138,7 @@ impl Drop for Spool {
 pub async fn spool(url: &str) -> Result<Spool> {
     use futures::StreamExt;
     use object_store::ObjectStoreExt;
+    use sha2::Digest;
     use std::io::Write;
 
     let (store, path) = crate::net::resolve_store(url)?;
@@ -136,15 +146,21 @@ pub async fn spool(url: &str) -> Result<Spool> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let spool =
-        Spool(std::env::temp_dir().join(format!("scx-{}-{nanos}-{name}", std::process::id())));
+    let mut spool = Spool {
+        path: std::env::temp_dir().join(format!("scx-{}-{nanos}-{name}", std::process::id())),
+        hash: String::new(),
+    };
     let net = |e: object_store::Error| crate::parquet::net_err(format!("download '{url}': {e}"));
     let mut body = store.get(&path).await.map_err(net)?.into_stream();
-    let mut f = std::io::BufWriter::new(std::fs::File::create(&spool.0)?);
+    let mut f = std::io::BufWriter::new(std::fs::File::create(&spool.path)?);
+    let mut hasher = sha2::Sha256::new();
     while let Some(bytes) = body.next().await {
-        f.write_all(&bytes.map_err(net)?)?;
+        let bytes = bytes.map_err(net)?;
+        hasher.update(&bytes);
+        f.write_all(&bytes)?;
     }
     f.flush()?;
+    spool.hash = format!("sha256:{}", crate::provenance::hex(hasher));
     Ok(spool)
 }
 

@@ -44,7 +44,7 @@ pub struct RdsSeuratReader {
     obs: ObsTable,
     var: VarTable,
     /// The downloaded copy this reader owns, for a remote file.
-    _spool: Option<Spool>,
+    spool: Option<Spool>,
 }
 
 /// Fetched lazy vectors, keyed by stream offset.
@@ -194,7 +194,7 @@ impl RdsSeuratReader {
                 index: genes,
                 columns: Vec::new(),
             },
-            _spool: None,
+            spool: None,
         })
     }
 
@@ -206,8 +206,8 @@ impl RdsSeuratReader {
         assay: Option<&str>,
         layer: Option<&str>,
     ) -> Result<Self> {
-        let mut r = Self::open(&spool.0, chunk_size, assay, layer)?;
-        r._spool = Some(spool);
+        let mut r = Self::open(spool.path(), chunk_size, assay, layer)?;
+        r.spool = Some(spool);
         Ok(r)
     }
 }
@@ -618,6 +618,10 @@ impl Scan {
 impl DatasetReader for RdsSeuratReader {
     fn shape(&self) -> (usize, usize) {
         (self.indptr.len() - 1, self.n_vars)
+    }
+
+    fn source_hash(&self) -> Option<String> {
+        self.spool.as_ref().map(|s| s.hash().to_string())
     }
 
     fn dtype(&self) -> DataType {

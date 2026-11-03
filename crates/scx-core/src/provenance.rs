@@ -82,7 +82,7 @@ fn hash_file(hasher: &mut Sha256, path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn hex(hasher: Sha256) -> String {
+pub(crate) fn hex(hasher: Sha256) -> String {
     hasher
         .finalize()
         .iter()

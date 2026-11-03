@@ -58,6 +58,38 @@ fn converts_rds_url() {
     assert_tiny(&out);
 }
 
+/// A downloaded source is hashed as it arrives, so URL conversions record
+/// the same source hash as local ones, in uns and in the sidecar.
+#[cfg(feature = "net")]
+#[test]
+fn rds_url_records_source_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let hash = |input: &str, name: &str| {
+        let out = dir.path().join(name);
+        convert(input, &out);
+        let side = std::fs::read_to_string(dir.path().join(format!("{name}.prov.json"))).unwrap();
+        let side: serde_json::Value = serde_json::from_str(&side).unwrap();
+        let uns = Command::new(env!("CARGO_BIN_EXE_scx"))
+            .arg("inspect")
+            .arg(&out)
+            .output()
+            .unwrap();
+        let h = side["source"]["hash"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            String::from_utf8_lossy(&uns.stdout).contains(&h),
+            "uns lacks {h}"
+        );
+        h
+    };
+    let local = hash(fixture().to_str().unwrap(), "local.h5ad");
+    let remote = hash(&format!("file://{}", fixture().display()), "remote.h5ad");
+    assert!(local.starts_with("sha256:"), "{local}");
+    assert_eq!(remote, local);
+}
+
 /// GEO's `x.rds.gz`: a gzip around saveRDS's own gzip, named with
 /// percent-escapes in the URL (`x%2Erds%2Egz`).
 #[cfg(feature = "net")]
