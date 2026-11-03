@@ -4,12 +4,17 @@ import os
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
-import anndata as ad
 import numpy as np
 
 from . import picklerick_py_native as _native
 from .picklerick_py_native import MatrixChunk
+
+# anndata costs ~0.7 s to import and only read() needs it at runtime, so
+# open_stream/convert/inspect users don't pay for it.
+if TYPE_CHECKING:
+    import anndata as ad
 
 Pathish = str | os.PathLike[str]
 
@@ -114,6 +119,8 @@ def read(
     anndata.AnnData
         The whole dataset, in memory.
     """
+    import anndata as ad
+
     if Path(path).suffix.lower() == ".h5ad":
         return ad.read_h5ad(_path(path))
     with TemporaryDirectory(prefix="picklerick-") as tmp:
