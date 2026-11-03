@@ -183,13 +183,7 @@ fn read_indices(file: &File, a: usize, b: usize) -> Result<Vec<u32>> {
     let ds = file.dataset("matrix/indices")?;
     if ds.dtype()?.size() == 4 {
         if let Some(plan) = crate::h5_chunk::chunk_plan(&ds) {
-            let bytes = crate::h5_chunk::read_range_parallel(&ds, a, b, 4, plan)?;
-            return Ok(bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&c| u32::from_le_bytes(c))
-                .collect());
+            return crate::h5_chunk::read_range_typed(&ds, a, b, plan);
         }
     }
     Ok(match ds.dtype()?.to_descriptor()? {
@@ -232,8 +226,7 @@ fn read_data(file: &File, dtype: DataType, a: usize, b: usize) -> Result<TypedVe
     };
     if stored_bytes == want_bytes && stored_float == want_float {
         if let Some(plan) = crate::h5_chunk::chunk_plan(&ds) {
-            let raw = crate::h5_chunk::read_range_parallel(&ds, a, b, want_bytes, plan)?;
-            return TypedVec::from_le_bytes(dtype, &raw);
+            return crate::h5::read_values_parallel(&ds, dtype, a..b, plan);
         }
     }
     Ok(match (dtype, descr) {

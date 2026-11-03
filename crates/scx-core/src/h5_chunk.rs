@@ -33,6 +33,7 @@ use std::io::{Read, Write};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use flate2::{Decompress, FlushDecompress, Status};
 use hdf5::filters::Filter;
 use hdf5::Dataset;
 use rayon::prelude::*;
@@ -388,9 +389,52 @@ pub fn read_range_parallel(
     elem_size: usize,
     plan: ChunkPlan,
 ) -> Result<Vec<u8>> {
-    if b <= a {
-        return Ok(Vec::new());
+    let mut out = vec![0u8; b.saturating_sub(a) * elem_size];
+    read_range_into(ds, a, elem_size, plan, &mut out)?;
+    Ok(out)
+}
+
+/// [`read_range_parallel`] into a typed `Vec`, decoded in place: no byte
+/// buffer to copy out of. `T` must have the dataset's stored element size;
+/// values are taken bit for bit, so signedness may differ.
+pub(crate) fn read_range_typed<T: bytemuck::Pod>(
+    ds: &Dataset,
+    a: usize,
+    b: usize,
+    plan: ChunkPlan,
+) -> Result<Vec<T>> {
+    // ponytail: assumes a little-endian host, as `TypedVec::from_le_bytes` did.
+    // zeroed_vec is calloc: a large block comes as untouched zero pages, so
+    // each page faults once, when the inflate writes it.
+    let mut out = bytemuck::zeroed_vec::<T>(b.saturating_sub(a));
+    read_range_into(
+        ds,
+        a,
+        size_of::<T>(),
+        plan,
+        bytemuck::cast_slice_mut(&mut out),
+    )?;
+    Ok(out)
+}
+
+/// Decode elements `[a, a + out.len() / elem_size)` into `out`.
+///
+/// Each chunk owns a disjoint slice of `out`. A chunk the range covers whole,
+/// deflated and not shuffled, inflates straight into its slice. The rest (the
+/// range's first and last chunks when partial, the dataset's padded edge
+/// chunk, shuffled or deflate-skipped chunks) decode to a temporary and copy
+/// their part across.
+fn read_range_into(
+    ds: &Dataset,
+    a: usize,
+    elem_size: usize,
+    plan: ChunkPlan,
+    out: &mut [u8],
+) -> Result<()> {
+    if out.is_empty() {
+        return Ok(());
     }
+    let b = a + out.len() / elem_size;
     let chunk_len = plan.chunk_len;
     let dsid = ds.id();
     let ka = a / chunk_len;
@@ -402,34 +446,62 @@ pub fn read_range_parallel(
     //    global state is shared across all open files, not per-file). Hold the
     //    same process-global lock the safe API uses for the whole read stage; the
     //    parallel inflate below touches no HDF5 state and stays outside the lock.
-    let raw: Vec<(usize, u32, Vec<u8>)> = hdf5::sync::sync(|| {
+    let raw: Vec<(u32, Vec<u8>)> = hdf5::sync::sync(|| {
         (ka..=kb)
-            .map(|k| read_raw_chunk(dsid, k * chunk_len).map(|(m, buf)| (k, m, buf)))
+            .map(|k| read_raw_chunk(dsid, k * chunk_len))
             .collect::<Result<_>>()
     })?;
 
-    // 2) Inflate, then un-shuffle, across cores. A set bit in the filter mask
-    //    means that filter was skipped for that chunk, so each stage is applied
-    //    only when its own bit is clear.
-    let inflated: Vec<(usize, Vec<u8>)> = raw
-        .into_par_iter()
-        .map(|(k, filter_mask, cbuf)| Ok((k, decode_chunk(plan, filter_mask, &cbuf, elem_size)?)))
-        .collect::<Result<Vec<_>>>()?;
-
-    // 3) Concatenate the requested byte sub-range (chunks are in ka..=kb order).
-    let mut out = Vec::with_capacity((b - a) * elem_size);
-    for (k, bytes) in &inflated {
-        let chunk_first = k * chunk_len;
-        let avail = bytes.len() / elem_size; // last dataset chunk may be short
-        let lo = a.max(chunk_first);
-        let hi = b.min(chunk_first + avail);
-        if hi > lo {
-            out.extend_from_slice(
-                &bytes[(lo - chunk_first) * elem_size..(hi - chunk_first) * elem_size],
-            );
-        }
+    // 2) Split `out` into each chunk's slice, in ka..=kb order.
+    let mut slices = Vec::with_capacity(raw.len());
+    let mut rest = out;
+    for k in ka..=kb {
+        let lo = a.max(k * chunk_len);
+        let hi = b.min((k + 1) * chunk_len);
+        let (head, tail) = rest.split_at_mut((hi - lo) * elem_size);
+        slices.push((k * chunk_len, lo, head));
+        rest = tail;
     }
-    Ok(out)
+
+    // 3) Decode across cores. A set bit in the filter mask means that filter
+    //    was skipped for that chunk, so each stage applies only when its own
+    //    bit is clear.
+    raw.into_par_iter()
+        .zip(slices)
+        .try_for_each(|((mask, cbuf), (first, lo, dst))| {
+            let whole = dst.len() == chunk_len * elem_size;
+            let deflated = mask & (1 << plan.deflate_bit) == 0;
+            let shuffled = plan.shuffle_bit.is_some_and(|bit| mask & (1 << bit) == 0);
+            if whole && deflated && !shuffled {
+                return inflate_exact(&cbuf, dst);
+            }
+            let bytes = decode_chunk(plan, mask, &cbuf, elem_size)?;
+            let from = (lo - first) * elem_size;
+            let src = bytes.get(from..from + dst.len()).ok_or_else(|| {
+                ScxError::InvalidFormat(format!(
+                    "chunk at element {first} decodes to {} bytes, too few",
+                    bytes.len()
+                ))
+            })?;
+            dst.copy_from_slice(src);
+            Ok(())
+        })
+}
+
+/// Inflate the zlib stream `cbuf` into `dst`, which it must fill exactly.
+fn inflate_exact(cbuf: &[u8], dst: &mut [u8]) -> Result<()> {
+    let mut z = Decompress::new(true);
+    let status = z
+        .decompress(cbuf, dst, FlushDecompress::Finish)
+        .map_err(|e| ScxError::InvalidFormat(format!("inflate failed: {e}")))?;
+    if status != Status::StreamEnd || z.total_out() != dst.len() as u64 {
+        return Err(ScxError::InvalidFormat(format!(
+            "inflate gave {} bytes ({status:?}) for a {}-byte chunk",
+            z.total_out(),
+            dst.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Apply the HDF5 shuffle filter: the inverse of [`unshuffle`], with the same
@@ -790,6 +862,84 @@ mod tests {
             })
             .collect();
         appender_roundtrip("app_random", &v, false);
+    }
+
+    /// In-place decode must give libhdf5's own bytes for every range shape:
+    /// aligned whole chunks (inflated straight into the output), ranges that
+    /// start and end mid-chunk, the padded edge chunk, empty ranges, and
+    /// chunks stored raw with the deflate bit set, with and without shuffle.
+    #[test]
+    fn in_place_decode_matches_libhdf5() {
+        // Compressible and random 1000-element runs, so some chunks are stored
+        // deflated and others raw (deflate skipped).
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let vals: Vec<u64> = (0..5500u64)
+            .map(|i| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                if (i / 1000) % 2 == 0 {
+                    i
+                } else {
+                    x
+                }
+            })
+            .collect();
+        for shuffle in [false, true] {
+            let path = tmp(&format!("inplace_{shuffle}"));
+            {
+                let f = File::create(&path).unwrap();
+                let mut b = f.new_dataset::<u64>().chunk(1000);
+                if shuffle {
+                    b = b.shuffle();
+                }
+                let ds = b
+                    .deflate(4)
+                    .shape(hdf5::SimpleExtents::resizable([0usize]))
+                    .create("data")
+                    .unwrap();
+                let mut app = DeflateAppender::new(ds).unwrap();
+                app.append(&vals).unwrap();
+                app.finish().unwrap();
+            }
+            let f = File::open(&path).unwrap();
+            let ds = f.dataset("data").unwrap();
+            let plan = chunk_plan(&ds).unwrap();
+            let masks: Vec<u32> = chunk_locations(&ds, 1000, vals.len())
+                .unwrap()
+                .iter()
+                .map(|l| l.0)
+                .collect();
+            let skip = 1 << u32::from(shuffle);
+            assert!(
+                masks.iter().any(|m| m & skip != 0),
+                "no deflate-skipped chunk"
+            );
+            assert!(masks.iter().any(|m| m & skip == 0), "no deflated chunk");
+            for (a, b) in [
+                (0, 5500),
+                (0, 1000),
+                (1000, 3000),
+                (999, 1001),
+                (1500, 4321),
+                (4000, 5500),
+                (5000, 5500),
+                (5499, 5500),
+                (2000, 2000),
+                (0, 0),
+            ] {
+                let want: Vec<u64> = ds.read_slice_1d(a..b).unwrap().to_vec();
+                let got: Vec<u64> = read_range_typed(&ds, a, b, plan).unwrap();
+                assert_eq!(got, want, "typed {a}..{b} shuffle={shuffle}");
+                let bytes = read_range_parallel(&ds, a, b, 8, plan).unwrap();
+                assert_eq!(
+                    bytes,
+                    bytemuck::cast_slice::<u64, u8>(&want),
+                    "bytes {a}..{b}"
+                );
+            }
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[test]

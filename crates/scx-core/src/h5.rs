@@ -144,13 +144,7 @@ pub(crate) fn read_u32_range(
         TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
             if ds.dtype()?.size() == 4 {
                 if let Some(plan) = h5_chunk::chunk_plan(ds) {
-                    let bytes = h5_chunk::read_range_parallel(ds, range.start, range.end, 4, plan)?;
-                    return Ok(bytes
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .map(|&b| u32::from_le_bytes(b))
-                        .collect());
+                    return h5_chunk::read_range_typed(ds, range.start, range.end, plan);
                 }
             }
             Ok(ds.read_slice_1d::<u32, _>(s![range])?.to_vec())
@@ -214,9 +208,7 @@ pub(crate) fn read_values(
     check_filters(ds)?;
     if value_dtype(ds)? == dtype && ds.dtype()?.size() == dtype.size() {
         if let Some(plan) = h5_chunk::chunk_plan(ds) {
-            let raw =
-                h5_chunk::read_range_parallel(ds, range.start, range.end, dtype.size(), plan)?;
-            return TypedVec::from_le_bytes(dtype, &raw);
+            return read_values_parallel(ds, dtype, range, plan);
         }
     }
     Ok(match dtype {
@@ -224,6 +216,23 @@ pub(crate) fn read_values(
         DataType::F64 => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![range])?.to_vec()),
         DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![range])?.to_vec()),
         DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![range])?.to_vec()),
+    })
+}
+
+/// `range` of `ds` as `dtype` through [`h5_chunk::read_range_typed`]. The
+/// caller has checked that `dtype` has the stored element layout.
+pub(crate) fn read_values_parallel(
+    ds: &hdf5::Dataset,
+    dtype: DataType,
+    range: std::ops::Range<usize>,
+    plan: h5_chunk::ChunkPlan,
+) -> Result<TypedVec> {
+    let (a, b) = (range.start, range.end);
+    Ok(match dtype {
+        DataType::F32 => TypedVec::F32(h5_chunk::read_range_typed(ds, a, b, plan)?),
+        DataType::F64 => TypedVec::F64(h5_chunk::read_range_typed(ds, a, b, plan)?),
+        DataType::I32 => TypedVec::I32(h5_chunk::read_range_typed(ds, a, b, plan)?),
+        DataType::U32 => TypedVec::U32(h5_chunk::read_range_typed(ds, a, b, plan)?),
     })
 }
 
