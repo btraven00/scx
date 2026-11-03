@@ -2270,3 +2270,40 @@ async fn x_chunk_reader_matches_written_matrix() {
         }
     }
 }
+
+/// A row-range stream reads only its rows' part of `X/indptr`, not the whole
+/// row pointer (n_obs + 1 entries per block, quadratic over a dask array of an
+/// atlas). The file's last indptr entry is negative, which any read of it
+/// rejects: rows 0..2 still stream, while the whole-matrix stream, which does
+/// read it, fails.
+#[tokio::test]
+async fn row_range_stream_reads_only_its_indptr() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        write_csr_group(
+            &f,
+            "X",
+            (4, 3),
+            &[0, 1, 3, 3, -1],
+            &[2, 0, 1, 0],
+            &[1.0, 2.0, 3.0, 4.0],
+        );
+    }
+    let mut r = H5AdReader::open(tmp.path(), 10).unwrap();
+    let mut s = r.x_stream_rows(vec![1..2, 0..1, 2..3]);
+    let c = s.next().await.unwrap().unwrap();
+    assert!(s.next().await.is_none());
+    drop(s);
+    assert_eq!((c.row_offset, c.nrows), (0, 3));
+    assert_eq!(c.data.indptr, vec![0, 1, 3, 3]);
+    assert_eq!(c.data.indices, vec![2, 0, 1]);
+    assert_eq!(c.data.data.to_f64(), vec![1.0, 2.0, 3.0]);
+
+    let err = r.x_stream().next().await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("negative index -1"), "{err}");
+    assert!(
+        r.x_indptr().is_empty(),
+        "an unreadable indptr is not a row pointer"
+    );
+}

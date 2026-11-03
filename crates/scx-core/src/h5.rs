@@ -107,11 +107,18 @@ pub(crate) fn check_filters(ds: &hdf5::Dataset) -> Result<()> {
 /// Read an index dataset (indptr, shape, ...) as u64, whatever its integer
 /// width or signedness. Float is accepted too: rhdf5 writes R doubles.
 pub(crate) fn read_u64(ds: &hdf5::Dataset) -> Result<Vec<u64>> {
+    read_u64_range(ds, 0..ds.size())
+}
+
+/// [`read_u64`] of elements `range` of a 1-D dataset.
+pub(crate) fn read_u64_range(
+    ds: &hdf5::Dataset,
+    range: std::ops::Range<usize>,
+) -> Result<Vec<u64>> {
     check_filters(ds)?;
     match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Unsigned(_) => Ok(ds.read_raw::<u64>()?),
-        TypeDescriptor::Integer(_) => ds
-            .read_raw::<i64>()?
+        TypeDescriptor::Unsigned(_) => read_vec::<u64>(ds, range),
+        TypeDescriptor::Integer(_) => read_vec::<i64>(ds, range)?
             .into_iter()
             .map(|x| {
                 u64::try_from(x).map_err(|_| {
@@ -119,8 +126,7 @@ pub(crate) fn read_u64(ds: &hdf5::Dataset) -> Result<Vec<u64>> {
                 })
             })
             .collect(),
-        TypeDescriptor::Float(_) => Ok(ds
-            .read_raw::<f64>()?
+        TypeDescriptor::Float(_) => Ok(read_vec::<f64>(ds, range)?
             .into_iter()
             .map(|x| x as u64)
             .collect()),
