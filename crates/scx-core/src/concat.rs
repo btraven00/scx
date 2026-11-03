@@ -321,13 +321,13 @@ fn join_names(per_input: &[Vec<String>], join: Join) -> Vec<String> {
 }
 
 /// Maps one input's gene positions onto the output gene axis.
-struct VarMap {
-    to_out: Vec<Option<u32>>,
+pub(crate) struct VarMap {
+    pub(crate) to_out: Vec<Option<u32>>,
     /// Source axis is already the output axis — chunks pass through untouched.
-    identity: bool,
+    pub(crate) identity: bool,
     /// Remapped column indices are not ascending — rows need re-sorting to stay
     /// canonical CSR.
-    needs_sort: bool,
+    pub(crate) needs_sort: bool,
 }
 
 impl VarMap {
@@ -359,7 +359,7 @@ impl VarMap {
 
 /// Rewrite a chunk's column indices onto the output gene axis, dropping entries
 /// for genes the join excluded.
-fn remap_chunk(mut chunk: MatrixChunk, map: &VarMap, n_out_vars: usize) -> MatrixChunk {
+pub(crate) fn remap_chunk(mut chunk: MatrixChunk, map: &VarMap, n_out_vars: usize) -> MatrixChunk {
     if map.identity {
         chunk.data.shape = (chunk.nrows, n_out_vars);
         return chunk;
@@ -402,7 +402,7 @@ fn remap_chunk(mut chunk: MatrixChunk, map: &VarMap, n_out_vars: usize) -> Matri
     }
 }
 
-fn gather(src: &TypedVec, idx: &[usize]) -> TypedVec {
+pub(crate) fn gather(src: &TypedVec, idx: &[usize]) -> TypedVec {
     macro_rules! g {
         ($v:expr, $variant:path) => {
             $variant(idx.iter().map(|&i| $v[i]).collect())
