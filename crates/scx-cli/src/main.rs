@@ -84,7 +84,8 @@ enum Cli {
     ///   .zarr      — AnnData Zarr v3 store (directory)
     #[command(verbatim_doc_comment)]
     Convert {
-        /// Input file
+        /// Input file, a URL (with the `net` feature), or `-` to read from
+        /// stdin (copied to a temporary file first, as a URL is)
         input: String,
 
         /// Output file (.h5ad or .h5seurat), or a directory: `.zarr` (AnnData Zarr v3) or `.bpcells` (X only)
@@ -885,7 +886,7 @@ async fn run() -> anyhow::Result<()> {
                     );
                 }
                 std::thread::spawn(move || Ok(Some(format!("sha256:{}", hex.to_ascii_lowercase()))))
-            } else if input_path.is_file() {
+            } else if input != "-" && input_path.is_file() {
                 let (path, name) = (input_path.to_path_buf(), input.clone());
                 std::thread::spawn(move || {
                     provenance::sha256_file(&path)
@@ -907,9 +908,24 @@ async fn run() -> anyhow::Result<()> {
                 n_vars: n_vars_arg,
                 genes: genes_arg.clone(),
             };
-            let mut reader = scx_core::open(&input, &opts)
-                .await
-                .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?;
+            let mut reader = if input == "-" {
+                // Formats need random access, so stdin goes to a temporary
+                // file (hashed on the way) and is detected by content.
+                let spool = scx_core::spool::Spool::from_reader("stdin", std::io::stdin().lock())
+                    .map_err(|e| anyhow::anyhow!("reading stdin: {e}"))?;
+                let path = spool.path().to_string_lossy().into_owned();
+                let inner = scx_core::open(&path, &opts).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "cannot open stdin: {e} (MatrixMarket is detected by its .mtx name, \
+                         so it can't be piped)"
+                    )
+                })?;
+                Box::new(scx_core::spool::Spooled::new(inner, spool))
+            } else {
+                scx_core::open(&input, &opts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?
+            };
             // Convert into a sibling path and rename on success, so a failed
             // run leaves nothing behind and doesn't clobber an existing output.
             // The name keeps the extension, which picks the writer.

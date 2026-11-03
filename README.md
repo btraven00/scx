@@ -47,6 +47,8 @@ extension (`.h5ad`, `.h5seurat`, `.zarr`, `.bpcells`).
 With `--features net`, the input can also be a URL (`https://`, `s3://`,
 `gs://`, …). Parquet is read in place by byte ranges; any other single-file
 format is downloaded to a temporary file first, and its SHA-256 recorded.
+`-` reads the input from stdin the same way, e.g.
+`curl -sL https://host/x.h5ad | scx convert - x.h5seurat`.
 
 ## Usage
 
