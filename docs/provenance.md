@@ -20,22 +20,27 @@ output bytes.
 {
   "scx_version": "0.1.0",
   "source": {
-    "path": "data/pbmc3k.h5seurat",
+    "path": "pbmc3k.h5seurat",
     "url": "https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat",
-    "sha256": "703a1b4a…"
+    "hash": "sha256:703a1b4a…"
   },
   "n_obs": 2700,
   "n_vars": 13714
 }
 ```
 
-`url` is omitted when `--source-url` is not provided.
+`url` is omitted when `--source-url` is not provided. `source.path` is the
+source's file name only (a URL input is kept whole), so converting the same
+file from a different directory or machine gives identical bytes, and no
+local directory layout leaks into shared files. Hashes are written as
+`"<algo>:<hex>"`; the source hash is always SHA-256, which is what
+repositories publish and `sha256sum` checks. Files written before this
+change have a bare-hex `source.sha256` instead.
 
 ### Sidecar — `<output>.prov.json`
 
-Written alongside the output file. Adds non-deterministic fields
-(timestamp, output path, output SHA256) that would break reproducibility
-if baked into the artifact:
+Written alongside the output file. Adds the fields that can't go into the
+artifact: the timestamp, the full paths as given, and the output's own hash:
 
 ```json
 {
@@ -44,11 +49,11 @@ if baked into the artifact:
   "source": {
     "path": "data/pbmc3k.h5seurat",
     "url": "https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat",
-    "sha256": "703a1b4a…"
+    "hash": "sha256:703a1b4a…"
   },
   "output": {
     "path": "results/pbmc3k.h5ad",
-    "sha256": "27242b60…",
+    "hash": "blake3:27242b60…",
     "n_obs": 2700,
     "n_vars": 13714
   }
@@ -60,7 +65,8 @@ if baked into the artifact:
 | Flag | Description |
 |------|-------------|
 | `--source-url <url>` | Canonical origin URL of the source file (optional) |
-| `--source-sha256 <hex>` | Pre-computed SHA-256 (64 hex chars). Skips rehashing — intended for pipelines (e.g. hapiq) that already hashed on download. |
+| `--source-sha256 <hex>` | Pre-computed SHA-256 (64 hex chars, optionally prefixed `sha256:`). Skips rehashing — intended for pipelines (e.g. hapiq) that already hashed on download. |
+| `--output-hash <algo>` | `blake3` (default, multithreaded: ~0.1 s for 3.5 GB), `sha256` (~1.7 s), or `none`. Algorithm for the sidecar's `output.hash`; check it with `b3sum` or `sha256sum`. Directory outputs are not hashed. |
 
 ### hapiq integration
 
@@ -93,8 +99,8 @@ dedicated section above `uns`:
 provenance
   scx_version    0.1.0
   source.url     https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat
-  source.path    data/pbmc3k.h5seurat
-  source.sha256  703a1b4a…
+  source.path    pbmc3k.h5seurat
+  source.hash    sha256:703a1b4a…
 ```
 
 Files converted without `--source-url` show `(none)` for the URL line.

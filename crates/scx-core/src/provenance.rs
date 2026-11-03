@@ -10,8 +10,9 @@ pub struct SourceInfo {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// `"<algo>:<hex>"`, e.g. `"sha256:703a…"`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,7 +20,7 @@ pub struct OutputInfo {
     pub path: String,
     /// Absent for directory outputs (e.g. a BPCells matrix dir).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
+    pub hash: Option<String>,
     pub n_obs: usize,
     pub n_vars: usize,
 }
@@ -95,19 +96,30 @@ pub fn utc_now_rfc3339() -> String {
 
 /// Deterministic provenance value — safe to bake into the artifact's uns.
 /// Contains only inputs + version; no timestamp so the output is reproducible.
+/// A local `source_path` is reduced to its file name, so where the source sat
+/// on disk changes neither the bytes nor leaks the directory layout; a URL is
+/// kept whole. `source_hash` is `"<algo>:<hex>"`.
 pub fn det_record(
     source_path: &str,
     source_url: Option<&str>,
-    source_sha256: Option<&str>,
+    source_hash: Option<&str>,
     n_obs: usize,
     n_vars: usize,
 ) -> serde_json::Value {
-    let mut src = serde_json::json!({ "path": source_path });
+    let path = if source_path.contains("://") {
+        source_path
+    } else {
+        Path::new(source_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(source_path)
+    };
+    let mut src = serde_json::json!({ "path": path });
     if let Some(url) = source_url {
         src["url"] = serde_json::Value::String(url.to_string());
     }
-    if let Some(sha) = source_sha256 {
-        src["sha256"] = serde_json::Value::String(sha.to_string());
+    if let Some(h) = source_hash {
+        src["hash"] = serde_json::Value::String(h.to_string());
     }
     serde_json::json!({
         "scx_version": env!("CARGO_PKG_VERSION"),
@@ -132,6 +144,16 @@ pub fn write_sidecar(record: &ProvenanceRecord, output: &Path) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn det_record_keeps_only_the_file_name_of_a_local_source() {
+        let a = det_record("/home/u/data/x.rds", None, Some("sha256:ab"), 1, 2);
+        assert_eq!(a, det_record("../x.rds", None, Some("sha256:ab"), 1, 2));
+        assert_eq!(a["source"]["path"], "x.rds");
+        assert_eq!(a["source"]["hash"], "sha256:ab");
+        let url = "https://zenodo.org/records/1/files/x.rds";
+        assert_eq!(det_record(url, None, None, 1, 2)["source"]["path"], url);
+    }
 
     #[test]
     fn sha256_path_hashes_directories_by_content() {

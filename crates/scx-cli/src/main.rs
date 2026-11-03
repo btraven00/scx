@@ -59,6 +59,13 @@ const VERSION: &str = concat!(
     ")"
 );
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum OutputHash {
+    Blake3,
+    Sha256,
+    None,
+}
+
 #[derive(Parser)]
 #[command(name = "scx", version = VERSION, about = "Single-cell streaming interop engine")]
 enum Cli {
@@ -145,17 +152,19 @@ enum Cli {
         #[arg(long)]
         source_url: Option<String>,
 
-        /// Pre-computed SHA-256 of the source file (64 lowercase hex chars).
+        /// Pre-computed SHA-256 of the source file (64 hex chars, optionally
+        /// prefixed `sha256:`).
         /// Skips rehashing — intended for pipelines like hapiq that already
         /// compute the hash on download.
         #[arg(long)]
         source_sha256: Option<String>,
 
-        /// Don't hash the output for the provenance sidecar (its
-        /// `output.sha256` is left out). Hashing reads the whole output once
-        /// more after conversion: about 1.7 s for 3 GB.
-        #[arg(long)]
-        no_output_hash: bool,
+        /// Hash of the output recorded in the provenance sidecar
+        /// (`output.hash`). Hashing reads the whole output once more after
+        /// conversion: for 3.5 GB, ~0.1 s with blake3 (multithreaded) vs ~1.7 s
+        /// with sha256. `none` leaves it out.
+        #[arg(long, value_enum, default_value_t = OutputHash::Blake3)]
+        output_hash: OutputHash,
 
         /// gzip-compress `.h5ad` output. Pass `--compress` for the default
         /// level 6, or `--compress N` for level N (0..=9). Off by default.
@@ -842,7 +851,7 @@ async fn run() -> anyhow::Result<()> {
             seuratdisk_compat,
             source_url,
             source_sha256: source_sha256_arg,
-            no_output_hash,
+            output_hash,
             compress,
             gene_major,
             transpose_mem,
@@ -866,19 +875,20 @@ async fn run() -> anyhow::Result<()> {
 
             // The source hash is only needed for the provenance records, so it
             // is computed on its own thread while the conversion runs.
-            let source_sha256: SourceHash = if let Some(hex) = source_sha256_arg {
+            let source_sha256: SourceHash = if let Some(arg) = source_sha256_arg {
+                let hex = arg.strip_prefix("sha256:").unwrap_or(&arg).to_string();
                 if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
                     anyhow::bail!(
                         "--source-sha256 must be 64 hex characters, got {} chars",
                         hex.len()
                     );
                 }
-                std::thread::spawn(move || Ok(Some(hex.to_ascii_lowercase())))
+                std::thread::spawn(move || Ok(Some(format!("sha256:{}", hex.to_ascii_lowercase()))))
             } else if input_path.is_file() {
                 let (path, name) = (input_path.to_path_buf(), input.clone());
                 std::thread::spawn(move || {
                     provenance::sha256_file(&path)
-                        .map(Some)
+                        .map(|h| Some(format!("sha256:{h}")))
                         .map_err(|e| anyhow::anyhow!("hashing source '{name}': {e}"))
                 })
             } else {
@@ -943,14 +953,21 @@ async fn run() -> anyhow::Result<()> {
                 }
             };
 
-            let output_sha256 = if output_path.is_file() && !no_output_hash {
-                Some(
-                    provenance::sha256_file(output_path)
-                        .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?,
-                )
-            } else {
-                None
-            };
+            // Directory outputs (BPCells, Zarr) are not hashed.
+            let output_hash = match output_hash {
+                _ if !output_path.is_file() => None,
+                OutputHash::None => None,
+                OutputHash::Sha256 => {
+                    Some(provenance::sha256_file(output_path).map(|h| format!("sha256:{h}")))
+                }
+                OutputHash::Blake3 => Some(
+                    blake3::Hasher::new()
+                        .update_mmap_rayon(output_path)
+                        .map(|h| format!("blake3:{}", h.finalize().to_hex())),
+                ),
+            }
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?;
 
             let record = ProvenanceRecord {
                 scx_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -958,11 +975,11 @@ async fn run() -> anyhow::Result<()> {
                 source: SourceInfo {
                     path: input,
                     url: source_url,
-                    sha256: source_sha256,
+                    hash: source_sha256,
                 },
                 output: OutputInfo {
                     path: output.clone(),
-                    sha256: output_sha256,
+                    hash: output_hash,
                     n_obs,
                     n_vars,
                 },
@@ -1780,8 +1797,13 @@ async fn inspect(
                 if let Some(path) = src.get("path").and_then(|v| v.as_str()) {
                     println!("  {:<16} {}", "source.path", dim!(path));
                 }
-                if let Some(sha) = src.get("sha256").and_then(|v| v.as_str()) {
-                    println!("  {:<16} {}", "source.sha256", dim!(sha));
+                // `sha256` (bare hex) is the pre-0.6 key.
+                if let Some(h) = src
+                    .get("hash")
+                    .or_else(|| src.get("sha256"))
+                    .and_then(|v| v.as_str())
+                {
+                    println!("  {:<16} {}", "source.hash", dim!(h));
                 }
             }
 

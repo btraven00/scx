@@ -40,6 +40,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 owo-colors = { version = "4", features = ["supports-colors"] }
 polars = { version = "0.46", default-features = false, features = ["csv", "parquet", "dtype-categorical"] }
+blake3 = { version = "1.8.7", features = ["rayon", "mmap"] }
 
 [dev-dependencies]
 tempfile = "3"
