@@ -174,20 +174,28 @@ fn resolve_matrix_path(file: &File, layer: Option<&str>) -> Result<String> {
 // Reader helpers
 // ---------------------------------------------------------------------------
 
-/// Rows `rows` of the `n_cols`-column matrix at `matrix` in the file at
-/// `path`: a CSR group, or a dense 2-D dataset when `indptr` is empty (dense
-/// rows become CSR, dropping zeros).
+/// The file in `slot`, opening `path` into it on first use: a stream opens
+/// its file once, not once per block.
+fn open_once<'f>(slot: &'f mut Option<File>, path: &Path) -> Result<&'f File> {
+    if slot.is_none() {
+        *slot = Some(File::open(path)?);
+    }
+    Ok(slot.as_ref().expect("opened above"))
+}
+
+/// Rows `rows` of the `n_cols`-column matrix at `matrix` in `file`: a CSR
+/// group, or a dense 2-D dataset when `indptr` is empty (dense rows become
+/// CSR, dropping zeros).
 fn read_rows(
-    path: &Path,
+    file: &File,
     matrix: &str,
     indptr: &[u64],
     rows: Range<usize>,
     n_cols: usize,
 ) -> Result<MatrixChunk> {
-    let file = File::open(path)?;
     if !indptr.is_empty() {
         let dtype = value_dtype(&file.dataset(&format!("{matrix}/data"))?)?;
-        return read_csr_rows(&file, matrix, indptr, rows, n_cols, dtype);
+        return read_csr_rows(file, matrix, indptr, rows, n_cols, dtype);
     }
     let ds = file.dataset(matrix)?;
     let dtype = value_dtype(&ds)?;
@@ -582,9 +590,10 @@ fn sparse_chunks<'a>(
     chunk_size: usize,
 ) -> ChunkStream<'a> {
     let mut csc: Option<SparseMatrixCSR> = None;
+    let mut file = None;
     row_chunks(meta.shape.0, chunk_size, move |rows| {
+        let file = open_once(&mut file, path)?;
         if csc.is_none() && !meta.indptr.is_empty() {
-            let file = File::open(path)?;
             let grp = file.group(&matrix)?;
             if is_csc(&grp) {
                 let ds = |n: &str| file.dataset(&format!("{matrix}/{n}"));
@@ -605,7 +614,7 @@ fn sparse_chunks<'a>(
         }
         match &csc {
             Some(m) => Ok(csr_rows(m, rows)),
-            None => read_rows(path, &matrix, &meta.indptr, rows, meta.shape.1),
+            None => read_rows(file, &matrix, &meta.indptr, rows, meta.shape.1),
         }
     })
 }
@@ -793,8 +802,10 @@ impl DatasetReader for H5AdReader {
         }
         let this = &*self;
         let indptr = this.indptr.as_deref().unwrap_or(&[]);
+        let mut file = None;
         row_range_chunks(this.n_obs, ranges, this.chunk_size, move |rows| {
-            read_rows(&this.path, &this.x_path, indptr, rows, this.n_vars)
+            let file = open_once(&mut file, &this.path)?;
+            read_rows(file, &this.x_path, indptr, rows, this.n_vars)
         })
     }
 
@@ -807,8 +818,10 @@ impl DatasetReader for H5AdReader {
             ));
         };
         // CSC on disk is the CSR of the transpose: read genes as its rows.
+        let mut file = None;
         row_range_chunks(this.n_vars, ranges, this.chunk_size, move |cols| {
-            read_rows(&this.path, &this.x_path, col_ptr, cols, this.n_obs)
+            let file = open_once(&mut file, &this.path)?;
+            read_rows(file, &this.x_path, col_ptr, cols, this.n_obs)
         })
     }
 }
