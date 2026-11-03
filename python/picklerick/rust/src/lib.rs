@@ -481,25 +481,26 @@ fn scx_open_stream(
              or convert it to CSR to stream by cell",
         ));
     }
+    if let Some((a, b)) = rows.iter().flatten().find(|&&(_, b)| b > n_obs) {
+        return Err(py_err(format!(
+            "row range {a}..{b} is beyond the {n_obs} rows"
+        )));
+    }
     let ranges = match (rows, r#where) {
         (None, None) => None,
-        (rows, filters) => {
+        // No filter: the reader takes the ranges as they are, so a dask block
+        // costs nothing in n_obs here.
+        (Some(rows), None) => Some(rows.into_iter().map(|(a, b)| a..b).collect()),
+        (rows, Some(filters)) => {
             let mut mask = vec![false; n_obs];
             for (a, b) in rows.unwrap_or_else(|| vec![(0, n_obs)]) {
-                if b > n_obs {
-                    return Err(py_err(format!(
-                        "row range {a}..{b} is beyond the {n_obs} rows"
-                    )));
-                }
                 mask[a..b.max(a)].fill(true);
             }
-            if let Some(filters) = filters {
-                let obs = block_on(reader.obs()).map_err(py_err)?;
-                for (column, values) in &filters {
-                    let values: Vec<&str> = values.iter().map(String::as_str).collect();
-                    let hit = obs.rows_where(column, &values).map_err(py_err)?;
-                    mask.iter_mut().zip(hit).for_each(|(m, h)| *m &= h);
-                }
+            let obs = block_on(reader.obs()).map_err(py_err)?;
+            for (column, values) in &filters {
+                let values: Vec<&str> = values.iter().map(String::as_str).collect();
+                let hit = obs.rows_where(column, &values).map_err(py_err)?;
+                mask.iter_mut().zip(hit).for_each(|(m, h)| *m &= h);
             }
             Some(mask_to_ranges(&mask))
         }
