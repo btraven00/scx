@@ -2144,3 +2144,42 @@ async fn legacy_categories_group_decodes_as_categorical() {
     assert_eq!(gene.mask.as_deref(), Some(&[true, false, true][..]));
     assert!(matches!(var.columns[1].data, ColumnData::Int(_)));
 }
+
+/// X streams through one file handle opened on the first block, not one
+/// `File::open` per block: moving the file away mid-stream must not break the
+/// stream, and the blocks must equal a fresh read of the moved file.
+#[cfg(unix)]
+#[tokio::test]
+async fn x_stream_holds_its_file_open() {
+    let ranges = || vec![100..9000, 12_000..20_000];
+    for compression in [None, Some(4)] {
+        let src = NamedTempFile::with_suffix(".h5ad").unwrap();
+        write_big_compressible(src.path(), compression).await;
+        let moved = src.path().with_extension("moved.h5ad");
+
+        let mut r = H5AdReader::open(src.path(), 3000).unwrap();
+        let mut s = r.x_stream_rows(ranges());
+        let mut got = vec![s.next().await.unwrap().unwrap()];
+        std::fs::rename(src.path(), &moved).unwrap();
+        while let Some(c) = s.next().await {
+            got.push(c.unwrap());
+        }
+        drop(s);
+
+        let mut r = H5AdReader::open(&moved, 3000).unwrap();
+        let mut s = r.x_stream_rows(ranges());
+        let mut want = Vec::new();
+        while let Some(c) = s.next().await {
+            want.push(c.unwrap());
+        }
+        drop(s);
+        let _ = std::fs::remove_file(&moved);
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!((g.row_offset, g.nrows), (w.row_offset, w.nrows));
+            assert_eq!(g.data.indptr, w.data.indptr);
+            assert_eq!(g.data.indices, w.data.indices);
+            assert_eq!(g.data.data.as_le_bytes(), w.data.data.as_le_bytes());
+        }
+    }
+}
