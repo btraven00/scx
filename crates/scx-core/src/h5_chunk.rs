@@ -24,8 +24,9 @@
 //! state shared across every open file, so these calls must still be serialized
 //! against all other HDF5 access in the process (e.g. concurrent readers on other
 //! files) — we take the same process-global lock the safe API uses via
-//! `hdf5::sync::sync` for the read stage. Only the parallel inflate stage, which
-//! touches no HDF5 state, runs outside that lock.
+//! `hdf5::sync::sync` for them. Reads look up chunk addresses under that lock
+//! and then `pread` each chunk's bytes inside its parallel inflate task, which
+//! touches no HDF5 state ([`ChunkReader`]).
 
 use std::borrow::Cow;
 use std::io::{Read, Write};
@@ -390,8 +391,120 @@ pub fn read_range_parallel(
     plan: ChunkPlan,
 ) -> Result<Vec<u8>> {
     let mut out = vec![0u8; b.saturating_sub(a) * elem_size];
-    read_range_into(ds, a, elem_size, plan, &mut out)?;
+    ChunkReader::with_plan(ds, plan, false)?.read_into(a, elem_size, &mut out)?;
     Ok(out)
+}
+
+/// (filter mask, file address, stored size) of one chunk.
+type ChunkLoc = (u32, u64, usize);
+
+/// Reads ranges of one deflate-chunked 1-D dataset, for as long as a stream
+/// reads it: the dataset, a plain file handle and, for whole-dataset reads,
+/// every chunk's location are looked up once, not once per block.
+///
+/// Chunk bytes are read with `pread` inside each inflate task, so reading and
+/// inflating overlap across cores and only the location lookup takes the HDF5
+/// lock. A file with a userblock (chunk addresses are not file offsets there)
+/// reads chunks through `H5Dread_chunk` under the lock instead.
+pub(crate) struct ChunkReader {
+    ds: Dataset,
+    plan: ChunkPlan,
+    /// For `pread`; `None` when the file has a userblock.
+    file: Option<std::fs::File>,
+    /// Every chunk's location, listed up front when the whole dataset will be
+    /// read. Otherwise each read looks up just its own chunks: listing them
+    /// all costs time in the dataset's size, too much per block of a
+    /// row-range read of an atlas.
+    locs: Option<Vec<ChunkLoc>>,
+}
+
+impl ChunkReader {
+    /// A reader for `ds`, or `None` when [`chunk_plan`] declines it.
+    pub(crate) fn new(ds: &Dataset, whole: bool) -> Result<Option<Self>> {
+        chunk_plan(ds)
+            .map(|plan| Self::with_plan(ds, plan, whole))
+            .transpose()
+    }
+
+    pub(crate) fn with_plan(ds: &Dataset, plan: ChunkPlan, whole: bool) -> Result<Self> {
+        let file = if ds.file()?.fcpl()?.userblock() == 0 {
+            Some(std::fs::File::open(ds.filename())?)
+        } else {
+            None
+        };
+        // An index that can't be listed (an unstored chunk, ...) just means
+        // per-read lookups, which report the problem for the chunks read.
+        let locs = (whole && file.is_some())
+            .then(|| chunk_locations(ds, plan.chunk_len, ds.size()).ok())
+            .flatten();
+        Ok(Self {
+            ds: ds.clone(),
+            plan,
+            file,
+            locs,
+        })
+    }
+
+    /// Decode elements `[a, a + out.len() / elem_size)` into `out`.
+    /// `elem_size` must be the dataset's stored element size.
+    ///
+    /// Each chunk owns a disjoint slice of `out`. A chunk the range covers
+    /// whole, deflated and not shuffled, inflates straight into its slice. The
+    /// rest (the range's first and last chunks when partial, the dataset's
+    /// padded edge chunk, shuffled or deflate-skipped chunks) decode to a
+    /// temporary and copy their part across.
+    pub(crate) fn read_into(&self, a: usize, elem_size: usize, out: &mut [u8]) -> Result<()> {
+        if out.is_empty() {
+            return Ok(());
+        }
+        let b = a + out.len() / elem_size;
+        let chunk_len = self.plan.chunk_len;
+        let (ka, kb) = (a / chunk_len, (b - 1) / chunk_len);
+
+        // Each chunk's slice of `out`, in ka..=kb order.
+        let mut slices = Vec::with_capacity(kb - ka + 1);
+        let mut rest = out;
+        for k in ka..=kb {
+            let lo = a.max(k * chunk_len);
+            let hi = b.min((k + 1) * chunk_len);
+            let (head, tail) = rest.split_at_mut((hi - lo) * elem_size);
+            slices.push((k * chunk_len, lo, head));
+            rest = tail;
+        }
+        let plan = self.plan;
+        let dsid = self.ds.id();
+        // Raw `hdf5-sys` FFI below bypasses hdf5-metno's wrappers and would
+        // race any other thread inside libhdf5 (its state is global, not per
+        // file), so it runs under the process-global lock the safe API uses.
+        // `pread` and inflate touch no HDF5 state and run outside it.
+        let Some(file) = &self.file else {
+            let raw: Vec<(u32, Vec<u8>)> = hdf5::sync::sync(|| {
+                (ka..=kb)
+                    .map(|k| read_raw_chunk(dsid, k * chunk_len))
+                    .collect::<Result<_>>()
+            })?;
+            return raw.into_par_iter().zip(slices).try_for_each(
+                |((mask, cbuf), (first, lo, dst))| {
+                    decode_into(plan, mask, &cbuf, first, lo, dst, elem_size)
+                },
+            );
+        };
+        let locs: Cow<[ChunkLoc]> = match &self.locs {
+            Some(all) => Cow::Borrowed(&all[ka..=kb]),
+            None => Cow::Owned(hdf5::sync::sync(|| {
+                (ka..=kb)
+                    .map(|k| chunk_location(dsid, k * chunk_len))
+                    .collect::<Result<Vec<_>>>()
+            })?),
+        };
+        slices.into_par_iter().zip(&*locs).try_for_each(
+            |((first, lo, dst), &(mask, addr, size))| {
+                let mut cbuf = vec![0u8; size];
+                read_at(file, &mut cbuf, addr)?;
+                decode_into(plan, mask, &cbuf, first, lo, dst, elem_size)
+            },
+        )
+    }
 }
 
 /// [`read_range_parallel`] into a typed `Vec`, decoded in place: no byte
@@ -403,16 +516,18 @@ pub(crate) fn read_range_typed<T: bytemuck::Pod>(
     b: usize,
     plan: ChunkPlan,
 ) -> Result<Vec<T>> {
-    // ponytail: assumes a little-endian host, as `TypedVec::from_le_bytes` did.
-    let mut out = zeroed_vec_huge::<T>(b.saturating_sub(a));
-    read_range_into(
-        ds,
-        a,
-        size_of::<T>(),
-        plan,
-        bytemuck::cast_slice_mut(&mut out),
-    )?;
-    Ok(out)
+    ChunkReader::with_plan(ds, plan, false)?.read_typed(a, b)
+}
+
+impl ChunkReader {
+    /// Elements `[a, b)` as `T`, which must have the stored element size;
+    /// values are taken bit for bit, so signedness may differ.
+    pub(crate) fn read_typed<T: bytemuck::Pod>(&self, a: usize, b: usize) -> Result<Vec<T>> {
+        // ponytail: assumes a little-endian host, as `TypedVec::from_le_bytes` did.
+        let mut out = zeroed_vec_huge::<T>(b.saturating_sub(a));
+        self.read_into(a, size_of::<T>(), bytemuck::cast_slice_mut(&mut out))?;
+        Ok(out)
+    }
 }
 
 /// `n` zeroed values. On Linux a block of 4 MB or more is madvised to 2 MB
@@ -440,75 +555,35 @@ pub(crate) fn zeroed_vec_huge<T: bytemuck::Pod>(n: usize) -> Vec<T> {
     v
 }
 
-/// Decode elements `[a, a + out.len() / elem_size)` into `out`.
-///
-/// Each chunk owns a disjoint slice of `out`. A chunk the range covers whole,
-/// deflated and not shuffled, inflates straight into its slice. The rest (the
-/// range's first and last chunks when partial, the dataset's padded edge
-/// chunk, shuffled or deflate-skipped chunks) decode to a temporary and copy
-/// their part across.
-fn read_range_into(
-    ds: &Dataset,
-    a: usize,
-    elem_size: usize,
+/// Decode the stored chunk `cbuf` (filter mask `mask`), which starts at
+/// element `first`, into `dst`: its elements from `lo` on. A set bit in the
+/// filter mask means that filter was skipped for this chunk, so each stage
+/// applies only when its own bit is clear.
+fn decode_into(
     plan: ChunkPlan,
-    out: &mut [u8],
+    mask: u32,
+    cbuf: &[u8],
+    first: usize,
+    lo: usize,
+    dst: &mut [u8],
+    elem_size: usize,
 ) -> Result<()> {
-    if out.is_empty() {
-        return Ok(());
+    let whole = dst.len() == plan.chunk_len * elem_size;
+    let deflated = mask & (1 << plan.deflate_bit) == 0;
+    let shuffled = plan.shuffle_bit.is_some_and(|bit| mask & (1 << bit) == 0);
+    if whole && deflated && !shuffled {
+        return inflate_exact(cbuf, dst);
     }
-    let b = a + out.len() / elem_size;
-    let chunk_len = plan.chunk_len;
-    let dsid = ds.id();
-    let ka = a / chunk_len;
-    let kb = (b - 1) / chunk_len;
-
-    // 1) Read the raw (still-filtered) chunks. These are raw `hdf5-sys` FFI calls,
-    //    so they do NOT go through hdf5-metno's wrappers and would otherwise race
-    //    with any other thread in the process that is inside libhdf5 (HDF5's
-    //    global state is shared across all open files, not per-file). Hold the
-    //    same process-global lock the safe API uses for the whole read stage; the
-    //    parallel inflate below touches no HDF5 state and stays outside the lock.
-    let raw: Vec<(u32, Vec<u8>)> = hdf5::sync::sync(|| {
-        (ka..=kb)
-            .map(|k| read_raw_chunk(dsid, k * chunk_len))
-            .collect::<Result<_>>()
+    let bytes = decode_chunk(plan, mask, cbuf, elem_size)?;
+    let from = (lo - first) * elem_size;
+    let src = bytes.get(from..from + dst.len()).ok_or_else(|| {
+        ScxError::InvalidFormat(format!(
+            "chunk at element {first} decodes to {} bytes, too few",
+            bytes.len()
+        ))
     })?;
-
-    // 2) Split `out` into each chunk's slice, in ka..=kb order.
-    let mut slices = Vec::with_capacity(raw.len());
-    let mut rest = out;
-    for k in ka..=kb {
-        let lo = a.max(k * chunk_len);
-        let hi = b.min((k + 1) * chunk_len);
-        let (head, tail) = rest.split_at_mut((hi - lo) * elem_size);
-        slices.push((k * chunk_len, lo, head));
-        rest = tail;
-    }
-
-    // 3) Decode across cores. A set bit in the filter mask means that filter
-    //    was skipped for that chunk, so each stage applies only when its own
-    //    bit is clear.
-    raw.into_par_iter()
-        .zip(slices)
-        .try_for_each(|((mask, cbuf), (first, lo, dst))| {
-            let whole = dst.len() == chunk_len * elem_size;
-            let deflated = mask & (1 << plan.deflate_bit) == 0;
-            let shuffled = plan.shuffle_bit.is_some_and(|bit| mask & (1 << bit) == 0);
-            if whole && deflated && !shuffled {
-                return inflate_exact(&cbuf, dst);
-            }
-            let bytes = decode_chunk(plan, mask, &cbuf, elem_size)?;
-            let from = (lo - first) * elem_size;
-            let src = bytes.get(from..from + dst.len()).ok_or_else(|| {
-                ScxError::InvalidFormat(format!(
-                    "chunk at element {first} decodes to {} bytes, too few",
-                    bytes.len()
-                ))
-            })?;
-            dst.copy_from_slice(src);
-            Ok(())
-        })
+    dst.copy_from_slice(src);
+    Ok(())
 }
 
 /// Inflate the zlib stream `cbuf` into `dst`, which it must fill exactly.
@@ -928,6 +1003,8 @@ mod tests {
             let f = File::open(&path).unwrap();
             let ds = f.dataset("data").unwrap();
             let plan = chunk_plan(&ds).unwrap();
+            let whole = ChunkReader::new(&ds, true).unwrap().unwrap();
+            assert!(whole.file.is_some() && whole.locs.is_some());
             let masks: Vec<u32> = chunk_locations(&ds, 1000, vals.len())
                 .unwrap()
                 .iter()
@@ -960,9 +1037,44 @@ mod tests {
                     bytemuck::cast_slice::<u64, u8>(&want),
                     "bytes {a}..{b}"
                 );
+                // A stream's reader, with all chunk locations listed up front.
+                let got: Vec<u64> = whole.read_typed(a, b).unwrap();
+                assert_eq!(got, want, "whole-index {a}..{b} shuffle={shuffle}");
             }
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    /// With a userblock, chunk addresses are not file offsets: the reader must
+    /// read chunks through libhdf5 and still give its bytes.
+    #[test]
+    fn userblock_file_reads_through_libhdf5() {
+        let path = tmp("userblock");
+        let vals = values(5000);
+        for shuffle in [false, true] {
+            {
+                let f = File::with_options()
+                    .with_fcpl(|p| p.userblock(512))
+                    .create(&path)
+                    .unwrap();
+                let mut b = f.new_dataset::<f64>().shape([vals.len()]).chunk([1024]);
+                if shuffle {
+                    b = b.shuffle();
+                }
+                b.deflate(6).create("data").unwrap().write(&vals).unwrap();
+            }
+            let f = File::open(&path).unwrap();
+            let ds = f.dataset("data").unwrap();
+            for whole in [false, true] {
+                let r = ChunkReader::new(&ds, whole).unwrap().unwrap();
+                assert!(r.file.is_none(), "a userblock file must not be pread");
+                for (a, b) in [(0, 5000), (1000, 3100), (4999, 5000), (7, 7)] {
+                    let got: Vec<f64> = r.read_typed(a, b).unwrap();
+                    assert_eq!(got, &vals[a..b], "{a}..{b} shuffle={shuffle}");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

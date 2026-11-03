@@ -2183,3 +2183,90 @@ async fn x_stream_holds_its_file_open() {
         }
     }
 }
+
+/// X read by the per-stream chunk readers (pread + parallel inflate) gives
+/// exactly the matrix written, uncompressed, gzip and shuffle+gzip, for a
+/// whole-matrix stream (chunk index listed up front) and row ranges (chunks
+/// looked up per block) that start and end mid-chunk, hold no nonzeros, or
+/// end at the padded last chunk.
+#[tokio::test]
+async fn x_chunk_reader_matches_written_matrix() {
+    let (n_obs, n_vars) = (3000usize, 50usize);
+    let mut indptr = vec![0u64];
+    let (mut indices, mut data) = (Vec::<i32>::new(), Vec::<f32>::new());
+    for r in 0..n_obs {
+        for c in (0..n_vars).step_by(1 + r % 5).take(r % 7) {
+            indices.push(c as i32);
+            data.push((r * 100 + c) as f32 + 0.25);
+        }
+        indptr.push(indices.len() as u64);
+    }
+    let all_idx: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
+    let want = |rows: std::ops::Range<usize>| {
+        let nnz = indptr[rows.start] as usize..indptr[rows.end] as usize;
+        crate::sparse::csr_chunk(
+            &indptr,
+            rows,
+            n_vars,
+            all_idx[nnz.clone()].to_vec(),
+            TypedVec::F32(data[nnz].to_vec()),
+        )
+    };
+    for filters in ["none", "gzip", "shuffle+gzip"] {
+        let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+        {
+            let f = File::create(tmp.path()).unwrap();
+            let ip: Vec<i32> = indptr.iter().map(|&p| p as i32).collect();
+            write_csr_group(&f, "X", (n_obs, n_vars), &ip, &[0], &[0.0]);
+            let g = f.group("X").unwrap();
+            g.unlink("indices").unwrap();
+            g.unlink("data").unwrap();
+            fn put<T: hdf5::H5Type>(g: &hdf5::Group, name: &str, v: &[T], filters: &str) {
+                let b = g.new_dataset_builder().with_data(v).chunk(64);
+                let b = match filters {
+                    "gzip" => b.deflate(4),
+                    "shuffle+gzip" => b.shuffle().deflate(4),
+                    _ => b,
+                };
+                b.create(name).unwrap();
+            }
+            put(&g, "indices", &indices, filters);
+            put(&g, "data", &data, filters);
+        }
+        let cases: Vec<Vec<std::ops::Range<usize>>> = vec![
+            vec![0..n_obs],
+            vec![5..17, 1000..1001, 2990..n_obs],
+            vec![7..8, 14..15],
+            vec![9..9],
+            vec![1..2999],
+        ];
+        for ranges in cases {
+            let mut r = H5AdReader::open(tmp.path(), 250).unwrap();
+            let mut s = r.x_stream_rows(ranges.clone());
+            let mut blocks = Vec::new();
+            while let Some(c) = s.next().await {
+                blocks.push(c.unwrap());
+            }
+            let expect: Vec<std::ops::Range<usize>> = crate::stream::normalize_ranges(ranges)
+                .into_iter()
+                .flat_map(|r| {
+                    (r.start..r.end)
+                        .step_by(250)
+                        .map(move |a| a..(a + 250).min(r.end))
+                })
+                .collect();
+            assert_eq!(blocks.len(), expect.len(), "{filters}");
+            for (g, rows) in blocks.iter().zip(expect) {
+                let w = want(rows.clone());
+                assert_eq!((g.row_offset, g.nrows), (w.row_offset, w.nrows));
+                assert_eq!(g.data.indptr, w.data.indptr, "{filters} {rows:?}");
+                assert_eq!(g.data.indices, w.data.indices, "{filters} {rows:?}");
+                assert_eq!(
+                    g.data.data.as_le_bytes(),
+                    w.data.data.as_le_bytes(),
+                    "{filters} {rows:?}"
+                );
+            }
+        }
+    }
+}
