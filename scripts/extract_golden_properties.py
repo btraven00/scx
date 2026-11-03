@@ -29,6 +29,7 @@ H5AD_FIXTURES = [
     "pbmc3k_reference.h5ad",
     "norman_subset.h5ad",
     "hlca_core.h5ad",
+    "cxg_microglia.h5ad",  # pixi run fetch-cxg-microglia
 ]
 
 

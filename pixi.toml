@@ -17,6 +17,9 @@ build         = { cmd = "cargo build",          description = "Build Rust worksp
 build-release = { cmd = "cargo build --release", description = "Build Rust workspace (release)" }
 test          = { cmd = "cargo test",            description = "Run Rust unit + integration tests" }
 bench         = { cmd = "cargo bench",           description = "Run Criterion benchmarks" }
+# A small real-world h5ad (CELLxGENE, 3799 microglia, 9 MB) at its pinned,
+# versioned URL; the hash check fails if the file there ever changes.
+fetch-cxg-microglia = { cmd = "curl -fsSL https://datasets.cellxgene.cziscience.com/8d2c2221-bc69-4648-90ce-cf4038dc4147.h5ad -o tests/golden/cxg_microglia.h5ad && echo '89f0a566552bd7bb771a9b49c03d530ca3e552175a9f2508df6148b8f765b1d0  tests/golden/cxg_microglia.h5ad' | sha256sum -c -", description = "Download the CELLxGENE microglia h5ad golden fixture (checksum-verified)" }
 
 # ---------------------------------------------------------------------------
 # test feature — R + Python oracle stack, only needed for integration testing
