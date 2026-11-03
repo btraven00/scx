@@ -72,6 +72,7 @@ pub fn detect(path: &Path) -> Option<Format> {
         .or_else(|| sniff_mtx(path))
         .or_else(|| crate::rds::sniff(path).then_some(Format::Rds))
         .or_else(|| sniff(path))
+        .or_else(|| sniff_parquet(path))
         .or_else(|| match path.extension().and_then(|e| e.to_str()) {
             Some("h5seurat") => Some(Format::H5Seurat),
             Some("h5ad") => Some(Format::H5Ad),
@@ -93,6 +94,19 @@ pub fn sniff_bixverse(path: &Path) -> Option<Format> {
     let mut magic = [0u8; 8];
     std::fs::File::open(bin).ok()?.read_exact(&mut magic).ok()?;
     (&magic == b"SCRNASEQ").then_some(Format::Bixverse)
+}
+
+/// Sniff a Parquet file by its leading `PAR1` magic, for a file with no
+/// `.parquet` name (piped in on stdin).
+pub fn sniff_parquet(path: &Path) -> Option<Format> {
+    use std::io::Read;
+
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut magic)
+        .ok()?;
+    (&magic == b"PAR1").then_some(Format::Parquet)
 }
 
 /// Sniff a bare `.mtx[.gz]` file by its MatrixMarket banner. Directories are
@@ -220,6 +234,16 @@ pub fn sniff(path: &Path) -> Option<Format> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parquet_is_detected_without_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("stdin");
+        std::fs::write(&p, b"PAR1\0\0\0\0PAR1").unwrap();
+        assert_eq!(detect(&p), Some(Format::Parquet));
+        std::fs::write(&p, b"PAR0").unwrap();
+        assert_eq!(detect(&p), None);
+    }
 
     use crate::golden::golden;
 
