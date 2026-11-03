@@ -185,3 +185,13 @@ def test_stream_axis_must_match_storage(norman_path, norman_csc_path) -> None:
         pk.open_stream(norman_csc_path, axis="var", rows=[0])
     with pytest.raises(ValueError, match="genes="):
         pk.open_stream(norman_path, genes=[(0, 1)])
+
+
+def test_import_does_not_load_anndata():
+    # Regression: _api imported anndata eagerly, adding ~0.7 s to every
+    # `import picklerick`, though only read() needs it.
+    import subprocess
+    import sys
+
+    code = "import sys, picklerick; assert 'anndata' not in sys.modules, 'anndata imported'"
+    subprocess.run([sys.executable, "-c", code], check=True)
