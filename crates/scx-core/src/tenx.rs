@@ -7,6 +7,7 @@ use ndarray::s;
 
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
+use crate::h5::read_vec;
 use crate::h5_str::read_strings;
 use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, VarTable};
 use crate::stream::row_range_chunks;
@@ -192,12 +193,8 @@ fn read_indices(file: &File, a: usize, b: usize) -> Result<Vec<u32>> {
             .iter()
             .map(|&x| x as u32)
             .collect(),
-        TypeDescriptor::Integer(_) => ds
-            .read_slice_1d::<i32, _>(s![a..b])?
-            .iter()
-            .map(|&x| x as u32)
-            .collect(),
-        TypeDescriptor::Unsigned(_) => ds.read_slice_1d::<u32, _>(s![a..b])?.to_vec(),
+        TypeDescriptor::Integer(_) => bytemuck::cast_vec(read_vec::<i32>(&ds, a..b)?),
+        TypeDescriptor::Unsigned(_) => read_vec::<u32>(&ds, a..b)?,
         other => {
             return Err(ScxError::InvalidFormat(format!(
                 "unexpected /matrix/indices dtype {other:?}"
@@ -230,19 +227,17 @@ fn read_data(file: &File, dtype: DataType, a: usize, b: usize) -> Result<TypedVe
         }
     }
     Ok(match (dtype, descr) {
-        (DataType::F32, TypeDescriptor::Float(_)) => {
-            TypedVec::F32(ds.read_slice_1d::<f32, _>(s![a..b])?.to_vec())
-        }
-        (DataType::F64, _) => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![a..b])?.to_vec()),
+        (DataType::F32, TypeDescriptor::Float(_)) => TypedVec::F32(read_vec(&ds, a..b)?),
+        (DataType::F64, _) => TypedVec::F64(read_vec(&ds, a..b)?),
         (DataType::I32, TypeDescriptor::Integer(IntSize::U8)) => TypedVec::I32(
             ds.read_slice_1d::<i64, _>(s![a..b])?
                 .iter()
                 .map(|&x| x as i32)
                 .collect(),
         ),
-        (DataType::I32, _) => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![a..b])?.to_vec()),
-        (DataType::U32, _) => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![a..b])?.to_vec()),
-        (DataType::F32, _) => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![a..b])?.to_vec()),
+        (DataType::I32, _) => TypedVec::I32(read_vec(&ds, a..b)?),
+        (DataType::U32, _) => TypedVec::U32(read_vec(&ds, a..b)?),
+        (DataType::F32, _) => TypedVec::F32(read_vec(&ds, a..b)?),
     })
 }
 
