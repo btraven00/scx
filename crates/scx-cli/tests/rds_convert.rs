@@ -130,3 +130,25 @@ fn inspects_rds_url() {
         "{stdout}"
     );
 }
+
+/// inspect asks before downloading a URL over 1 GB (one HEAD request gives
+/// the size), and stops when it can't ask: stdin is not a terminal here.
+#[cfg(feature = "net")]
+#[test]
+fn inspect_stops_before_a_large_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big.rds");
+    // Sparse: 2 GB long, no blocks on disk.
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(2_000_000_000)
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_scx"))
+        .args(["inspect", &format!("file://{}", big.display())])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(err.contains("2.0 GB") && err.contains("--yes"), "{err}");
+}

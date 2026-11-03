@@ -225,6 +225,12 @@ enum Cli {
         /// `counts` for H5Seurat.
         #[arg(long)]
         layer: Option<String>,
+
+        /// Download a URL input without asking, however large. Without it,
+        /// inspect asks before downloading more than 1 GB, and stops when it
+        /// can't ask (stdin is not a terminal).
+        #[arg(long, short)]
+        yes: bool,
     },
 
     /// Validate a single-cell file against a YAML schema
@@ -719,6 +725,7 @@ async fn run() -> anyhow::Result<()> {
             input,
             assay,
             layer,
+            yes,
         } => {
             // A URL other than Parquet is downloaded first (kept until inspect
             // returns), as `convert` does through the reader factory.
@@ -726,6 +733,7 @@ async fn run() -> anyhow::Result<()> {
             let spool = if scx_core::net::is_network_url(&input)
                 && !scx_core::net::reads_by_range(&input)
             {
+                confirm_download(&input, yes).await?;
                 Some(scx_core::spool::spool(&input).await?)
             } else {
                 None
@@ -733,7 +741,7 @@ async fn run() -> anyhow::Result<()> {
             #[cfg(feature = "net")]
             let input_path = spool.as_ref().map_or(Path::new(&input), |s| s.path());
             #[cfg(not(feature = "net"))]
-            let input_path = Path::new(&input);
+            let (input_path, _) = (Path::new(&input), yes);
             if !input_path.exists() && input.contains("://") {
                 anyhow::bail!(
                     "'{input}': inspect reads URLs only in a build with the `net` feature, \
@@ -1593,6 +1601,39 @@ fn cat_levels_preview(data: &ColumnData) -> String {
     } else {
         String::new()
     }
+}
+
+/// Above this size inspect asks before downloading a URL in full.
+// ponytail: fixed threshold; make it a flag if 1 GB is wrong for someone.
+#[cfg(feature = "net")]
+const ASK_ABOVE_BYTES: u64 = 1_000_000_000;
+
+/// Ask before inspect downloads a large URL in full, as it must for anything
+/// but Parquet. The size comes from a HEAD request; if the server won't say,
+/// the download just goes ahead.
+#[cfg(feature = "net")]
+async fn confirm_download(url: &str, yes: bool) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    let Some(size) = scx_core::net::size(url).await else {
+        return Ok(());
+    };
+    if yes || size <= ASK_ABOVE_BYTES {
+        return Ok(());
+    }
+    let gb = size as f64 / 1e9;
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "'{url}' is {gb:.1} GB, and inspect would download all of it first; \
+             pass --yes to go ahead"
+        );
+    }
+    eprint!("'{url}' is {gb:.1} GB, and inspect downloads all of it first. Continue? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        anyhow::bail!("cancelled");
+    }
+    Ok(())
 }
 
 async fn inspect(
