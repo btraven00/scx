@@ -40,6 +40,7 @@ pub mod rds;
 pub mod sparse;
 pub mod spool;
 pub mod stream;
+pub mod subset;
 pub mod tenx;
 pub mod transpose;
 pub mod validate;

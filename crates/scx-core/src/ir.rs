@@ -157,10 +157,43 @@ impl ObsTable {
             .columns
             .iter()
             .find(|c| c.name == column)
-            .ok_or_else(|| ScxError::MissingField(format!("obs column '{column}'")))?;
+            .ok_or_else(|| {
+                let have: Vec<&str> = self.columns.iter().map(|c| c.name.as_str()).collect();
+                ScxError::MissingField(format!(
+                    "obs column '{column}' (obs has: {})",
+                    if have.is_empty() {
+                        "no columns".to_string()
+                    } else {
+                        have.join(", ")
+                    }
+                ))
+            })?;
         Ok((0..col.data.len())
             .map(|i| !col.is_na(i) && values.contains(&col.data.value_str(i).as_str()))
             .collect())
+    }
+
+    /// The [`rows_where`](Self::rows_where) masks of every `(column, values)`
+    /// filter ANDed together: a row is kept when each column holds one of its
+    /// values. With no filters, every one of `n_rows` rows is kept.
+    pub fn rows_matching(
+        &self,
+        n_rows: usize,
+        filters: &[(String, Vec<String>)],
+    ) -> Result<Vec<bool>, ScxError> {
+        let mut mask = vec![true; n_rows];
+        for (column, values) in filters {
+            let values: Vec<&str> = values.iter().map(String::as_str).collect();
+            let hit = self.rows_where(column, &values)?;
+            if hit.len() != n_rows {
+                return Err(ScxError::InvalidFormat(format!(
+                    "obs column '{column}' has {} rows, the matrix {n_rows}",
+                    hit.len()
+                )));
+            }
+            mask.iter_mut().zip(hit).for_each(|(m, h)| *m &= h);
+        }
+        Ok(mask)
     }
 }
 
