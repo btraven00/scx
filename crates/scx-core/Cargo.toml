@@ -62,7 +62,9 @@ hdf5-sys = { package = "hdf5-metno-sys", version = "0.12" }
 # Parallel inflate of deflate-chunked HDF5 datasets: read raw chunks via
 # H5Dread_chunk (hdf5-sys) and inflate them across cores (rayon) outside
 # libhdf5's single-threaded filter pipeline. See h5_chunk.rs.
-flate2 = "1"
+# zlib-rs: pure-Rust zlib, faster inflate than the default miniz_oxide and
+# no C library, so the R staticlib links as before.
+flate2 = { version = "1", features = ["zlib-rs"] }
 memmap2 = "0.9"
 ndarray = "0.17"
 rayon = "1"
