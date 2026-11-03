@@ -146,22 +146,53 @@ fn dgcmatrix_streams_unsorted_rows() {
     assert_eq!(slot(out.path(), "data"), counts(5, 0.5));
 }
 
-/// --no-output-hash leaves `output.sha256` out of the provenance sidecar;
-/// by default it is there.
+/// --output-hash picks the sidecar's `output.hash` algorithm (blake3 by
+/// default) or leaves it out; the source hash is always sha256.
 #[test]
-fn no_output_hash_leaves_sidecar_hash_out() {
+fn output_hash_flag_picks_sidecar_hash() {
     let dir = tempfile::tempdir().unwrap();
-    for (extra, hashed) in [(&[][..], true), (&["--no-output-hash"][..], false)] {
+    for (extra, want) in [
+        (&[][..], Some("blake3:")),
+        (&["--output-hash", "sha256"][..], Some("sha256:")),
+        (&["--output-hash", "none"][..], None),
+    ] {
         let out = dir.path().join("o.h5seurat");
         let _ = std::fs::remove_file(&out);
         convert(&fixture("tiny_raw.h5ad"), &out, extra);
         let side = std::fs::read_to_string(dir.path().join("o.h5seurat.prov.json")).unwrap();
         let side: serde_json::Value = serde_json::from_str(&side).unwrap();
+        let got = side["output"].get("hash").and_then(|h| h.as_str());
         assert_eq!(
-            side["output"].get("sha256").is_some(),
-            hashed,
+            got.map(|h| &h[..h.find(':').unwrap() + 1]),
+            want,
             "{extra:?}: {side}"
         );
-        assert!(side["source"]["sha256"].is_string(), "{extra:?}: {side}");
+        assert!(
+            side["source"]["hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:"),
+            "{extra:?}: {side}"
+        );
     }
+}
+
+/// uns["scx_provenance"] records only the source's file name, so the same
+/// source converted from two different directories gives identical bytes.
+#[test]
+fn source_directory_does_not_change_the_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hashes = Vec::new();
+    for sub in ["a", "b/deeper"] {
+        let d = dir.path().join(sub);
+        std::fs::create_dir_all(&d).unwrap();
+        let src = d.join("tiny_raw.h5ad");
+        std::fs::copy(fixture("tiny_raw.h5ad"), &src).unwrap();
+        let out = d.join("o.h5ad");
+        convert(&src, &out, &[]);
+        let side = std::fs::read_to_string(d.join("o.h5ad.prov.json")).unwrap();
+        let side: serde_json::Value = serde_json::from_str(&side).unwrap();
+        hashes.push(side["output"]["hash"].as_str().unwrap().to_string());
+    }
+    assert_eq!(hashes[0], hashes[1]);
 }
