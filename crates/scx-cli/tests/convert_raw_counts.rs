@@ -230,3 +230,46 @@ fn url_input_converts_like_the_local_file() {
         );
     }
 }
+
+/// `scx convert -` reads stdin: piped in, a file converts as it does from
+/// its path (`scx diff` finds nothing) and records the same source hash.
+#[test]
+fn stdin_input_converts_like_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["tiny_raw.h5ad", "tiny_v5.h5seurat", "tiny_v5.rds"] {
+        let local = dir.path().join("local.h5ad");
+        let piped = dir.path().join("piped.h5ad");
+        for p in [&local, &piped] {
+            let _ = std::fs::remove_file(p);
+        }
+        convert(&fixture(name), &local, &["--dtype", "f64"]);
+        let res = Command::new(env!("CARGO_BIN_EXE_scx"))
+            .args(["convert", "-"])
+            .arg(&piped)
+            .args(["--dtype", "f64"])
+            .stdin(std::fs::File::open(fixture(name)).unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            res.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&res.stderr)
+        );
+        let hash = |out: &Path| {
+            let side = std::fs::read_to_string(format!("{}.prov.json", out.display())).unwrap();
+            serde_json::from_str::<serde_json::Value>(&side).unwrap()["source"]["hash"].clone()
+        };
+        assert!(hash(&local).is_string(), "{name}");
+        assert_eq!(hash(&piped), hash(&local), "{name}");
+        let diff = Command::new(env!("CARGO_BIN_EXE_scx"))
+            .arg("diff")
+            .args([&local, &piped])
+            .output()
+            .unwrap();
+        assert!(
+            diff.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&diff.stdout)
+        );
+    }
+}
