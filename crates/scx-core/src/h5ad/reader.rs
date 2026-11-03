@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
 use hdf5::{File, Group};
 use ndarray::s;
 
-use crate::h5::{read_csr_rows, read_u32_range, read_u64, read_values, value_dtype, CsrReader};
+use crate::h5::{
+    read_csr_rows, read_u32_range, read_u64, read_u64_range, read_values, value_dtype, CsrReader,
+};
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
 use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows};
 use crate::stream::{
@@ -35,8 +38,9 @@ pub struct H5AdReader {
     path: PathBuf,
     n_obs: usize,
     n_vars: usize,
-    /// CSR row pointer array (n_obs + 1 entries). None when X is dense or CSC.
-    indptr: Option<Vec<u64>>,
+    /// CSR row pointer array (n_obs + 1 entries), read on first need: a
+    /// row-range stream reads just its rows' part. None when X is dense or CSC.
+    indptr: Option<OnceLock<Vec<u64>>>,
     /// CSC column pointer array (n_vars + 1 entries) when X is gene-major.
     col_ptr: Option<Vec<u64>>,
     chunk_size: usize,
@@ -105,8 +109,15 @@ impl H5AdReader {
                 col_ptr = Some(ptr);
                 (shape.0, shape.1, None, dtype)
             } else {
-                let meta = ad_read_sparse_meta(&file, &base, &base)?;
-                (meta.shape.0, meta.shape.1, Some(meta.indptr), dtype)
+                let shape = read_shape(&grp)?;
+                let len = file.dataset(&format!("{base}/indptr"))?.size();
+                if len != shape.0 + 1 {
+                    return Err(ScxError::InvalidFormat(format!(
+                        "{base}/indptr has {len} entries, expected n_rows + 1 = {}",
+                        shape.0 + 1
+                    )));
+                }
+                (shape.0, shape.1, Some(OnceLock::new()), dtype)
             }
         };
 
@@ -125,6 +136,20 @@ impl H5AdReader {
     /// The HDF5 path the matrix is read from — `"X"` or `"layers/<name>"`.
     pub fn x_source(&self) -> &str {
         &self.x_path
+    }
+
+    /// The whole CSR row pointer, read on the first call; empty when X is
+    /// dense or CSC.
+    fn full_indptr(&self) -> Result<&[u64]> {
+        let Some(cell) = &self.indptr else {
+            return Ok(&[]);
+        };
+        if let Some(v) = cell.get() {
+            return Ok(v);
+        }
+        let file = File::open(&self.path)?;
+        let v = read_u64(&file.dataset(&format!("{}/indptr", self.x_path))?)?;
+        Ok(cell.get_or_init(|| v))
     }
 }
 
@@ -628,7 +653,11 @@ fn sparse_chunks<'a>(
 #[async_trait]
 impl DatasetReader for H5AdReader {
     fn x_indptr(&self) -> &[u64] {
-        self.indptr.as_deref().unwrap_or(&[])
+        // ponytail: the trait can't return an error; streaming X reports it.
+        self.full_indptr().unwrap_or_else(|e| {
+            tracing::warn!("{}/indptr: {e}", self.x_path);
+            &[]
+        })
     }
 
     fn x_col_ptr(&self) -> &[u64] {
@@ -803,20 +832,45 @@ impl DatasetReader for H5AdReader {
             return error_stream(GENE_MAJOR_X.into());
         }
         let this = &*self;
-        let indptr = this.indptr.as_deref().unwrap_or(&[]);
         let whole = normalize_ranges(ranges.clone()) == [0..this.n_obs];
-        // The file and, for CSR, its indices/data readers, opened on the first block.
-        let mut open: Option<(File, Option<CsrReader>)> = None;
+        // A whole-matrix stream reads the full row pointer once; a row-range
+        // stream reads each block's part of it, unless it is already loaded.
+        let full = match whole {
+            true => match this.full_indptr() {
+                Ok(v) => Some(v),
+                Err(e) => return error_stream(e.to_string()),
+            },
+            false => this
+                .indptr
+                .as_ref()
+                .and_then(OnceLock::get)
+                .map(Vec::as_slice),
+        };
+        // The file and, for CSR, its indptr and indices/data readers, opened
+        // on the first block.
+        let mut open: Option<(File, Option<(hdf5::Dataset, CsrReader)>)> = None;
         row_range_chunks(this.n_obs, ranges, this.chunk_size, move |rows| {
             if open.is_none() {
                 let file = File::open(&this.path)?;
-                let csr = (!indptr.is_empty())
-                    .then(|| CsrReader::open(&file, &this.x_path, this.dtype, whole))
-                    .transpose()?;
+                let csr = match this.indptr {
+                    Some(_) => Some((
+                        file.dataset(&format!("{}/indptr", this.x_path))?,
+                        CsrReader::open(&file, &this.x_path, this.dtype, whole)?,
+                    )),
+                    None => None,
+                };
                 open = Some((file, csr));
             }
             match open.as_ref().expect("opened above") {
-                (_, Some(csr)) => csr.rows(indptr, rows, this.n_vars),
+                (_, Some((_, csr))) if full.is_some() => {
+                    csr.rows(full.expect("matched"), rows, this.n_vars)
+                }
+                (_, Some((ip, csr))) => {
+                    let part = read_u64_range(ip, rows.start..rows.end + 1)?;
+                    let mut chunk = csr.rows(&part, 0..rows.len(), this.n_vars)?;
+                    chunk.row_offset = rows.start;
+                    Ok(chunk)
+                }
                 (file, None) => read_rows(file, &this.x_path, &[], rows, this.n_vars),
             }
         })
