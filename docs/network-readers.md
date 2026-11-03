@@ -38,6 +38,11 @@ converted from there; the file is deleted afterwards. HDF5 and `.rds` need
 random access over the whole file, so a download is the only way to read
 them. It needs as much temporary disk as the file's size (`TMPDIR`).
 
+`scx inspect` downloads the same way, so before downloading more than 1 GB it
+asks first. The size comes from one HEAD request; if the server won't give a
+size, the download goes ahead. When it can't ask (stdin is not a terminal) it
+stops instead; `--yes` skips the question.
+
 ---
 
 ## Quick start
