@@ -31,6 +31,7 @@ system HDF5.
 | `pk.write_h5seurat(adata, path, *, assay="RNA", chunk_size=5000)` | Write an `AnnData` to H5Seurat, in the SeuratDisk layout. |
 | `pk.inspect(path)` | Return shape, columns, layers and nnz statistics without reading the matrix. |
 | `pk.open_stream(path, *, chunk_size=5000, assay="RNA", layer="counts", rows=None, where=None)` | Iterate over X as CSR row blocks (`pk.MatrixChunk`). `where={"CellLine": "A549"}` or `rows=` (mask, indices or ranges) selects rows; on h5ad and Zarr only those rows are read. |
+| `pk.open_dask(path, *, chunk_size=5000, assay="RNA", layer="counts")` | X as a lazy `dask.array` of CSR row blocks, for scanpy's dask code paths. Needs `dask[array]`. |
 
 Supported inputs: H5AD, H5Seurat (dgCMatrix or BPCells-backed), BPCells
 directories, 10x HDF5, MatrixMarket, and AnnData Zarr. Engine errors are
@@ -97,6 +98,26 @@ release build, chunk 5000, 16 cores):
 
 Peak memory grows with `chunk_size`: HLCA uses 0.55 GB at 5000 and 3.6 GB at
 50000.
+
+### Dask
+
+`open_dask` wraps the same reader as a lazy `dask.array`: one block per
+`chunk_size` rows, over every gene, read only when dask computes it. That is
+the layout scanpy's dask code expects, so an exact PCA runs block by block
+without loading X:
+
+```python
+import anndata as ad
+import scanpy as sc
+import picklerick as pk
+
+adata = ad.AnnData(pk.open_dask("atlas.h5ad", chunk_size=10_000)[:, hvg])
+sc.pp.pca(adata, n_comps=50, svd_solver="covariance_eigh")
+```
+
+dask's own reductions (`X.sum()`) don't accept scipy sparse blocks; use
+`X.map_blocks` or scanpy's functions, which work block by block. Install with
+`pip install scx-picklerick[dask]`.
 
 ## Development
 

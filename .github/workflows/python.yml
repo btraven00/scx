@@ -60,7 +60,7 @@ jobs:
         run: |
           for py in python3.10 python3.12 python3.14; do
             $py -m venv ".venv-$py"
-            ".venv-$py/bin/python" -m pip install python/picklerick/dist/*.whl pytest scipy zarr
+            ".venv-$py/bin/python" -m pip install python/picklerick/dist/*.whl pytest scipy zarr "dask[array]"
             ".venv-$py/bin/python" -m pytest python/picklerick/tests -q -rs
           done
       - uses: actions/upload-artifact@v7
@@ -88,7 +88,7 @@ jobs:
       - name: Build instrumented extension and run pytest
         run: |
           python -m venv .venv && . .venv/bin/activate
-          pip install "maturin>=1.9,<2" pytest pytest-cov scipy anndata
+          pip install "maturin>=1.9,<2" pytest pytest-cov scipy anndata "dask[array]"
           eval "$(cargo llvm-cov show-env --export-prefix)"
           export CARGO_TARGET_DIR=$CARGO_LLVM_COV_TARGET_DIR
           maturin develop --manifest-path python/picklerick/Cargo.toml --no-default-features
