@@ -1,0 +1,200 @@
+{
+  "X": {
+    "digest": "c574ccd3388101e2080caf13f14ef92ff25d9ee32daa985e182de12b75906a9b",
+    "nnz": 2216851,
+    "row0_spot": [
+      [
+        51,
+        1.0
+      ],
+      [
+        104,
+        1.0
+      ],
+      [
+        403,
+        3.0
+      ],
+      [
+        409,
+        1.0
+      ],
+      [
+        480,
+        1.0
+      ]
+    ],
+    "shape": [
+      3799,
+      31997
+    ]
+  },
+  "_source": {
+    "fixture": "cxg_microglia.h5ad",
+    "tool": "anndata"
+  },
+  "n_obs": 3799,
+  "n_vars": 31997,
+  "obs": {
+    "BraakStage": {
+      "digest": "acbc6bfcb74db8d212d1b92ef77373ee18cfe8ebe227422d406f30b42b4c0832",
+      "kind": "categorical"
+    },
+    "SampleBatch": {
+      "digest": "5d132f4e8b84b1a1243f19dd222c4f58a3a896fac6212645bb0b39a6833b8adc",
+      "kind": "categorical"
+    },
+    "SampleID": {
+      "digest": "95003ebbc075b79df0073f2752453c07477e4a3005c055ebece4ad1cc10b626e",
+      "kind": "categorical"
+    },
+    "assay": {
+      "digest": "deb2fb42b0c21cf0c4f36eb08d7776af823df56e60ea5c671c0d6c21c3dd6a89",
+      "kind": "categorical"
+    },
+    "assay_ontology_term_id": {
+      "digest": "0724eb1f58aac9dcddfd4a299f9cfd0a504706c44baa735e6ff2c777a309c48b",
+      "kind": "categorical"
+    },
+    "cell_type": {
+      "digest": "35a0a926a503e6fa506f61dca277ab5006bee232a37bab475d4ee39e5dc1c850",
+      "kind": "categorical"
+    },
+    "cell_type_ontology_term_id": {
+      "digest": "63c67d964bd729bc937a96de3eb4c6a11087e849687efe2648becece935276bf",
+      "kind": "categorical"
+    },
+    "development_stage": {
+      "digest": "f02f80a6b26b8130fd7d9d0cd586985a3df43676f64f58fe4fc56f69a00055be",
+      "kind": "categorical"
+    },
+    "development_stage_ontology_term_id": {
+      "digest": "0bbf83b76fbc2d61b8831588efc8f8717c2ecfdc510913bc767e3f45ad379d0e",
+      "kind": "categorical"
+    },
+    "disease": {
+      "digest": "5e707407cdd1e86377454ec8834041afc9e63d48f7bf6d442e49249052de4612",
+      "kind": "categorical"
+    },
+    "disease_ontology_term_id": {
+      "digest": "87566b61d41a99b1d01f62b57e5f740cee39d80a25218eca209f38cf3324737d",
+      "kind": "categorical"
+    },
+    "donor_id": {
+      "digest": "18ffc60acd6a3dbc0df9cba6b215aca60d885708a19d7bcae71fb31a14f7a8e3",
+      "kind": "categorical"
+    },
+    "initialClusterAssignments": {
+      "digest": "53d89a02a7289fcadce4ab42d8dd9b1075177bf6ef62d61e48d1454a00e6884e",
+      "kind": "categorical"
+    },
+    "is_primary_data": {
+      "digest": "70378145e57f2582c837822ce59f392eb0963f599f0d4799a502b6c7ec899b11",
+      "kind": "int"
+    },
+    "nGene": {
+      "digest": "8dddb9561dcf0b376db6a9ad23f9c313f02c136d6587503bfeeb536b5e1d5c03",
+      "kind": "int"
+    },
+    "nUMI": {
+      "digest": "3791f38ee8194f11f308e27f141486bd14ae7b3d69e6e4d1b9a77bd93ee97423",
+      "kind": "float"
+    },
+    "observation_joinid": {
+      "digest": "d52198f22c15c1bcdaa4665e2dcb4a0c68cacabc14463dbf3491997252de7cd2",
+      "kind": "str"
+    },
+    "self_reported_ethnicity": {
+      "digest": "b3be75cf867d8373115de3ac2f23497aa7770dc357ad45b7064181d7d65a9632",
+      "kind": "categorical"
+    },
+    "self_reported_ethnicity_ontology_term_id": {
+      "digest": "b3be75cf867d8373115de3ac2f23497aa7770dc357ad45b7064181d7d65a9632",
+      "kind": "categorical"
+    },
+    "seurat.subclusters": {
+      "digest": "bc23c48e8148dee71c3175523cb4f013cf46ff0dfa8f2d52d5d4325c1f8f1caa",
+      "kind": "categorical"
+    },
+    "sex": {
+      "digest": "a07a9bda3635029e72d72144900786d532c7cc17f5cbd1aab33cb00f7bda332c",
+      "kind": "categorical"
+    },
+    "sex_ontology_term_id": {
+      "digest": "72ab75f72d89adf36a1f315acea40eda042952f915dbba122f6168f6068e7931",
+      "kind": "categorical"
+    },
+    "subclusterAssignment": {
+      "digest": "bce051b7f3191a8537695fece551dbf8f0c6fb55f3d1f6b99996b471c394d5d3",
+      "kind": "categorical"
+    },
+    "suspension_type": {
+      "digest": "5a193244530455431872479d69351c5da486a26bdaa9f41227e5477677d99b99",
+      "kind": "categorical"
+    },
+    "tissue": {
+      "digest": "5136349eb538e55b5aefcfb4bb2739dc8259e3517f7cf0cec7834c97b5cdba12",
+      "kind": "categorical"
+    },
+    "tissue_ontology_term_id": {
+      "digest": "682b5163aec5b494bcaef3533aeea68149d91c0e60737c38ce8321b9cae0fda4",
+      "kind": "categorical"
+    },
+    "tissue_type": {
+      "digest": "150c5874413de626c98b704fbeeb6b6f33e5a7a03076184206f53dc29df906c6",
+      "kind": "categorical"
+    }
+  },
+  "obs_names": "b964df04ff3e272427a7b19ca862004eb4b459a2a4d82d82cbbe40450029c437",
+  "obsm": {
+    "X_cca": {
+      "digest": "5ed90afbc4a99207b56fd1b1188ea072e8ebc17869c73ff65580f48eedde1a48",
+      "shape": [
+        3799,
+        12
+      ]
+    },
+    "X_cca.aligned": {
+      "digest": "b8f6c9a071e5d0833bd5c68eaa57af2820e7f7d220c70a8671ac9200ee7c1e5b",
+      "shape": [
+        3799,
+        64
+      ]
+    },
+    "X_tsne": {
+      "digest": "afcf5af533d6b74794448185f5a72b5da1f52119c44ab1e1e1c21ea2cb4aef7f",
+      "shape": [
+        3799,
+        2
+      ]
+    }
+  },
+  "schema": 1,
+  "var": {
+    "feature_biotype": {
+      "digest": "654bc2d2e5f12fd64ca26ff1a7e826006936a4943d8801ad4dfc3c06be7ab66a",
+      "kind": "categorical"
+    },
+    "feature_is_filtered": {
+      "digest": "b03232decb127cd3112347d4ccca1501bd0378064ee7d32a68a07700286e4e45",
+      "kind": "int"
+    },
+    "feature_length": {
+      "digest": "14fcbcc18ced543a934ca7eaf4d496a63f9cf12dbd2e65928946a79e9bfd242d",
+      "kind": "categorical"
+    },
+    "feature_name": {
+      "digest": "c2973abacaa3160aca1e27ddc7e828b7f5bfdd472b9c77d3ff5ca8a4e2bac6d8",
+      "kind": "categorical"
+    },
+    "feature_reference": {
+      "digest": "5fdf89d89daba33ba94362dd5fc0bfa1d3b2f95787af7f70c9df1baa9fc41fca",
+      "kind": "categorical"
+    },
+    "feature_type": {
+      "digest": "156ade7049df81118b5fae893a854777ad799ee8fe16d833fb7592ff0229318d",
+      "kind": "categorical"
+    }
+  },
+  "var_names": "f59c985b92c372ff2b9f055da6036142278ddfa84d2f4bf31dbe5be119796a88"
+}

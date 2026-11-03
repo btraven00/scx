@@ -23,6 +23,12 @@ Test layers (run all green before tagging a release):
    picklerick's `open_stream` decode — no oracle stack needed at test time. The
    contract lives in `python/picklerick/tests/golden_props.py`; this is what
    guards the parallel-inflate decode (`scx-core/src/h5_chunk.rs`).
+   One fixture is a real downloaded file, `cxg_microglia.h5ad` (CELLxGENE,
+   3799 cells, 9 MB; `pixi run fetch-cxg-microglia` fetches it from its pinned
+   URL and checks its SHA-256). The same digest is also checked after
+   `scx convert` reads that file from stdin and from a `file://` URL; set
+   `SCX_BIN` or put `scx` on `PATH`, built with `--features net` for the URL
+   case.
 
 Layers 1–3 run in the `pixi test` environment; the full oracle gate is
 `pixi run -e test roundtrip` (fixtures → convert → pytest → testthat). Layers
