@@ -198,6 +198,22 @@ enum Cli {
         /// X/obs/var are always written. Mutually exclusive with --only.
         #[arg(long, conflicts_with = "only")]
         exclude: Option<String>,
+
+        /// Keep only the cells whose obs column COL equals VALUE. Repeat it:
+        /// values given for the same column OR together, different columns
+        /// AND (`--where cell_type=B --where cell_type=T --where donor=d1`
+        /// keeps B and T cells of donor d1). Values compare as text
+        /// (booleans as True/False); NA never matches. The text up to the
+        /// first `=` is the column, so a value may contain `=`; quote it for
+        /// the shell when it has spaces (`--where "cell_type=CD4 T"`).
+        ///
+        /// X, layers, raw.X, obs and obsm keep the matching rows, and obsp
+        /// those rows and columns; var, varm and uns are unchanged. h5ad,
+        /// Zarr, dgCMatrix H5Seurat and 10x HDF5 read only the matching rows
+        /// of X; other inputs read all of it. No match writes a valid file
+        /// with 0 cells.
+        #[arg(long = "where", value_name = "COL=VALUE", value_parser = parse_where_arg)]
+        where_: Vec<(String, String)>,
     },
 
     /// Inspect a single-cell file
@@ -867,7 +883,9 @@ async fn run() -> anyhow::Result<()> {
             transpose_mem,
             only,
             exclude,
+            where_,
         } => {
+            let filters = scx_core::subset::group_filters(where_);
             if transpose_mem.is_nan() || transpose_mem <= 0.0 {
                 anyhow::bail!("--transpose-mem must be a positive GB budget");
             }
@@ -934,6 +952,17 @@ async fn run() -> anyhow::Result<()> {
                     .await
                     .map_err(|e| anyhow::anyhow!("cannot open '{input}': {e}"))?
             };
+            if !filters.is_empty() {
+                let sub = scx_core::subset::SubsetReader::new(reader, &filters, chunk_size)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("--where: {e}"))?;
+                tracing::info!(
+                    n_obs = sub.shape().0,
+                    "--where keeps {} cells",
+                    sub.shape().0
+                );
+                reader = Box::new(sub);
+            }
             // Convert into a sibling path and rename on success, so a failed
             // run leaves nothing behind and doesn't clobber an existing output.
             // The name keeps the extension, which picks the writer.
@@ -965,6 +994,7 @@ async fn run() -> anyhow::Result<()> {
                 compress,
                 csc_mem,
                 &filter,
+                &filters,
             )
             .await;
             let (n_obs, n_vars, source_sha256) = match converted {
@@ -1009,8 +1039,17 @@ async fn run() -> anyhow::Result<()> {
                     n_vars,
                 },
             };
-            provenance::write_sidecar(&record, output_path)
-                .map_err(|e| anyhow::anyhow!("writing provenance sidecar: {e}"))?;
+            // `where` goes in only when set, so unfiltered sidecars keep
+            // their shape.
+            let mut record = serde_json::to_value(&record)?;
+            if !filters.is_empty() {
+                record["where"] = where_json(&filters);
+            }
+            std::fs::write(
+                provenance::sidecar_path(output_path),
+                serde_json::to_string_pretty(&record)?,
+            )
+            .map_err(|e| anyhow::anyhow!("writing provenance sidecar: {e}"))?;
         }
 
         Cli::Snapshot {
@@ -1162,6 +1201,7 @@ async fn convert_with_reader(
     compress: Option<u8>,
     csc_mem: Option<usize>,
     filter: &SlotFilter,
+    filters: &[(String, Vec<String>)],
 ) -> anyhow::Result<(usize, usize, Option<String>)> {
     let t0 = std::time::Instant::now();
     let (n_obs, n_vars) = reader.shape();
@@ -1372,7 +1412,9 @@ async fn convert_with_reader(
     // stored, compressed chunks and all, when that is the matrix streaming
     // would write (H5SeuratWriter::copy_csr_from_h5ad checks); else they stream.
     let src_h5 = Path::new(source_path);
-    let can_copy = source_url.is_none()
+    // A --where subset is never the matrix as stored.
+    let can_copy = filters.is_empty()
+        && source_url.is_none()
         && src_h5.extension().and_then(|e| e.to_str()) == Some("h5ad")
         && src_h5.is_file();
     let copy = |writer: &mut Box<dyn DatasetWriter>, group: &str, slot: &str| {
@@ -1455,13 +1497,16 @@ async fn convert_with_reader(
         // A remote source was hashed by the reader as it downloaded.
         .or_else(|| reader.source_hash());
     if write_uns {
-        let prov = scx_core::provenance::det_record(
+        let mut prov = scx_core::provenance::det_record(
             source_path,
             source_url,
             source_sha256.as_deref(),
             n_obs,
             n_vars,
         );
+        if !filters.is_empty() {
+            prov["where"] = where_json(filters);
+        }
         match uns.raw.as_object_mut() {
             Some(obj) => {
                 obj.insert("scx_provenance".to_string(), prov);
@@ -1485,6 +1530,23 @@ async fn convert_with_reader(
 }
 
 /// The source file's SHA-256, being computed on its own thread.
+/// One `--where COL=VALUE`, split at the first `=`.
+fn parse_where_arg(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((col, value)) if !col.is_empty() => Ok((col.to_string(), value.to_string())),
+        _ => Err(format!("expected COL=VALUE, got '{s}'")),
+    }
+}
+
+/// The filter as provenance records it: `{"col": ["v1", "v2"], ...}`.
+fn where_json(filters: &[(String, Vec<String>)]) -> serde_json::Value {
+    filters
+        .iter()
+        .map(|(c, v)| (c.clone(), serde_json::json!(v)))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 type SourceHash = std::thread::JoinHandle<anyhow::Result<Option<String>>>;
 
 // ---------------------------------------------------------------------------
@@ -2188,5 +2250,64 @@ mod stats_tests {
         // No NaN: unchanged output, no note.
         let clean = ColumnData::Float(vec![1.0, 2.0, 3.0, 40.0]);
         assert!(!numeric_stats(&clean).contains("missing"));
+    }
+}
+
+#[cfg(test)]
+mod where_tests {
+    use super::*;
+
+    #[test]
+    fn where_args_parse_and_group() {
+        let cli = Cli::try_parse_from([
+            "scx",
+            "convert",
+            "in.h5ad",
+            "out.h5ad",
+            "--where",
+            "cell_type=B",
+            "--where",
+            "donor=d1",
+            "--where",
+            "cell_type=CD4 T",
+            "--where",
+            "note=a=b",
+            "--where",
+            "empty=",
+        ])
+        .unwrap();
+        let Cli::Convert { where_, .. } = cli else {
+            panic!("not convert")
+        };
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            scx_core::subset::group_filters(where_),
+            vec![
+                ("cell_type".to_string(), s(&["B", "CD4 T"])),
+                ("donor".to_string(), s(&["d1"])),
+                ("note".to_string(), s(&["a=b"])),
+                ("empty".to_string(), s(&[""])),
+            ]
+        );
+        for bad in ["cell_type", "=B"] {
+            assert!(
+                Cli::try_parse_from(["scx", "convert", "a.h5ad", "b.h5ad", "--where", bad])
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        let Cli::Convert { where_, .. } =
+            Cli::try_parse_from(["scx", "convert", "a.h5ad", "b.h5ad"]).unwrap()
+        else {
+            panic!("not convert")
+        };
+        assert!(where_.is_empty());
+        assert_eq!(
+            where_json(&scx_core::subset::group_filters(vec![
+                ("a".into(), "1".into()),
+                ("a".into(), "1".into())
+            ])),
+            serde_json::json!({ "a": ["1"] })
+        );
     }
 }
