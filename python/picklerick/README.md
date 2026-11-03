@@ -26,7 +26,7 @@ system HDF5.
 
 | Function | Purpose |
 |---|---|
-| `pk.convert(src, dst, *, dtype="f32", assay="RNA", layer="counts", chunk_size=5000)` | Convert a file to `.h5ad`, `.h5seurat` or `.zarr` (AnnData Zarr v3). The output format is chosen from the extension of `dst`. |
+| `pk.convert(src, dst, *, dtype="f32", assay="RNA", layer="counts", chunk_size=5000, where=None)` | Convert a file to `.h5ad`, `.h5seurat` or `.zarr` (AnnData Zarr v3). The output format is chosen from the extension of `dst`. `where={"cell_type": ["B", "T"]}` writes only the matching cells, still streaming. |
 | `pk.read(path, *, assay="RNA", layer="counts", dtype="f32", chunk_size=5000)` | Read any supported input into an in-memory `anndata.AnnData`. |
 | `pk.write_h5seurat(adata, path, *, assay="RNA", chunk_size=5000)` | Write an `AnnData` to H5Seurat, in the SeuratDisk layout. |
 | `pk.inspect(path)` | Return shape, columns, layers and nnz statistics without reading the matrix. |

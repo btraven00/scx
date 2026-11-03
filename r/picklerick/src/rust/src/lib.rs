@@ -167,26 +167,37 @@ async fn do_convert(
 /// @param dtype Output numeric type: "f32", "f64", "i32", "u32".
 /// @param assay Seurat assay name (H5Seurat only).
 /// @param layer Seurat layer name (H5Seurat only).
+/// @param where_cols,where_values `where` flattened to parallel vectors:
+///   cell `i` is kept when, for every column, some pair names it and its
+///   value (`scx_core::subset::group_filters`). Empty: keep every cell.
 /// @noRd
 #[extendr]
+#[allow(clippy::too_many_arguments)]
 fn scx_convert(
-    input:      &str,
-    output:     &str,
-    chunk_size: i32,
-    dtype:      &str,
-    assay:      &str,
-    layer:      &str,
+    input:        &str,
+    output:       &str,
+    chunk_size:   i32,
+    dtype:        &str,
+    assay:        &str,
+    layer:        &str,
+    where_cols:   Vec<String>,
+    where_values: Vec<String>,
 ) {
-    or_throw(scx_convert_inner(input, output, chunk_size, dtype, assay, layer))
+    or_throw(scx_convert_inner(
+        input, output, chunk_size, dtype, assay, layer, where_cols, where_values,
+    ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scx_convert_inner(
-    input:      &str,
-    output:     &str,
-    chunk_size: i32,
-    dtype:      &str,
-    assay:      &str,
-    layer:      &str,
+    input:        &str,
+    output:       &str,
+    chunk_size:   i32,
+    dtype:        &str,
+    assay:        &str,
+    layer:        &str,
+    where_cols:   Vec<String>,
+    where_values: Vec<String>,
 ) -> Result<()> {
     let dtype = match dtype {
         "f32" => DataType::F32,
@@ -206,6 +217,10 @@ fn scx_convert_inner(
     };
     let result = block_on(async {
         let (mut r, _) = open_reader(input_path, &opts).await?;
+        let filters = scx_core::subset::group_filters(where_cols.into_iter().zip(where_values));
+        if !filters.is_empty() {
+            r = Box::new(scx_core::subset::SubsetReader::new(r, &filters, chunk).await?);
+        }
         do_convert(&mut *r, Path::new(output), dtype, assay).await
     });
 

@@ -232,6 +232,42 @@ Most Bioconductor tools (scuttle's normalisation, scran, ...) work on a
 `DelayedMatrix` in the same block-wise way, until something asks for the
 values in memory.
 
+## Writing a subset of cells to a new file
+
+To keep some cells in a new file, filter while converting.
+`convert(where = )` takes a named list of `obs` columns and the values each
+may take; a cell is kept when every column holds one of its values (values
+compare as text, `NA` never matches). No R object is built, and the matrix
+streams through in chunks of `chunk_size` cells, so memory stays bounded
+however many cells match:
+
+```{r}
+tcells <- file.path(tempdir(), "tcells.h5ad")
+h5ad |> convert(tcells, where = list(cell_type = "T"))
+colnames(read_h5ad(tcells))
+```
+
+On a real atlas that reads as
+`"atlas.h5ad" |> convert("tcells.h5ad", where = list(cell_type = "T cell"))`.
+The output keeps the matching cells in every cell-axis slot (the matrix,
+layers, `colData()`, reduced dimensions, and `colPairs()` graphs restricted
+to those cells); genes and `uns` are copied unchanged. `.h5ad`, Zarr,
+dgCMatrix H5Seurat and 10x HDF5 inputs read only the matching cells.
+BPCells and MatrixMarket inputs are read through, dropping the rest.
+
+The lazy route subsets the object in R and writes that:
+
+```{r}
+lazy_h5ad <- read_h5ad(h5ad, lazy = TRUE)
+t_lazy <- lazy_h5ad[, lazy_h5ad$cell_type %in% "T"]
+write_h5ad(t_lazy, file.path(tempdir(), "tcells_lazy.h5ad"))
+```
+
+Subsetting is lazy, but `write_h5ad()` holds the subset's matrix in memory
+to write it, so its peak grows with the number of matching cells. Use it
+when the subset is small or you change the object in R first; use
+`convert(where = )` to cut a large subset out of a file as it is.
+
 ## Controlling peak memory
 
 Peak memory is set by the block size, not by the size of the data. For an
