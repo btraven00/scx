@@ -4,7 +4,6 @@
 
 use hdf5::types::{FloatSize, TypeDescriptor};
 use hdf5::File;
-use ndarray::s;
 use std::path::Path;
 
 use crate::{
@@ -224,15 +223,38 @@ pub(crate) fn read_values(
     })
 }
 
-/// `range` of a 1-D dataset as `T`, in the Vec libhdf5 read into: no copy.
-pub(crate) fn read_vec<T: hdf5::H5Type>(
+/// `range` of a 1-D dataset as `T`, read by libhdf5 (converting if the stored
+/// type differs) straight into a [`h5_chunk::zeroed_vec_huge`] buffer.
+pub(crate) fn read_vec<T: hdf5::H5Type + bytemuck::Pod>(
     ds: &hdf5::Dataset,
     range: std::ops::Range<usize>,
 ) -> Result<Vec<T>> {
-    let (v, off) = ds
-        .read_slice_1d::<T, _>(s![range])?
-        .into_raw_vec_and_offset();
-    debug_assert!(off.unwrap_or(0) == 0);
+    let mut v = h5_chunk::zeroed_vec_huge::<T>(range.len());
+    if v.is_empty() {
+        return Ok(v);
+    }
+    let fspace = ds.space()?.select(range.clone())?;
+    let mspace = hdf5::Dataspace::try_new(v.len())?;
+    let mtype = hdf5::Datatype::from_type::<T>()?;
+    // Raw hdf5-sys FFI: hold the process-global HDF5 lock (see h5_chunk.rs).
+    let rc = hdf5::sync::sync(|| unsafe {
+        hdf5_sys::h5d::H5Dread(
+            ds.id(),
+            mtype.id(),
+            mspace.id(),
+            fspace.id(),
+            hdf5_sys::h5p::H5P_DEFAULT,
+            v.as_mut_ptr().cast(),
+        )
+    });
+    if rc < 0 {
+        return Err(ScxError::InvalidFormat(format!(
+            "{}: H5Dread of elements {}..{} failed",
+            ds.name(),
+            range.start,
+            range.end
+        )));
+    }
     Ok(v)
 }
 
@@ -359,6 +381,7 @@ fn dtype_str(ds: &hdf5::Dataset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::s;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("scx_h5_{name}_{}.h5", std::process::id()))
@@ -441,6 +464,40 @@ mod tests {
             let want = ds.read_slice_1d::<f32, _>(s![a..b]).unwrap().to_vec();
             let got = read_values(&ds, DataType::F32, a..b).unwrap();
             assert!(matches!(got, TypedVec::F32(v) if v == want), "f32 {a}..{b}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Reads of 4 MB and more go into a hugepage-advised buffer (and the
+    /// parallel inflate output does too); the values must not change.
+    #[test]
+    fn large_reads_into_hugepage_buffers_match() {
+        let path = tmp("large");
+        let n = 1_500_000; // 6 MB of f32
+        let vals: Vec<f32> = (0..n).map(|i| i as f32 * 0.25).collect();
+        {
+            let f = File::create(&path).unwrap();
+            f.new_dataset_builder()
+                .with_data(&vals)
+                .create("plain")
+                .unwrap();
+            f.new_dataset_builder()
+                .chunk(100_000)
+                .deflate(1)
+                .with_data(&vals)
+                .create("gz")
+                .unwrap();
+        }
+        let f = File::open(&path).unwrap();
+        for name in ["plain", "gz"] {
+            let ds = f.dataset(name).unwrap();
+            for r in [0..n, 12_345..n - 6789] {
+                let got = read_values(&ds, DataType::F32, r.clone()).unwrap();
+                assert!(
+                    matches!(got, TypedVec::F32(v) if v == vals[r.clone()]),
+                    "{name} {r:?}"
+                );
+            }
         }
         let _ = std::fs::remove_file(&path);
     }

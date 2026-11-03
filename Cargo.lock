@@ -3858,6 +3858,7 @@ dependencies = [
  "futures",
  "hdf5-metno",
  "hdf5-metno-sys",
+ "libc",
  "memmap2",
  "ndarray",
  "object_store",

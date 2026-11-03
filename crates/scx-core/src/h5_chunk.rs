@@ -404,9 +404,7 @@ pub(crate) fn read_range_typed<T: bytemuck::Pod>(
     plan: ChunkPlan,
 ) -> Result<Vec<T>> {
     // ponytail: assumes a little-endian host, as `TypedVec::from_le_bytes` did.
-    // zeroed_vec is calloc: a large block comes as untouched zero pages, so
-    // each page faults once, when the inflate writes it.
-    let mut out = bytemuck::zeroed_vec::<T>(b.saturating_sub(a));
+    let mut out = zeroed_vec_huge::<T>(b.saturating_sub(a));
     read_range_into(
         ds,
         a,
@@ -415,6 +413,31 @@ pub(crate) fn read_range_typed<T: bytemuck::Pod>(
         bytemuck::cast_slice_mut(&mut out),
     )?;
     Ok(out)
+}
+
+/// `n` zeroed values. On Linux a block of 4 MB or more is madvised to 2 MB
+/// pages first, as numpy does for its arrays: with THP in `madvise` mode,
+/// filling it then costs a page fault per 2 MB instead of per 4 KB.
+///
+/// zeroed_vec is calloc, so a large block arrives as fresh untouched pages
+/// and the advice applies to every one of them.
+pub(crate) fn zeroed_vec_huge<T: bytemuck::Pod>(n: usize) -> Vec<T> {
+    let v = bytemuck::zeroed_vec::<T>(n);
+    #[cfg(target_os = "linux")]
+    {
+        const PAGE: usize = 4096;
+        let bytes = n * size_of::<T>();
+        if bytes >= 4 << 20 {
+            // madvise only reads the range, so a shared pointer will do; `v`
+            // stays immutable and other targets see no unused `mut`.
+            let p = v.as_ptr() as usize;
+            let start = p.next_multiple_of(PAGE);
+            let end = (p + bytes) / PAGE * PAGE;
+            // A hint: on failure the pages are just small.
+            unsafe { libc::madvise(start as *mut _, end - start, libc::MADV_HUGEPAGE) };
+        }
+    }
+    v
 }
 
 /// Decode elements `[a, a + out.len() / elem_size)` into `out`.
