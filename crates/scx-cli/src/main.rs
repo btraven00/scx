@@ -719,23 +719,24 @@ async fn run() -> anyhow::Result<()> {
             assay,
             layer,
         } => {
-            // An .rds URL is downloaded first (kept until inspect returns), as
-            // `convert` does through the reader factory.
+            // A URL other than Parquet is downloaded first (kept until inspect
+            // returns), as `convert` does through the reader factory.
             #[cfg(feature = "net")]
-            let spool =
-                if scx_core::net::is_network_url(&input) && scx_core::rds::is_rds_name(&input) {
-                    Some(scx_core::rds::spool(&input).await?)
-                } else {
-                    None
-                };
+            let spool = if scx_core::net::is_network_url(&input)
+                && !scx_core::net::reads_by_range(&input)
+            {
+                Some(scx_core::spool::spool(&input).await?)
+            } else {
+                None
+            };
             #[cfg(feature = "net")]
             let input_path = spool.as_ref().map_or(Path::new(&input), |s| s.path());
             #[cfg(not(feature = "net"))]
             let input_path = Path::new(&input);
             if !input_path.exists() && input.contains("://") {
                 anyhow::bail!(
-                    "'{input}': inspect reads URLs only for .rds files, and only in a build \
-                     with the `net` feature"
+                    "'{input}': inspect reads URLs only in a build with the `net` feature, \
+                     and not Parquet URLs"
                 );
             }
             let fmt = detect::detect(input_path);

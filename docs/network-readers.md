@@ -29,6 +29,17 @@ rebuild with the feature.
 
 ---
 
+## Which URLs are read in place
+
+Only a URL whose path ends in `.parquet` is read in place, by byte ranges.
+Any other URL (h5ad, h5seurat, 10x HDF5, `.rds`, …) is **downloaded whole** to
+a temporary file, hashed (SHA-256) as it arrives, detected by content and
+converted from there; the file is deleted afterwards. HDF5 and `.rds` need
+random access over the whole file, so a download is the only way to read
+them. It needs as much temporary disk as the file's size (`TMPDIR`).
+
+---
+
 ## Quick start
 
 ```sh
@@ -155,8 +166,9 @@ needs no special handling.
 
 ## Limitations (v1)
 
-- **`convert` only.** `inspect`, `validate`, and `snapshot` do not accept
-  Parquet/URL input yet (they report it explicitly).
+- **`convert` only for Parquet URLs.** `inspect` downloads other URLs as
+  `convert` does, but does not take Parquet URLs; `validate` and `snapshot`
+  take no URLs.
 - **Matrix + obs only.** `obsm`, `uns`, `varm`, `layers`, and `obsp` are not read
   from Parquet (the per-cell/dense sources don't carry them); they come out
   empty.
