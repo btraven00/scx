@@ -7,10 +7,12 @@ use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
 use hdf5::{File, Group};
 use ndarray::s;
 
-use crate::h5::{read_csr_rows, read_u32_range, read_u64, read_values, value_dtype};
+use crate::h5::{read_csr_rows, read_u32_range, read_u64, read_values, value_dtype, CsrReader};
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
 use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows};
-use crate::stream::{error_stream, row_chunks, row_range_chunks, ChunkStream, GENE_MAJOR_X};
+use crate::stream::{
+    error_stream, normalize_ranges, row_chunks, row_range_chunks, ChunkStream, GENE_MAJOR_X,
+};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -802,10 +804,21 @@ impl DatasetReader for H5AdReader {
         }
         let this = &*self;
         let indptr = this.indptr.as_deref().unwrap_or(&[]);
-        let mut file = None;
+        let whole = normalize_ranges(ranges.clone()) == [0..this.n_obs];
+        // The file and, for CSR, its indices/data readers, opened on the first block.
+        let mut open: Option<(File, Option<CsrReader>)> = None;
         row_range_chunks(this.n_obs, ranges, this.chunk_size, move |rows| {
-            let file = open_once(&mut file, &this.path)?;
-            read_rows(file, &this.x_path, indptr, rows, this.n_vars)
+            if open.is_none() {
+                let file = File::open(&this.path)?;
+                let csr = (!indptr.is_empty())
+                    .then(|| CsrReader::open(&file, &this.x_path, this.dtype, whole))
+                    .transpose()?;
+                open = Some((file, csr));
+            }
+            match open.as_ref().expect("opened above") {
+                (_, Some(csr)) => csr.rows(indptr, rows, this.n_vars),
+                (file, None) => read_rows(file, &this.x_path, &[], rows, this.n_vars),
+            }
         })
     }
 

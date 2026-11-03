@@ -6,10 +6,10 @@ use futures::stream::{self};
 use hdf5::types::{IntSize, TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 
-use crate::h5::{read_csr_rows, read_u64, value_dtype};
+use crate::h5::{read_csr_rows, read_u64, value_dtype, CsrReader};
 use crate::h5_str::{read_str_1d, read_str_attr, read_strings};
 use crate::stream::ChunkStream;
-use crate::stream::{row_chunks, row_range_chunks};
+use crate::stream::{normalize_ranges, row_chunks, row_range_chunks};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -868,12 +868,19 @@ impl DatasetReader for H5SeuratReader {
                 let n_vars = self.n_vars;
                 let chunk_size = self.chunk_size;
                 let dtype = *dtype;
+                let whole = normalize_ranges(ranges.clone()) == [0..n_obs];
+                // Opened on the first block, kept for the stream; the file
+                // stays open beside its datasets.
+                let mut open: Option<(File, CsrReader)> = None;
 
                 row_range_chunks(n_obs, ranges, chunk_size, move |rows| {
-                    let (cell_start, cell_end) = (rows.start, rows.end);
-                    File::open(&path).map_err(ScxError::from).and_then(|file| {
-                        read_csr_rows(&file, &x_path, indptr, cell_start..cell_end, n_vars, dtype)
-                    })
+                    if open.is_none() {
+                        let file = File::open(&path)?;
+                        let csr = CsrReader::open(&file, &x_path, dtype, whole)?;
+                        open = Some((file, csr));
+                    }
+                    let (_, csr) = open.as_ref().expect("opened above");
+                    csr.rows(indptr, rows, n_vars)
                 })
             }
             XBackend::BpCells => {

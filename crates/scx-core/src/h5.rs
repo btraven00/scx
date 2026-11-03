@@ -2,7 +2,7 @@
 //! and value datasets that accept every integer width and signedness the
 //! formats use.
 
-use hdf5::types::{FloatSize, TypeDescriptor};
+use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
 use hdf5::File;
 use std::path::Path;
 
@@ -187,18 +187,95 @@ pub(crate) fn read_csr_rows(
     n_cols: usize,
     dtype: DataType,
 ) -> Result<MatrixChunk> {
-    let nnz = indptr[rows.start] as usize..indptr[rows.end] as usize;
-    let (indices, data) = if nnz.is_empty() {
-        (Vec::new(), TypedVec::empty(dtype))
-    } else {
-        (
-            read_u32_range(&file.dataset(&format!("{group}/indices"))?, nnz.clone())?,
-            read_values(&file.dataset(&format!("{group}/data"))?, dtype, nnz)?,
-        )
-    };
-    Ok(crate::sparse::csr_chunk(
-        indptr, rows, n_cols, indices, data,
-    ))
+    CsrReader::open(file, group, dtype, false)?.rows(indptr, rows, n_cols)
+}
+
+/// The `indices` and `data` of a compressed-sparse group, opened once for a
+/// stream of row blocks: deflate datasets get a [`h5_chunk::ChunkReader`]
+/// each, which keeps its chunk lookups across blocks.
+pub(crate) struct CsrReader {
+    indices: hdf5::Dataset,
+    data: hdf5::Dataset,
+    dtype: DataType,
+    fast_indices: Option<h5_chunk::ChunkReader>,
+    fast_data: Option<h5_chunk::ChunkReader>,
+}
+
+impl CsrReader {
+    /// `whole`: the stream will read every row, so list all chunk locations
+    /// up front rather than per block.
+    pub(crate) fn open(file: &File, group: &str, dtype: DataType, whole: bool) -> Result<Self> {
+        let indices = file.dataset(&format!("{group}/indices"))?;
+        let data = file.dataset(&format!("{group}/data"))?;
+        check_filters(&indices)?;
+        check_filters(&data)?;
+        // The cases read_u32_range and read_values decode in parallel.
+        let fast_indices = match indices.dtype()?.to_descriptor()? {
+            TypeDescriptor::Integer(IntSize::U4) | TypeDescriptor::Unsigned(IntSize::U4) => {
+                h5_chunk::ChunkReader::new(&indices, whole)?
+            }
+            _ => None,
+        };
+        let fast_data = if value_dtype(&data)? == dtype && data.dtype()?.size() == dtype.size() {
+            h5_chunk::ChunkReader::new(&data, whole)?
+        } else {
+            None
+        };
+        Ok(Self {
+            indices,
+            data,
+            dtype,
+            fast_indices,
+            fast_data,
+        })
+    }
+
+    /// Rows `rows` of the group, given `indptr` over at least `..=rows.end`,
+    /// as a chunk with `n_cols` columns. `indices` and `data` decode at once.
+    pub(crate) fn rows(
+        &self,
+        indptr: &[u64],
+        rows: std::ops::Range<usize>,
+        n_cols: usize,
+    ) -> Result<MatrixChunk> {
+        let nnz = indptr[rows.start] as usize..indptr[rows.end] as usize;
+        let (indices, data) = if nnz.is_empty() {
+            (Vec::new(), TypedVec::empty(self.dtype))
+        } else {
+            let indices = || match &self.fast_indices {
+                Some(r) => r.read_typed(nnz.start, nnz.end),
+                None => read_u32_range(&self.indices, nnz.clone()),
+            };
+            let data = || match &self.fast_data {
+                Some(r) => read_values_with(r, self.dtype, nnz.clone()),
+                None => read_values(&self.data, self.dtype, nnz.clone()),
+            };
+            // libhdf5 reads serialize on its lock, so only overlap ours.
+            let (i, d) = if self.fast_indices.is_some() || self.fast_data.is_some() {
+                rayon::join(indices, data)
+            } else {
+                (indices(), data())
+            };
+            (i?, d?)
+        };
+        Ok(crate::sparse::csr_chunk(
+            indptr, rows, n_cols, indices, data,
+        ))
+    }
+}
+
+fn read_values_with(
+    r: &h5_chunk::ChunkReader,
+    dtype: DataType,
+    range: std::ops::Range<usize>,
+) -> Result<TypedVec> {
+    let (a, b) = (range.start, range.end);
+    Ok(match dtype {
+        DataType::F32 => TypedVec::F32(r.read_typed(a, b)?),
+        DataType::F64 => TypedVec::F64(r.read_typed(a, b)?),
+        DataType::I32 => TypedVec::I32(r.read_typed(a, b)?),
+        DataType::U32 => TypedVec::U32(r.read_typed(a, b)?),
+    })
 }
 
 /// Read `range` of a values dataset as `dtype`. When that is the stored type
@@ -258,21 +335,19 @@ pub(crate) fn read_vec<T: hdf5::H5Type + bytemuck::Pod>(
     Ok(v)
 }
 
-/// `range` of `ds` as `dtype` through [`h5_chunk::read_range_typed`]. The
-/// caller has checked that `dtype` has the stored element layout.
+/// `range` of `ds` as `dtype`, decoded in parallel by `plan`. The caller has
+/// checked that `dtype` has the stored element layout.
 pub(crate) fn read_values_parallel(
     ds: &hdf5::Dataset,
     dtype: DataType,
     range: std::ops::Range<usize>,
     plan: h5_chunk::ChunkPlan,
 ) -> Result<TypedVec> {
-    let (a, b) = (range.start, range.end);
-    Ok(match dtype {
-        DataType::F32 => TypedVec::F32(h5_chunk::read_range_typed(ds, a, b, plan)?),
-        DataType::F64 => TypedVec::F64(h5_chunk::read_range_typed(ds, a, b, plan)?),
-        DataType::I32 => TypedVec::I32(h5_chunk::read_range_typed(ds, a, b, plan)?),
-        DataType::U32 => TypedVec::U32(h5_chunk::read_range_typed(ds, a, b, plan)?),
-    })
+    read_values_with(
+        &h5_chunk::ChunkReader::with_plan(ds, plan, false)?,
+        dtype,
+        range,
+    )
 }
 
 // ---------------------------------------------------------------------------
