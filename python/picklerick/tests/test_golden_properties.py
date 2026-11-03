@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,7 +30,11 @@ H5AD_CASES = {
     "pbmc3k_reference": "pbmc3k_reference.h5ad",
     "norman_subset": "norman_subset.h5ad",
     "hlca_core": "hlca_core.h5ad",
+    # Real CELLxGENE file (pixi run fetch-cxg-microglia).
+    "cxg_microglia": "cxg_microglia.h5ad",
 }
+
+SCX = os.environ.get("SCX_BIN") or shutil.which("scx")
 
 
 def _load_props(stem: str) -> dict | None:
@@ -59,4 +65,39 @@ def test_open_stream_matches_oracle_x_digest(stem: str, rel: str) -> None:
     assert got["digest"] == props["X"]["digest"], (
         f"X content digest differs from anndata oracle for {stem}: "
         f"oracle row0 spot={props['X']['row0_spot']} got={got['row0_spot']}"
+    )
+
+
+@pytest.mark.parametrize("via", ["stdin", "url"])
+def test_scx_convert_via_stdin_and_url_keeps_oracle_x_digest(
+    via: str, tmp_path: Path
+) -> None:
+    """The real-world fixture, converted by `scx convert` from stdin and from a
+    file:// URL (the download path every non-Parquet URL takes), reads back
+    with the oracle's X digest."""
+    if SCX is None:
+        pytest.skip("no scx binary (set SCX_BIN or put scx on PATH)")
+    props = _load_props("cxg_microglia")
+    if props is None:
+        pytest.skip("no golden properties for cxg_microglia")
+    src = golden("cxg_microglia.h5ad")
+    out = tmp_path / "out.h5ad"
+    if via == "stdin":
+        with open(src, "rb") as f:
+            res = subprocess.run(
+                [SCX, "convert", "-", str(out)], stdin=f, capture_output=True, text=True
+            )
+    else:
+        res = subprocess.run(
+            [SCX, "convert", src.as_uri(), str(out)], capture_output=True, text=True
+        )
+        if "without network support" in res.stderr:
+            pytest.skip("scx was built without the `net` feature")
+    assert res.returncode == 0, res.stderr
+
+    chunks = list(pk.open_stream(str(out), chunk_size=5000))
+    got = digest_matrix(matrix_from_stream_chunks(chunks, props["n_vars"]))
+    assert got["shape"] == props["X"]["shape"]
+    assert got["digest"] == props["X"]["digest"], (
+        f"X differs from the oracle after convert via {via}"
     )
