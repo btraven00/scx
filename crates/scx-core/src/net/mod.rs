@@ -50,6 +50,14 @@ pub fn reads_by_range(url: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".parquet")
 }
 
+/// Size in bytes of the object at `url`, from one HEAD request; `None` when
+/// the store doesn't say (an error, or a server that won't answer HEAD).
+pub async fn size(url: &str) -> Option<u64> {
+    use object_store::ObjectStoreExt;
+    let (store, path) = resolve_store(url).ok()?;
+    store.head(&path).await.ok().map(|m| m.size)
+}
+
 /// Resolve a location string to an object-store handle and the key within it.
 ///
 /// Reused by every network reader: construct the store here, hand the
