@@ -2,6 +2,8 @@
 
     pixi run -e py install-picklerick-release   # ALWAYS release: debug decode is ~3x slower
     pixi run -e py python bench/python/stream_pca.py tests/golden/hlca_core.h5ad --n-obs 20000
+    # + scanpy dask PCA arms (need dask[array], scanpy):
+    #   --arms pca_backed,pca_picklerick,daskcov_anndata,daskcov_picklerick
 
 Takes the first --n-obs cells of X from any CSR h5ad and writes two copies
 (uncompressed, gzip-4) to --workdir (tmpfs by default, so reads stay in RAM).
@@ -11,6 +13,12 @@ Gram matrix with dsyrk, then eigh. Arms:
 
   readonly_*  stream only, no math: pure read throughput
   pca_*       read + reducer; `wait` is time blocked on the next chunk
+  daskcov_*   scanpy's exact dask PCA (svd_solver="covariance_eigh") on a lazy
+              X: pk.open_dask vs anndata's read_elem_lazy (h5py). Pass 1 picks
+              the same genes through the same lazy X; no `wait` (dask schedules
+              the reads). Needs dask[array] and scanpy. Threads: dask runs
+              RAYON_NUM_THREADS workers (else all cores), so both readers get
+              the same parallelism.
 
 The omni version of this (100k cells, denet + GNU time, scanpy reference) is
 /data/ben/scx-bench/pca/pca_arm2.py; this one is for quick local A/B of the read path.
@@ -21,13 +29,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import resource
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 K, N_HVG = 50, 2000
+
+
+def _peak_mb() -> int:
+    """This process's peak RSS. Not ru_maxrss: Linux keeps that across execve,
+    so each arm would inherit the parent's peak (which built the inputs)."""
+    with open("/proc/self/status") as f:
+        return next(int(l.split()[1]) // 1024 for l in f if l.startswith("VmHWM:"))
 
 
 def make_inputs(src: str, n_obs: int, workdir: Path) -> dict[str, Path]:
@@ -59,6 +73,8 @@ def arm(name: str, path: str, cs: int) -> dict:
     from scipy.linalg.blas import dsyrk
 
     t0 = time.perf_counter()
+    if name.startswith("daskcov"):
+        return daskcov(name, path, cs, t0)
     wait = 0.0
     if "picklerick" in name:
         import picklerick as pk
@@ -113,9 +129,50 @@ def arm(name: str, path: str, cs: int) -> dict:
         wall=round(time.perf_counter() - t0, 3),
         open=round(t_open, 3),
         wait=round(wait, 3),
-        peak_mb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024),
+        peak_mb=_peak_mb(),
     )
     return res
+
+
+def daskcov(name: str, path: str, cs: int, t0: float) -> dict:
+    import anndata as ad
+    import dask
+    import numpy as np
+    import scanpy as sc
+
+    n_workers = int(os.environ.get("RAYON_NUM_THREADS", os.cpu_count()))
+    dask.config.set(scheduler="threads", num_workers=n_workers)
+    if name == "daskcov_picklerick":
+        import picklerick as pk
+
+        X = pk.open_dask(path, chunk_size=cs)
+    else:
+        import h5py
+
+        f = h5py.File(path, "r")  # stays open: dask reads it at compute time
+        X = ad.experimental.read_elem_lazy(f["X"], chunks=(cs, -1))
+    t_open = time.perf_counter() - t0
+
+    def stats(b):
+        d = b.astype(np.float64)
+        return np.asarray(d.sum(0)).ravel(), np.asarray(d.multiply(d).sum(0)).ravel()
+
+    parts = dask.compute(*[dask.delayed(stats)(b) for b in X.to_delayed().ravel()])
+    n = X.shape[0]
+    mu = sum(p[0] for p in parts) / n
+    sel = np.sort(np.argsort(sum(p[1] for p in parts) / n - mu * mu)[::-1][:N_HVG])
+    A = ad.AnnData(X[:, sel].astype(np.float64))
+    sc.pp.pca(A, n_comps=K, svd_solver="covariance_eigh")
+    # scanpy's dask path divides by n, the reducer above by n - 1.
+    w = np.asarray(A.uns["pca"]["variance"]) * n / (n - 1)
+    return {
+        "top_eigs": w[:5].round(6).tolist(),
+        "arm": name,
+        "wall": round(time.perf_counter() - t0, 3),
+        "open": round(t_open, 3),
+        "wait": float("nan"),
+        "peak_mb": _peak_mb(),
+    }
 
 
 def main() -> None:
