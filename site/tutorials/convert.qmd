@@ -105,6 +105,51 @@ sce
 
 :::
 
+## Convert a subset of cells
+
+`--where` writes only the cells whose `obs` matches, without reading the
+whole file into memory first: the matrix still streams in chunks. Give it
+`column=value`; repeat it to accept more values of a column (they OR
+together) or to filter on more columns (they AND together). Values are
+compared as text, booleans as `True`/`False`, and missing values never
+match. Python and R take the same filter as a dict or a named list.
+
+::: {.panel-tabset group="language"}
+
+## CLI
+
+```{bash}
+scx convert tiny_v4.h5seurat tcells_cli.h5ad --where cell_type=T
+scx inspect tcells_cli.h5ad
+```
+
+## Python
+
+{{< embed _convert-py.qmd#py-where echo=true >}}
+
+## R
+
+```{r}
+"tiny_v4.h5seurat" |> convert("tcells_r.h5ad", where = list(cell_type = "T"))
+colnames(read_h5ad("tcells_r.h5ad"))
+```
+
+:::
+
+The output holds the matching cells in X, every layer, raw counts, `obs`
+and `obsm`. Cell-by-cell graphs in `obsp` keep only the rows and columns of
+those cells, renumbered. Genes (`var`, `varm`) and `uns` are copied
+unchanged. A filter that matches nothing writes a valid file with no cells;
+a column that `obs` doesn't have is an error that lists the columns it has.
+
+On `.h5ad`, Zarr, dgCMatrix H5Seurat and 10x HDF5 input only the matching
+cells of the matrix are read. BPCells and MatrixMarket input can't read a
+range of cells on its own, so it is read through and the other cells are
+dropped as they pass: the same output, at the cost of a full read. The
+values follow the shell's quoting rules, so quote one that has spaces:
+`--where "cell_type=CD4 T"`. Everything up to the first `=` is the column
+name.
+
 ## Provenance
 
 `scx convert` records where its output came from, in two places. The
@@ -120,6 +165,9 @@ shape.
 ```{bash}
 cat tiny_cli.h5ad.prov.json
 ```
+
+A conversion with `--where` adds the filter to both records, as
+`"where": {"cell_type": ["T"]}`.
 
 In a pipeline that downloads its input, `--source-url` adds the origin URL
 to both records, and `--source-sha256` passes in a hash the downloader
@@ -137,6 +185,7 @@ in [docs/provenance.md](https://github.com/btraven00/scx/blob/main/docs/provenan
 | Output matrix type | `--dtype` | `dtype=` | `dtype =` | `f32` |
 | Seurat assay to read (H5Seurat input) | `--assay` | `assay=` | `assay =` | `RNA` |
 | Seurat layer to read (H5Seurat input) | `--layer` | `layer=` | `layer =` | `counts` |
+| Keep only matching cells | `--where col=value` | `where={"col": v}` | `where = list(col = v)` | every cell |
 
 The full lists are in each reference: `scx convert --help`,
 `picklerick.convert` and `?picklerick::convert`.
