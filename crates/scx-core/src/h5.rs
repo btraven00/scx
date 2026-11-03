@@ -140,15 +140,20 @@ pub(crate) fn read_u32_range(
     range: std::ops::Range<usize>,
 ) -> Result<Vec<u32>> {
     check_filters(ds)?;
+    let four = ds.dtype()?.size() == 4;
     match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => {
-            if ds.dtype()?.size() == 4 {
-                if let Some(plan) = h5_chunk::chunk_plan(ds) {
-                    return h5_chunk::read_range_typed(ds, range.start, range.end, plan);
-                }
+        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) if four => {
+            if let Some(plan) = h5_chunk::chunk_plan(ds) {
+                return h5_chunk::read_range_typed(ds, range.start, range.end, plan);
             }
-            Ok(ds.read_slice_1d::<u32, _>(s![range])?.to_vec())
+            // Read as stored, without libhdf5's i32 -> u32 conversion pass.
+            match ds.dtype()?.to_descriptor()? {
+                TypeDescriptor::Integer(_) => Ok(bytemuck::cast_vec(read_vec::<i32>(ds, range)?)),
+                _ => read_vec::<u32>(ds, range),
+            }
         }
+        // Other widths (int64 from scipy, ...): libhdf5 converts.
+        TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => read_vec::<u32>(ds, range),
         other => Err(ScxError::InvalidFormat(format!(
             "{}: expected integers, found {other:?}",
             ds.name()
@@ -212,11 +217,23 @@ pub(crate) fn read_values(
         }
     }
     Ok(match dtype {
-        DataType::F32 => TypedVec::F32(ds.read_slice_1d::<f32, _>(s![range])?.to_vec()),
-        DataType::F64 => TypedVec::F64(ds.read_slice_1d::<f64, _>(s![range])?.to_vec()),
-        DataType::I32 => TypedVec::I32(ds.read_slice_1d::<i32, _>(s![range])?.to_vec()),
-        DataType::U32 => TypedVec::U32(ds.read_slice_1d::<u32, _>(s![range])?.to_vec()),
+        DataType::F32 => TypedVec::F32(read_vec(ds, range)?),
+        DataType::F64 => TypedVec::F64(read_vec(ds, range)?),
+        DataType::I32 => TypedVec::I32(read_vec(ds, range)?),
+        DataType::U32 => TypedVec::U32(read_vec(ds, range)?),
     })
+}
+
+/// `range` of a 1-D dataset as `T`, in the Vec libhdf5 read into: no copy.
+pub(crate) fn read_vec<T: hdf5::H5Type>(
+    ds: &hdf5::Dataset,
+    range: std::ops::Range<usize>,
+) -> Result<Vec<T>> {
+    let (v, off) = ds
+        .read_slice_1d::<T, _>(s![range])?
+        .into_raw_vec_and_offset();
+    debug_assert!(off.unwrap_or(0) == 0);
+    Ok(v)
 }
 
 /// `range` of `ds` as `dtype` through [`h5_chunk::read_range_typed`]. The
@@ -380,6 +397,52 @@ mod tests {
         let got = read_values(&ds, DataType::F32, 100..4100).unwrap();
         let _ = std::fs::remove_file(&path);
         assert!(matches!(got, TypedVec::F32(v) if v == vals[100..4100]));
+    }
+
+    /// Unfiltered reads hand back libhdf5's own Vec and read 4-byte indices
+    /// as stored; both must equal what a converting libhdf5 read gives.
+    #[test]
+    fn unfiltered_reads_match_converting_reads() {
+        let path = tmp("unfiltered");
+        let n = 3000;
+        {
+            let f = File::create(&path).unwrap();
+            let i32s: Vec<i32> = (0..n as i32).map(|i| i * 7919 % 33_000).collect();
+            let i64s: Vec<i64> = i32s.iter().map(|&x| x as i64).collect();
+            let u32s: Vec<u32> = i32s.iter().map(|&x| x as u32).collect();
+            let f32s: Vec<f32> = (0..n).map(|i| i as f32 * 0.37).collect();
+            // Contiguous, plus one chunked but unfiltered.
+            f.new_dataset_builder()
+                .with_data(&i32s)
+                .create("i32")
+                .unwrap();
+            f.new_dataset_builder()
+                .with_data(&i64s)
+                .create("i64")
+                .unwrap();
+            f.new_dataset_builder()
+                .with_data(&u32s)
+                .create("u32")
+                .unwrap();
+            f.new_dataset_builder()
+                .chunk(1000)
+                .with_data(&f32s)
+                .create("f32")
+                .unwrap();
+        }
+        let f = File::open(&path).unwrap();
+        for (a, b) in [(0, n), (999, 1001), (1500, 2700), (5, 6)] {
+            for name in ["i32", "i64", "u32"] {
+                let ds = f.dataset(name).unwrap();
+                let want = ds.read_slice_1d::<u32, _>(s![a..b]).unwrap().to_vec();
+                assert_eq!(read_u32_range(&ds, a..b).unwrap(), want, "{name} {a}..{b}");
+            }
+            let ds = f.dataset("f32").unwrap();
+            let want = ds.read_slice_1d::<f32, _>(s![a..b]).unwrap().to_vec();
+            let got = read_values(&ds, DataType::F32, a..b).unwrap();
+            assert!(matches!(got, TypedVec::F32(v) if v == want), "f32 {a}..{b}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A dataset filtered by zstd (32015), which this build has no decoder for.
