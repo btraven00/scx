@@ -36,6 +36,7 @@ def convert(
     chunk_size: int = 5000,
     gene_major: bool = False,
     transpose_mem: float = 4.0,
+    where: Mapping[str, object] | None = None,
 ) -> Path:
     """Convert a single-cell dataset to ``.h5ad``, ``.h5seurat`` or ``.zarr``.
 
@@ -69,6 +70,17 @@ def convert(
     transpose_mem
         With ``gene_major``: GB of transposed nonzeros held at a time. Less
         memory means more passes over the input.
+    where
+        Write only the cells matching ``{column: value}`` or
+        ``{column: [values]}`` over ``obs``, matched as in
+        :func:`open_stream`: every column must hold one of its values,
+        compared as text (``str(v)``, booleans as ``True``/``False``); NA
+        never matches. X, layers, raw.X, obs and obsm keep the matching
+        rows, obsp those rows and columns; var, varm and uns are unchanged.
+        The matrix still streams. h5ad, Zarr, h5seurat (dgCMatrix) and 10x
+        HDF5 input read only the matching rows of X. No match writes a file
+        with 0 cells; an unknown column raises. The same as
+        ``scx convert --where col=value``.
 
     Returns
     -------
@@ -83,9 +95,20 @@ def convert(
     out.parent.mkdir(parents=True, exist_ok=True)
     mem = int(transpose_mem * 1e9) if gene_major else None
     _native.scx_convert(
-        _path(input), str(out), chunk_size, dtype, assay, layer, x_slot, mem
+        _path(input), str(out), chunk_size, dtype, assay, layer, x_slot, mem,
+        _filters(where),
     )
     return out
+
+
+def _filters(where: Mapping[str, object] | None) -> list[tuple[str, list[str]]] | None:
+    """``where=`` as the engine takes it: each column with its values as text."""
+    if where is None:
+        return None
+    return [
+        (col, [str(v) for v in (vals if isinstance(vals, (list, tuple, set)) else [vals])])
+        for col, vals in where.items()
+    ]
 
 
 def read(
@@ -273,14 +296,8 @@ def open_stream(
         raise ValueError('rows= and where= select cells; they do not apply with axis="var"')
     if axis == "obs" and genes is not None:
         raise ValueError('genes= applies only with axis="var"')
-    filters = None
-    if where is not None:
-        filters = [
-            (col, [str(v) for v in (vals if isinstance(vals, (list, tuple, set)) else [vals])])
-            for col, vals in where.items()
-        ]
     return _native.scx_open_stream(
-        _path(path), chunk_size, assay, layer, _ranges(rows), filters,
+        _path(path), chunk_size, assay, layer, _ranges(rows), _filters(where),
         axis == "var", _ranges(genes),
     )
 

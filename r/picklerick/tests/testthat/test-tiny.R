@@ -109,3 +109,35 @@ test_that("read_h5ad(lazy = TRUE) attaches layers, so counts() works as when eag
   expect_true(methods::is(SingleCellExperiment::counts(lazy[keep, ]), "DelayedMatrix"))
 })
 
+
+# cell_type is B T NA B NK T: B or T keeps cells 1, 2, 4 and 6 (1-based).
+test_that("convert(where = ) writes only the matching cells", {
+  skip_if_not_installed("SingleCellExperiment")
+  e <- expected()
+  out <- tempfile(fileext = ".h5ad")
+  on.exit(unlink(out))
+  tiny("tiny.h5ad") |> convert(out, where = list(cell_type = c("B", "T")))
+  keep <- c(1L, 2L, 4L, 6L)
+  back <- read_h5ad(out)
+  expect_identical(colnames(back), e$obs_names[keep])
+  expect_identical(rownames(back), e$var_names)
+  expect_equal(unname(as.matrix(SummarizedExperiment::assay(back, "X"))), t(e$X)[, keep])
+  expect_identical(dim(SingleCellExperiment::reducedDim(back, "X_pca")), c(4L, ncol(e$obsm$X_pca)))
+  # obsp is restricted to the kept cells on both axes.
+  expect_identical(dim(SingleCellExperiment::colPair(back, "connectivities", asSparse = TRUE)), c(4L, 4L))
+
+  # Columns AND; a logical matches as True/False.
+  out2 <- tempfile(fileext = ".h5ad")
+  on.exit(unlink(out2), add = TRUE)
+  convert(tiny("tiny.h5ad"), out2, where = list(cell_type = "B", is_doublet = FALSE))
+  expect_identical(colnames(read_h5ad(out2)), e$obs_names[c(1L, 4L)])
+})
+
+test_that("convert(where = ) with no match writes 0 cells; an unknown column errors", {
+  out <- tempfile(fileext = ".h5ad")
+  on.exit(unlink(out))
+  convert(tiny("tiny.h5ad"), out, where = list(cell_type = "nope"))
+  expect_identical(inspect(out)$n_obs, 0L)
+  expect_error(convert(tiny("tiny.h5ad"), out, where = list(celltype = "B")), "celltype")
+  expect_error(convert(tiny("tiny.h5ad"), out, where = list("B")), "named list")
+})

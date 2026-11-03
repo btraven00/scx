@@ -6,10 +6,11 @@
 # cargo available at install time).
 
 #' @keywords internal
-scx_convert <- function(input, output, chunk_size, dtype, assay, layer) {
+scx_convert <- function(input, output, chunk_size, dtype, assay, layer,
+                        where_cols = character(), where_values = character()) {
   .Call(
     "wrap__scx_convert",
-    input, output, chunk_size, dtype, assay, layer,
+    input, output, chunk_size, dtype, assay, layer, where_cols, where_values,
     PACKAGE = "picklerick"
   )
 }

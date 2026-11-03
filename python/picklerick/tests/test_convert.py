@@ -133,3 +133,84 @@ def test_gene_major_needs_h5ad_output_and_a_positive_budget(norman_path, tmp_pat
         pk.convert(norman_path, tmp_path / "x.h5seurat", gene_major=True)
     with pytest.raises(ValueError, match="transpose_mem"):
         pk.convert(norman_path, tmp_path / "x.h5ad", gene_major=True, transpose_mem=0)
+
+
+def _where_source(tmp_path):
+    """A small AnnData with every cell-axis slot, written to h5ad."""
+    import pandas as pd
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(0)
+    n, m = 12, 7
+    X = sp.random(n, m, density=0.4, format="csr", random_state=1, dtype=np.float32)
+    obs = pd.DataFrame(
+        {
+            "cell_type": pd.Categorical(
+                ["B", "T", None, "B", "NK", "T", "T", "B", "NK", "B", "T", None]
+            ),
+            "donor": pd.Categorical(["d0", "d1"] * 6),
+            "ok": [True, False] * 3 + [False, True] * 3,
+            "batch": pd.array([1, 2, None, 2, 1, None, 1, 2, 2, 1, None, 1], dtype="Int32"),
+        },
+        index=[f"c{i}" for i in range(n)],
+    )
+    a = ad.AnnData(X=X, obs=obs, var=pd.DataFrame(index=[f"g{j}" for j in range(m)]))
+    a.layers["counts"] = sp.csr_matrix(np.round(X.toarray() * 10).astype(np.float32))
+    a.obsm["X_pca"] = rng.normal(size=(n, 3))
+    a.obsp["connectivities"] = sp.random(n, n, density=0.3, format="csr", random_state=2)
+    a.raw = ad.AnnData(X=a.layers["counts"].copy(), obs=a.obs[[]], var=a.var)
+    path = tmp_path / "src.h5ad"
+    a.write_h5ad(path)
+    return ad.read_h5ad(path), path
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        {"cell_type": ["B", "T"]},  # several values OR; NA never matches
+        {"cell_type": "B", "donor": "d1"},  # columns AND
+        {"ok": True},  # bool, as text
+        {"batch": 2},  # nullable int, NA never matches
+    ],
+)
+@pytest.mark.parametrize("ext", ["h5ad", "zarr"])
+def test_convert_where_equals_anndata_subset(tmp_path, where, ext) -> None:
+    src, path = _where_source(tmp_path)
+    mask = np.ones(src.n_obs, dtype=bool)
+    for col, vals in where.items():
+        vals = vals if isinstance(vals, list) else [vals]
+        mask &= src.obs[col].astype(str).isin([str(v) for v in vals]).to_numpy()
+        mask &= src.obs[col].notna().to_numpy()
+    want = src[mask]
+    out = pk.convert(path, tmp_path / f"sub.{ext}", where=where, chunk_size=2)
+    got = ad.read_h5ad(out) if ext == "h5ad" else ad.read_zarr(out)
+
+    assert got.n_obs == mask.sum() > 0
+    assert list(got.obs_names) == list(want.obs_names)
+    assert list(got.var_names) == list(want.var_names)
+    np.testing.assert_array_equal(dense(got.X), dense(want.X))
+    np.testing.assert_array_equal(dense(got.layers["counts"]), dense(want.layers["counts"]))
+    np.testing.assert_allclose(got.obsm["X_pca"], want.obsm["X_pca"])
+    # obsp keeps the matching cells on both axes, renumbered.
+    np.testing.assert_allclose(
+        dense(got.obsp["connectivities"]), dense(want.obsp["connectivities"])
+    )
+    for col in want.obs.columns:
+        assert got.obs[col].astype(str).tolist() == want.obs[col].astype(str).tolist(), col
+
+
+def test_convert_where_raw_goes_to_seurat_counts(tmp_path) -> None:
+    src, path = _where_source(tmp_path)
+    mask = src.obs["cell_type"].isin(["B"]).to_numpy()
+    out = pk.convert(path, tmp_path / "sub.h5seurat", where={"cell_type": "B"})
+    counts = pk.read(out, layer="counts")
+    assert list(counts.obs_names) == list(src.obs_names[mask])
+    np.testing.assert_array_equal(dense(counts.X), dense(src.raw.X[mask]))
+
+
+def test_convert_where_no_match_and_missing_column(tmp_path) -> None:
+    _, path = _where_source(tmp_path)
+    empty = ad.read_h5ad(pk.convert(path, tmp_path / "e.h5ad", where={"cell_type": "nope"}))
+    assert empty.shape == (0, 7)
+    with pytest.raises(pk.PickleRickError, match="celltype"):
+        pk.convert(path, tmp_path / "x.h5ad", where={"celltype": "B"})

@@ -10,7 +10,8 @@ convert(
   chunk_size = 5000L,
   dtype = "f32",
   assay = "RNA",
-  layer = "counts"
+  layer = "counts",
+  where = NULL
 )
 }
 \arguments{
@@ -26,6 +27,16 @@ Default \code{"f32"}.}
 \item{assay}{Seurat assay to convert (H5Seurat inputs only). Default \code{"RNA"}.}
 
 \item{layer}{Seurat layer to convert (H5Seurat inputs only). Default \code{"counts"}.}
+
+\item{where}{Keep only some cells: a named list mapping \code{obs} columns to
+the values they may take, e.g. \code{list(cell_type = c("B", "T"), donor = "d1")}. A cell is kept when every column holds one of its values.
+Values are compared as text (\code{TRUE}/\code{FALSE} match Python's
+\code{True}/\code{False}); \code{NA} never matches. X, layers, raw counts, \code{obs} and
+\code{obsm} keep the matching cells, and \code{obsp} graphs those cells on both
+axes; genes and \code{uns} are unchanged. The matrix still streams: h5ad,
+Zarr, dgCMatrix H5Seurat and 10x HDF5 inputs read only the matching
+rows, others read everything and drop the rest. No match writes a file
+with 0 cells; an unknown column is an error. Default \code{NULL}: every cell.}
 }
 \value{
 \code{output} path, invisibly.
@@ -47,5 +58,6 @@ Zarr v3 store, a directory).
 convert("pbmc3k.h5seurat", "pbmc3k.h5ad")
 convert("pbmc3k.h5ad", "pbmc3k.zarr")
 convert("pbmc3k.h5seurat", "pbmc3k_f64.h5ad", dtype = "f64", chunk_size = 2000L)
+"atlas.h5ad" |> convert("tcells.h5ad", where = list(cell_type = "T cell"))
 }
 }

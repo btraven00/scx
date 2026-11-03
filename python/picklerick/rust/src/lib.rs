@@ -13,6 +13,7 @@ use scx_core::{
     h5seurat::{auto_counts_source, CountsSource, H5SeuratWriter},
     ir::{mask_to_ranges, Column, MatrixChunk, SparseMatrixMeta},
     stream::{DatasetReader, DatasetWriter},
+    subset::SubsetReader,
     zarr_ad::ZarrAdWriter,
 };
 
@@ -142,9 +143,10 @@ async fn convert(
 /// goes to the `data` slot (`scx_core::h5seurat::auto_counts_source`).
 /// H5AD output writes the matrix to `x_slot` (`"X"` or `"layers/<name>"`).
 /// `transpose_mem` (bytes), when set, writes X gene-major (CSC), as
-/// `scx convert --gene-major` does; H5AD output only.
+/// `scx convert --gene-major` does; H5AD output only. `where` keeps only the
+/// matching cells (`scx_core::subset::SubsetReader`), as `--where` does.
 #[pyfunction]
-#[pyo3(signature = (input, output, chunk_size, dtype, assay, layer, x_slot = "X", transpose_mem = None))]
+#[pyo3(signature = (input, output, chunk_size, dtype, assay, layer, x_slot = "X", transpose_mem = None, r#where = None))]
 #[allow(clippy::too_many_arguments)]
 fn scx_convert(
     input: &str,
@@ -155,6 +157,7 @@ fn scx_convert(
     layer: &str,
     x_slot: &str,
     transpose_mem: Option<usize>,
+    r#where: Option<Vec<(String, Vec<String>)>>,
 ) -> PyResult<()> {
     let run = || -> anyhow::Result<()> {
         let dtype = dtype.parse::<DataType>()?;
@@ -165,6 +168,9 @@ fn scx_convert(
             anyhow::bail!("gene_major only applies to .h5ad output");
         }
         let mut reader = open_reader(input, stream_opts(chunk_size, assay, layer))?;
+        if let Some(filters) = r#where.filter(|f| !f.is_empty()) {
+            reader = Box::new(block_on(SubsetReader::new(reader, &filters, chunk_size))?);
+        }
         let (n_obs, n_vars) = reader.shape();
         let layer_metas = block_on(reader.layer_metas())?;
         let output = Path::new(output);
@@ -497,11 +503,8 @@ fn scx_open_stream(
                 mask[a..b.max(a)].fill(true);
             }
             let obs = block_on(reader.obs()).map_err(py_err)?;
-            for (column, values) in &filters {
-                let values: Vec<&str> = values.iter().map(String::as_str).collect();
-                let hit = obs.rows_where(column, &values).map_err(py_err)?;
-                mask.iter_mut().zip(hit).for_each(|(m, h)| *m &= h);
-            }
+            let hit = obs.rows_matching(n_obs, &filters).map_err(py_err)?;
+            mask.iter_mut().zip(hit).for_each(|(m, h)| *m &= h);
             Some(mask_to_ranges(&mask))
         }
     };
