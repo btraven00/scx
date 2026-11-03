@@ -152,3 +152,20 @@ fn inspect_stops_before_a_large_download() {
     assert!(!out.status.success());
     assert!(err.contains("2.0 GB") && err.contains("--yes"), "{err}");
 }
+
+/// When HEAD can't give a size, inspect doesn't ask; the download itself
+/// then reports what is wrong.
+#[cfg(feature = "net")]
+#[test]
+fn inspect_without_a_size_goes_straight_to_the_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", dir.path().join("missing.rds").display());
+    let out = Command::new(env!("CARGO_BIN_EXE_scx"))
+        .args(["inspect", &url])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(err.contains("download") && !err.contains("--yes"), "{err}");
+}

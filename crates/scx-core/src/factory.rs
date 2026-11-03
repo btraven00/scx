@@ -69,10 +69,8 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
             return open_parquet(input, opts).await;
         }
         let spool = crate::spool::spool(input).await?;
-        let path = spool.path().to_str().ok_or_else(|| {
-            ScxError::InvalidFormat(format!("temporary path for '{input}' is not UTF-8"))
-        })?;
-        let inner = Box::pin(open(path, opts)).await.map_err(|e| match e {
+        let path = spool.path().to_string_lossy().into_owned();
+        let inner = Box::pin(open(&path, opts)).await.map_err(|e| match e {
             ScxError::InvalidFormat(m) if m.starts_with("could not detect format") => {
                 ScxError::InvalidFormat(format!("could not detect the format of '{input}'"))
             }
