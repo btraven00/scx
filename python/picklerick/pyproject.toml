@@ -28,6 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+dask = ["dask[array]"]
 
 [project.urls]
 Homepage = "https://github.com/btraven00/scx"

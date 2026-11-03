@@ -286,6 +286,74 @@ def open_stream(
 
 
 
+def open_dask(
+    path: Pathish,
+    *,
+    chunk_size: int = 5000,
+    assay: str = "RNA",
+    layer: str = "counts",
+):
+    """X as a lazy :class:`dask.array.Array` of scipy CSR row blocks.
+
+    Block ``i`` holds rows ``i * chunk_size`` up to the next block, over every
+    gene, and is read only when dask computes it, through the same reader as
+    :func:`open_stream` with ``rows=``. That is the layout scanpy's dask code
+    expects, e.g. ``sc.pp.pca(adata, svd_solver="covariance_eigh")`` on an
+    AnnData whose ``X`` is this array computes an exact PCA block by block.
+
+    Needs ``dask`` (``pip install dask[array]``). Blocks are read where dask
+    runs them; the reader's inflate threads come from one pool shared by the
+    process (``RAYON_NUM_THREADS``), so with many dask threads a smaller pool
+    can be faster.
+
+    Parameters
+    ----------
+    path
+        File or directory in any format :func:`convert` reads, with X stored
+        by cell (for gene-major X use :func:`open_stream` with ``axis="var"``).
+    chunk_size
+        Rows (cells) per block.
+    assay, layer
+        Seurat assay and layer to read from H5Seurat input.
+
+    Returns
+    -------
+    dask.array.Array
+        Shape ``(n_obs, n_vars)``, chunks ``(chunk_size, n_vars)``.
+
+    Examples
+    --------
+    >>> X = pk.open_dask("atlas.h5ad", chunk_size=10_000)
+    >>> X[:20_000].sum(axis=0).compute()
+    """
+    import dask.array as da
+    import scipy.sparse as sp
+
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+    info = inspect(path)
+    if info.get("x_axis") == "var":
+        raise ValueError(
+            f"{path}: X is stored by gene; open_dask reads row blocks. "
+            'Stream it by gene with open_stream(axis="var").'
+        )
+    n_obs, n_vars = info["n_obs"], info["n_vars"]
+    path = _path(path)
+
+    def block(a: int, b: int):
+        (chunk,) = open_stream(path, chunk_size=b - a, assay=assay, layer=layer, rows=[(a, b)])
+        return chunk.to_scipy()
+
+    # One row up front: the dtype, and a bad path or layer fails here, not
+    # inside a dask worker.
+    dtype = block(0, 1).dtype if n_obs else np.dtype("float32")
+    starts = range(0, n_obs, chunk_size)
+    name = f"picklerick-{os.path.basename(path)}-{chunk_size}-{id(info):x}"
+    graph = {(name, i, 0): (block, a, min(a + chunk_size, n_obs)) for i, a in enumerate(starts)}
+    chunks = (tuple(min(chunk_size, n_obs - a) for a in starts) or (0,), (n_vars,))
+    return da.Array(graph, name, chunks, dtype=dtype, meta=sp.csr_array((0, 0), dtype=dtype))
+
+
 def _ranges(rows: Rows | None) -> list[tuple[int, int]] | None:
     """``rows`` as sorted, merged ``(start, stop)`` ranges."""
     if rows is None:
