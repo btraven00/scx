@@ -197,6 +197,42 @@ fn source_directory_does_not_change_the_output() {
     assert_eq!(hashes[0], hashes[1]);
 }
 
+/// Input that no reader recognises fails with an error naming the URL or
+/// stdin, not the temporary copy.
+#[test]
+fn unrecognised_url_and_stdin_input_name_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let junk = dir.path().join("junk.bin");
+    std::fs::write(&junk, b"not a single-cell file").unwrap();
+    let out = dir.path().join("out.h5ad");
+    let run = |input: &str| {
+        Command::new(env!("CARGO_BIN_EXE_scx"))
+            .args(["convert", input])
+            .arg(&out)
+            .stdin(std::fs::File::open(&junk).unwrap())
+            .output()
+            .unwrap()
+    };
+    let res = run("-");
+    let err = String::from_utf8_lossy(&res.stderr);
+    assert!(!res.status.success());
+    assert!(
+        err.contains("cannot open stdin") && err.contains("MatrixMarket"),
+        "{err}"
+    );
+    #[cfg(feature = "net")]
+    {
+        let url = format!("file://{}", junk.display());
+        let res = run(&url);
+        let err = String::from_utf8_lossy(&res.stderr);
+        assert!(!res.status.success());
+        assert!(
+            err.contains(&format!("could not detect the format of '{url}'")),
+            "{err}"
+        );
+    }
+}
+
 /// A URL input other than Parquet is downloaded, detected by content and
 /// converted like the local file: `scx diff` finds nothing (it skips the
 /// provenance, which names the URL) and the source hash is the same.

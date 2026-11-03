@@ -75,7 +75,7 @@ impl SpoolWriter {
     }
 
     fn finish(mut self) -> Result<Spool> {
-        self.file.flush()?;
+        self.flush()?;
         self.spool.hash = format!("sha256:{}", crate::provenance::hex(self.hasher));
         Ok(self.spool)
     }
@@ -207,5 +207,67 @@ mod tests {
         let p = s.path().to_path_buf();
         drop(s);
         assert!(!p.exists());
+    }
+
+    /// Every `Spooled` method gives what the reader underneath gives.
+    #[tokio::test]
+    async fn spooled_forwards_to_the_inner_reader() {
+        use futures::StreamExt;
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/tiny/tiny_raw.h5ad");
+        let opts = crate::OpenOptions::default();
+        let spool = Spool::from_reader("x.h5ad", std::fs::File::open(&src).unwrap()).unwrap();
+        let path = spool.path().to_str().unwrap().to_string();
+        let mut s = Spooled::new(crate::open(&path, &opts).await.unwrap(), spool);
+        let mut d = crate::open(src.to_str().unwrap(), &opts).await.unwrap();
+        let dbg = |x: &dyn std::fmt::Debug| format!("{x:?}");
+        async fn all(st: ChunkStream<'_>) -> String {
+            let v: Vec<_> = st.map(|c| c.unwrap()).collect().await;
+            format!("{v:?}")
+        }
+
+        assert_eq!(s.shape(), d.shape());
+        assert_eq!(s.dtype(), d.dtype());
+        assert!(s.source_hash().unwrap().starts_with("sha256:"));
+        assert_eq!(dbg(&s.obs().await.unwrap()), dbg(&d.obs().await.unwrap()));
+        assert_eq!(dbg(&s.var().await.unwrap()), dbg(&d.var().await.unwrap()));
+        assert_eq!(dbg(&s.obsm().await.unwrap()), dbg(&d.obsm().await.unwrap()));
+        assert_eq!(dbg(&s.uns().await.unwrap()), dbg(&d.uns().await.unwrap()));
+        assert_eq!(dbg(&s.varm().await.unwrap()), dbg(&d.varm().await.unwrap()));
+        let raw = s.raw_meta().await.unwrap().expect("tiny_raw has raw");
+        assert_eq!(
+            all(s.raw_stream(&raw, 3)).await,
+            all(d.raw_stream(&raw, 3)).await
+        );
+        for m in s.layer_metas().await.unwrap() {
+            assert_eq!(
+                all(s.layer_stream(&m, 3)).await,
+                all(d.layer_stream(&m, 3)).await
+            );
+        }
+        for m in s.obsp_metas().await.unwrap() {
+            assert_eq!(
+                all(s.obsp_stream(&m, 3)).await,
+                all(d.obsp_stream(&m, 3)).await
+            );
+        }
+        assert_eq!(s.x_indptr(), d.x_indptr());
+        assert_eq!(s.x_col_ptr(), d.x_col_ptr());
+        assert_eq!(s.reads_row_ranges(), d.reads_row_ranges());
+        assert_eq!(all(s.x_stream()).await, all(d.x_stream()).await);
+        assert_eq!(
+            all(s.x_stream_rows(vec![0..2])).await,
+            all(d.x_stream_rows(vec![0..2])).await
+        );
+        // Both fail or both succeed (h5ad X is cell-major).
+        let first = |mut st: ChunkStream<'_>| {
+            futures::executor::block_on(st.next())
+                .map(|r| r.map(|c| format!("{c:?}")).map_err(|e| e.to_string()))
+        };
+        let (a, b) = (
+            first(s.x_stream_cols(vec![0..2])),
+            first(d.x_stream_cols(vec![0..2])),
+        );
+        assert_eq!(a, b);
     }
 }

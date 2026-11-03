@@ -128,6 +128,41 @@ fn convert_local_parquet_to_h5ad() {
     }
 }
 
+/// A `.parquet` URL is read in place (by byte ranges), and converts to the
+/// same matrix as the local path.
+#[test]
+fn parquet_url_converts_like_the_local_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let parquet = dir.path().join("expression_data.parquet");
+    write_fixture(&parquet);
+    let convert = |input: String, out: &std::path::Path| {
+        let res = Command::new(env!("CARGO_BIN_EXE_scx"))
+            .args(["convert", &input])
+            .arg(out)
+            .args(["--n-vars", &N_VARS.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            res.status.success(),
+            "{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
+    };
+    let (local, remote) = (dir.path().join("local.h5ad"), dir.path().join("url.h5ad"));
+    convert(parquet.display().to_string(), &local);
+    convert(format!("file://{}", parquet.display()), &remote);
+    let diff = Command::new(env!("CARGO_BIN_EXE_scx"))
+        .arg("diff")
+        .args([&local, &remote])
+        .output()
+        .unwrap();
+    assert!(
+        diff.status.success(),
+        "{}",
+        String::from_utf8_lossy(&diff.stdout)
+    );
+}
+
 // ===========================================================================
 // Acceptance test for the gene-token remap story.
 //
