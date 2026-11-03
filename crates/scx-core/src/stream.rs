@@ -132,6 +132,14 @@ pub trait DatasetReader: Send {
     /// Data type of the count matrix.
     fn dtype(&self) -> DataType;
 
+    /// `"<algo>:<hex>"` of the source bytes, when the reader downloaded them
+    /// itself (a remote `.rds`) and so could hash them on the way in. `None`
+    /// otherwise: a local file is hashed by the caller, and range-read
+    /// sources (Parquet over a URL) never see all their bytes.
+    fn source_hash(&self) -> Option<String> {
+        None
+    }
+
     /// Read cell metadata.
     async fn obs(&mut self) -> Result<ObsTable>;
 

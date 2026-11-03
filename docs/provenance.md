@@ -37,6 +37,12 @@ local directory layout leaks into shared files. Hashes are written as
 repositories publish and `sha256sum` checks. Files written before this
 change have a bare-hex `source.sha256` instead.
 
+A remote `.rds` source is hashed while it downloads, so it records the same
+`source.hash` as a local copy would, with no second read. Parquet read over a
+URL records no source hash: it fetches only the footer and the row groups it
+needs, so scx never sees the whole file. Pass `--source-sha256` if you have
+the hash.
+
 ### Sidecar — `<output>.prov.json`
 
 Written alongside the output file. Adds the fields that can't go into the
