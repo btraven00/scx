@@ -196,3 +196,37 @@ fn source_directory_does_not_change_the_output() {
     }
     assert_eq!(hashes[0], hashes[1]);
 }
+
+/// A URL input other than Parquet is downloaded, detected by content and
+/// converted like the local file: `scx diff` finds nothing (it skips the
+/// provenance, which names the URL) and the source hash is the same.
+#[cfg(feature = "net")]
+#[test]
+fn url_input_converts_like_the_local_file() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["tiny_raw.h5ad", "tiny_v5.h5seurat", "tiny_10x.h5"] {
+        let run = |input: &str, out: &str| {
+            let out = dir.path().join(out);
+            let _ = std::fs::remove_file(&out);
+            convert(Path::new(input), &out, &[]);
+            let side = std::fs::read_to_string(format!("{}.prov.json", out.display())).unwrap();
+            let side: serde_json::Value = serde_json::from_str(&side).unwrap();
+            (out, side["source"]["hash"].clone())
+        };
+        let (local, local_hash) = run(fixture(name).to_str().unwrap(), "local.h5ad");
+        let url = format!("file://{}", fixture(name).display());
+        let (remote, remote_hash) = run(&url, "remote.h5ad");
+        assert!(local_hash.is_string(), "{name}");
+        assert_eq!(remote_hash, local_hash, "{name}");
+        let diff = Command::new(env!("CARGO_BIN_EXE_scx"))
+            .arg("diff")
+            .args([&local, &remote])
+            .output()
+            .unwrap();
+        assert!(
+            diff.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&diff.stdout)
+        );
+    }
+}

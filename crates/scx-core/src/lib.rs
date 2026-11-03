@@ -38,6 +38,7 @@ pub mod parquet;
 pub mod provenance;
 pub mod rds;
 pub mod sparse;
+pub mod spool;
 pub mod stream;
 pub mod tenx;
 pub mod transpose;

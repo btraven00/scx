@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use futures::stream;
 
+use super::open_stream;
 use super::xdr::{be_f64s, be_i32s, Kind, Node, Num, Parser, Xdr, NA_INT};
-use super::{open_stream, Spool};
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
@@ -43,8 +43,6 @@ pub struct RdsSeuratReader {
     indptr: Vec<u64>,
     obs: ObsTable,
     var: VarTable,
-    /// The downloaded copy this reader owns, for a remote file.
-    spool: Option<Spool>,
 }
 
 /// Fetched lazy vectors, keyed by stream offset.
@@ -194,21 +192,7 @@ impl RdsSeuratReader {
                 index: genes,
                 columns: Vec::new(),
             },
-            spool: None,
         })
-    }
-
-    /// Open a downloaded copy, which is deleted along with the reader.
-    #[cfg(feature = "net")]
-    pub(crate) fn open_spooled(
-        spool: Spool,
-        chunk_size: usize,
-        assay: Option<&str>,
-        layer: Option<&str>,
-    ) -> Result<Self> {
-        let mut r = Self::open(spool.path(), chunk_size, assay, layer)?;
-        r.spool = Some(spool);
-        Ok(r)
     }
 }
 
@@ -618,10 +602,6 @@ impl Scan {
 impl DatasetReader for RdsSeuratReader {
     fn shape(&self) -> (usize, usize) {
         (self.indptr.len() - 1, self.n_vars)
-    }
-
-    fn source_hash(&self) -> Option<String> {
-        self.spool.as_ref().map(|s| s.hash().to_string())
     }
 
     fn dtype(&self) -> DataType {
