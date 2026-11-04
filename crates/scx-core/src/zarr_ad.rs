@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
@@ -26,7 +26,10 @@ use zarrs::filesystem::FilesystemStore;
 use zarrs::group::Group;
 
 use crate::stream::ChunkStream;
-use crate::stream::{row_chunks, row_range_chunks};
+use crate::stream::{
+    error_stream, load_indptr, normalize_ranges, read_block, row_chunks, row_range_chunks,
+    stream_indptr,
+};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
@@ -53,8 +56,9 @@ pub struct ZarrAdReader {
     store: Store,
     n_obs: usize,
     n_vars: usize,
-    /// CSR row pointer array (n_obs + 1 entries). None when X is dense.
-    indptr: Option<Vec<u64>>,
+    /// CSR row pointer array (n_obs + 1 entries), read on first need: a
+    /// row-range stream reads just its rows' part. None when X is dense.
+    indptr: Option<OnceLock<Vec<u64>>>,
     chunk_size: usize,
     dtype: DataType,
     /// Node the matrix is read from: `"X"`, or `"layers/<name>"` when X is
@@ -108,16 +112,18 @@ impl ZarrAdReader {
                     )));
                 }
                 let (n_obs, n_vars) = shape_attr(&attrs, &base)?;
-                let indptr = read_u64(&open_array(&store, &format!("{base}/indptr"))?, None)?;
-                if indptr.len() != n_obs + 1 {
+                let len = open_array(&store, &format!("{base}/indptr"))?
+                    .shape()
+                    .iter()
+                    .product::<u64>() as usize;
+                if len != n_obs + 1 {
                     return Err(ScxError::InvalidFormat(format!(
-                        "{base}/indptr length {} != n_obs+1 {}",
-                        indptr.len(),
+                        "{base}/indptr length {len} != n_obs+1 {}",
                         n_obs + 1
                     )));
                 }
                 let dtype = detect_dtype(&open_array(&store, &format!("{base}/data"))?);
-                (n_obs, n_vars, Some(indptr), dtype)
+                (n_obs, n_vars, Some(OnceLock::new()), dtype)
             }
             None => return Err(ScxError::InvalidFormat(format!("missing {base}"))),
         };
@@ -136,6 +142,14 @@ impl ZarrAdReader {
     /// The node the matrix is read from — `"X"` or `"layers/<name>"`.
     pub fn x_source(&self) -> &str {
         &self.x_path
+    }
+
+    /// `x_path`'s indptr, or `range` of it.
+    fn read_indptr(&self, range: Option<Range<usize>>) -> Result<Vec<u64>> {
+        read_u64(
+            &open_array(&self.store, &format!("{}/indptr", self.x_path))?,
+            range,
+        )
     }
 }
 
@@ -726,7 +740,14 @@ fn array_to_json(arr: &ZArray) -> Result<Value> {
 #[async_trait]
 impl DatasetReader for ZarrAdReader {
     fn x_indptr(&self) -> &[u64] {
-        self.indptr.as_deref().unwrap_or(&[])
+        let Some(cell) = &self.indptr else {
+            return &[];
+        };
+        // ponytail: the trait can't return an error; streaming X reports it.
+        load_indptr(cell, || self.read_indptr(None)).unwrap_or_else(|e| {
+            tracing::warn!("{}/indptr: {e}", self.x_path);
+            &[]
+        })
     }
 
     fn shape(&self) -> (usize, usize) {
@@ -872,10 +893,24 @@ impl DatasetReader for ZarrAdReader {
         let store = self.store.clone();
         let base = self.x_path.clone();
         let (n_obs, n_vars, dtype) = (self.n_obs, self.n_vars, self.dtype);
-        let indptr = &self.indptr;
-        row_range_chunks(n_obs, ranges, self.chunk_size, move |rows| match &indptr {
-            Some(indptr) => read_csr_chunk(&store, &base, indptr, rows, n_vars, Some(dtype)),
-            None => read_dense_chunk(&store, &base, rows, n_vars, Some(dtype)),
+        let this = &*self;
+        let Some(cell) = &this.indptr else {
+            return row_range_chunks(n_obs, ranges, this.chunk_size, move |rows| {
+                read_dense_chunk(&store, &base, rows, n_vars, Some(dtype))
+            });
+        };
+        let whole = normalize_ranges(ranges.clone()) == [0..n_obs];
+        let full = match stream_indptr(cell, whole, || this.read_indptr(None)) {
+            Ok(full) => full,
+            Err(e) => return error_stream(e.to_string()),
+        };
+        row_range_chunks(n_obs, ranges, this.chunk_size, move |rows| {
+            read_block(
+                full,
+                rows,
+                |part| this.read_indptr(Some(part)),
+                |ip, rows| read_csr_chunk(&store, &base, ip, rows, n_vars, Some(dtype)),
+            )
         })
     }
 }
