@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use hdf5::types::{IntSize, TypeDescriptor};
@@ -7,12 +8,13 @@ use ndarray::s;
 
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
-use crate::h5::read_vec;
+use crate::h5::{read_u64, read_u64_range, read_vec};
 use crate::h5_str::read_strings;
 use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, VarTable};
-use crate::stream::row_range_chunks;
-use crate::stream::ChunkStream;
-use crate::stream::DatasetReader;
+use crate::stream::{
+    load_indptr, normalize_ranges, read_block, row_range_chunks, stream_indptr, ChunkStream,
+    DatasetReader,
+};
 
 /// Compact summary of 10x-specific metadata that doesn't fit cleanly into the
 /// generic obs/var inspect output: feature-type histogram and unique genome(s).
@@ -109,7 +111,9 @@ pub struct TenxH5Reader {
     path: PathBuf,
     n_obs: usize,
     n_vars: usize,
-    indptr: Vec<u64>,
+    /// `matrix/indptr` (n_obs + 1 entries), read on first need: a row-range
+    /// stream reads just its rows' part.
+    indptr: OnceLock<Vec<u64>>,
     chunk_size: usize,
     dtype: DataType,
 }
@@ -148,11 +152,10 @@ impl TenxH5Reader {
             }
         }
 
-        let indptr = crate::h5::read_u64(&file.dataset("matrix/indptr")?)?;
-        if indptr.len() != n_obs + 1 {
+        let len = file.dataset("matrix/indptr")?.size();
+        if len != n_obs + 1 {
             return Err(ScxError::InvalidFormat(format!(
-                "10x /matrix/indptr length {} != n_barcodes+1 {}",
-                indptr.len(),
+                "10x /matrix/indptr length {len} != n_barcodes+1 {}",
                 n_obs + 1
             )));
         }
@@ -163,10 +166,14 @@ impl TenxH5Reader {
             path,
             n_obs,
             n_vars,
-            indptr,
+            indptr: OnceLock::new(),
             chunk_size,
             dtype,
         })
+    }
+
+    fn load_indptr(path: &Path) -> Result<Vec<u64>> {
+        read_u64(&File::open(path)?.dataset("matrix/indptr")?)
     }
 }
 
@@ -242,26 +249,20 @@ fn read_data(file: &File, dtype: DataType, a: usize, b: usize) -> Result<TypedVe
 }
 
 fn read_tenx_chunk(
-    path: &Path,
+    file: &File,
     indptr: &[u64],
-    row_start: usize,
-    row_end: usize,
+    rows: std::ops::Range<usize>,
     n_vars: usize,
     dtype: DataType,
 ) -> Result<MatrixChunk> {
-    let file = File::open(path)?;
-    let nnz_start = indptr[row_start] as usize;
-    let nnz_end = indptr[row_end] as usize;
+    let nnz_start = indptr[rows.start] as usize;
+    let nnz_end = indptr[rows.end] as usize;
 
-    let indices = read_indices(&file, nnz_start, nnz_end)?;
-    let data = read_data(&file, dtype, nnz_start, nnz_end)?;
+    let indices = read_indices(file, nnz_start, nnz_end)?;
+    let data = read_data(file, dtype, nnz_start, nnz_end)?;
 
     Ok(crate::sparse::csr_chunk(
-        indptr,
-        row_start..row_end,
-        n_vars,
-        indices,
-        data,
+        indptr, rows, n_vars, indices, data,
     ))
 }
 
@@ -276,7 +277,11 @@ impl DatasetReader for TenxH5Reader {
     }
 
     fn x_indptr(&self) -> &[u64] {
-        &self.indptr
+        // ponytail: the trait can't return an error; streaming X reports it.
+        load_indptr(&self.indptr, || Self::load_indptr(&self.path)).unwrap_or_else(|e| {
+            tracing::warn!("matrix/indptr: {e}");
+            &[]
+        })
     }
 
     async fn obs(&mut self) -> Result<ObsTable> {
@@ -330,15 +335,24 @@ impl DatasetReader for TenxH5Reader {
 
     fn x_stream_rows(&mut self, ranges: Vec<std::ops::Range<usize>>) -> ChunkStream<'_> {
         let path = self.path.clone();
-        let indptr = &self.indptr;
         let n_obs = self.n_obs;
         let n_vars = self.n_vars;
         let chunk_size = self.chunk_size;
         let dtype = self.dtype;
+        let whole = normalize_ranges(ranges.clone()) == [0..n_obs];
+        let full = match stream_indptr(&self.indptr, whole, || Self::load_indptr(&path)) {
+            Ok(full) => full,
+            Err(e) => return crate::stream::error_stream(e.to_string()),
+        };
 
         row_range_chunks(n_obs, ranges, chunk_size, move |rows| {
-            let (row_start, row_end) = (rows.start, rows.end);
-            read_tenx_chunk(&path, indptr, row_start, row_end, n_vars, dtype)
+            let file = File::open(&path)?;
+            read_block(
+                full,
+                rows,
+                |part| read_u64_range(&file.dataset("matrix/indptr")?, part),
+                |ip, rows| read_tenx_chunk(&file, ip, rows, n_vars, dtype),
+            )
         })
     }
 }
@@ -748,5 +762,39 @@ mod tests {
         }
         let r = TenxH5Reader::open(&pu, 8).unwrap();
         assert_eq!(r.dtype(), DataType::U32);
+    }
+
+    /// A row-range stream reads only its rows' part of `matrix/indptr` (see
+    /// the h5ad reader's test of the same name). The last indptr entry is
+    /// negative, which any read of it rejects: rows 0..3 still stream, while
+    /// the whole-matrix stream, which does read it, fails.
+    #[test]
+    fn row_range_stream_reads_only_its_indptr() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bad_tail.h5");
+        write_standard(&p);
+        {
+            let f = File::open_rw(&p).unwrap();
+            f.unlink("matrix/indptr").unwrap();
+            wi32(&f.group("matrix").unwrap(), "indptr", &[0, 2, 3, 3, -1]);
+        }
+        let mut r = TenxH5Reader::open(&p, 10).unwrap();
+        let c = block_on(async {
+            let mut s = r.x_stream_rows(vec![1..2, 0..1, 2..3]);
+            let c = s.next().await.unwrap().unwrap();
+            assert!(s.next().await.is_none());
+            c
+        });
+        assert_eq!((c.row_offset, c.nrows), (0, 3));
+        assert_eq!(c.data.indptr, vec![0, 2, 3, 3]);
+        assert_eq!(c.data.indices, vec![0, 2, 1]);
+        assert_eq!(c.data.data.to_f64(), vec![5.0, 7.0, 3.0]);
+
+        let err = block_on(async { r.x_stream().next().await.unwrap().unwrap_err() });
+        assert!(err.to_string().contains("negative index -1"), "{err}");
+        assert!(
+            r.x_indptr().is_empty(),
+            "an unreadable indptr is not a row pointer"
+        );
     }
 }

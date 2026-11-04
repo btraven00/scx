@@ -1,5 +1,6 @@
 use std::ops::Range;
 use std::pin::Pin;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use futures::{stream, Stream, StreamExt};
@@ -115,6 +116,52 @@ pub fn require_cell_major(reader: &dyn DatasetReader) -> Result<()> {
 pub(crate) const GENE_MAJOR_X: &str = "X is gene-major (CSC), which can only be streamed \
     by gene. To read it by cell, convert it to CSR first, e.g. \
     adata.X = adata.X.tocsr(); adata.write_h5ad(path)";
+
+/// `cell`'s whole row pointer, read by `load` on the first call. Readers keep
+/// it lazy so that a row-range stream, which `open_dask` makes once per block
+/// on a fresh reader, does not read all n_obs + 1 entries each time.
+pub(crate) fn load_indptr(
+    cell: &OnceLock<Vec<u64>>,
+    load: impl FnOnce() -> Result<Vec<u64>>,
+) -> Result<&[u64]> {
+    if let Some(v) = cell.get() {
+        return Ok(v);
+    }
+    let v = load()?;
+    Ok(cell.get_or_init(|| v))
+}
+
+/// The row pointer a stream starts with: all of it, read now, for a
+/// whole-matrix stream; for a row-range stream only when already read, else
+/// `None` and each block reads its own part (see [`read_block`]).
+pub(crate) fn stream_indptr(
+    cell: &OnceLock<Vec<u64>>,
+    whole: bool,
+    load: impl FnOnce() -> Result<Vec<u64>>,
+) -> Result<Option<&[u64]>> {
+    match whole {
+        true => load_indptr(cell, load).map(Some),
+        false => Ok(cell.get().map(Vec::as_slice)),
+    }
+}
+
+/// Block `rows` from `read(indptr, rows)`: over `full`, or else over just
+/// `indptr[rows.start..=rows.end]`, which `part` reads, with the block's row
+/// offset put back.
+pub(crate) fn read_block(
+    full: Option<&[u64]>,
+    rows: Range<usize>,
+    part: impl FnOnce(Range<usize>) -> Result<Vec<u64>>,
+    read: impl FnOnce(&[u64], Range<usize>) -> Result<MatrixChunk>,
+) -> Result<MatrixChunk> {
+    if let Some(ip) = full {
+        return read(ip, rows);
+    }
+    let ip = part(rows.start..rows.end + 1)?;
+    let mut chunk = read(&ip, 0..rows.len())?;
+    chunk.row_offset = rows.start;
+    Ok(chunk)
+}
 
 /// A stream that yields one error.
 pub(crate) fn error_stream<'a>(msg: String) -> ChunkStream<'a> {
