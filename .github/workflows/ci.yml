@@ -90,6 +90,12 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # The self-hosted job checks fmt too, but runs only on main; this one
+      # catches it in PRs. Once is enough.
+      - name: fmt
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+
       - name: Install system HDF5
         if: matrix.apt_packages != ''
         timeout-minutes: 10
