@@ -880,6 +880,56 @@ async fn dgcmatrix_copies_h5ad_csr_as_stored() {
     }
 }
 
+/// A copy skips the row check only when its stored indices match a group
+/// already checked. Here raw.X's rows are sorted and X has the same indptr
+/// but unsorted indices: raw.X copies, X must still be checked and refused.
+#[test]
+fn copy_skips_row_check_only_for_identical_indices() {
+    let fixtures =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny");
+    let src = tempfile::NamedTempFile::with_suffix(".h5ad").unwrap();
+    std::fs::copy(fixtures.join("tiny_raw_gzip.h5ad"), src.path()).unwrap();
+    {
+        let unsorted: Vec<i32> = File::open(fixtures.join("tiny_raw_unsorted_gzip.h5ad"))
+            .unwrap()
+            .dataset("X/indices")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        let f = File::open_rw(src.path()).unwrap();
+        assert_eq!(
+            f.dataset("X/indptr").unwrap().read_raw::<i64>().unwrap(),
+            f.dataset("raw/X/indptr")
+                .unwrap()
+                .read_raw::<i64>()
+                .unwrap()
+        );
+        f.unlink("X/indices").unwrap();
+        f.new_dataset::<i32>()
+            .shape(unsorted.len())
+            .chunk(unsorted.len())
+            .deflate(4)
+            .create("X/indices")
+            .unwrap()
+            .write(&unsorted)
+            .unwrap();
+    }
+    let out = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let mut w = H5SeuratWriter::create(
+        out.path(),
+        6,
+        5,
+        DataType::F32,
+        Some("RNA"),
+        Some("data"),
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(w.copy_csr_from_h5ad(src.path(), "raw/X", "counts").unwrap());
+    assert!(!w.copy_csr_from_h5ad(src.path(), "X", "data").unwrap());
+}
+
 /// A dgCMatrix row-range stream reads only its cells' part of the column
 /// pointer (see the h5ad reader's test of the same name). The last `indptr`
 /// entry is negative, which any read of it rejects: cells 0..3 still stream,

@@ -188,12 +188,17 @@ pub type ChunkCheck<'a> = &'a mut dyn FnMut(&[u8]) -> bool;
 /// Copy the 1-D chunked dataset `src` to `dst/name` as stored: same type,
 /// chunking and filters, each chunk moved still compressed. The new dataset
 /// carries no timestamp, unlike an `H5Ocopy`, which keeps the source's.
+/// Copying stored chunks this way follows scConvert
+/// (<https://github.com/mianaz/scConvert>); this implementation is scx's own.
 ///
 /// `check`, if given, sees each chunk's values in order, as raw little-endian
 /// bytes: unfiltered chunks as stored, deflate ones (optionally after shuffle)
 /// inflated in parallel a batch at a time. Once it returns false the copy
 /// stops and this returns `Ok(false)`, leaving `dst/name` partly written for
 /// the caller to unlink. Any other filter is an error when `check` is given.
+///
+/// A thread writes each batch of chunks while the next batch is read,
+/// inflated and checked.
 ///
 /// Chunk bytes are read with `pread` at the address HDF5 reports, one lookup
 /// per chunk instead of `H5Dread_chunk`'s two; that address is only the file
@@ -240,55 +245,113 @@ pub fn copy_chunks(
     let did = out.id();
     let starts: Vec<usize> = (0..n).step_by(chunk).collect();
     let all_locs = chunk_locations(src, chunk, n)?;
-    for (batch, locs) in starts.chunks(BATCH).zip(all_locs.chunks(BATCH)) {
-        let raw = locs
-            .iter()
-            .map(|&(_, addr, size)| {
-                let mut buf = vec![0u8; size];
-                read_at(&file, &mut buf, addr)?;
-                Ok(buf)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if let Some(check) = check.as_mut() {
-            let decoded = plan
-                .map(|p| {
-                    raw.par_iter()
-                        .zip(locs)
-                        .map(|(b, &(mask, ..))| decode_chunk(p, mask, b, elem))
-                        .collect::<Result<Vec<_>>>()
+    let (tx, rx) =
+        std::sync::mpsc::sync_channel::<(&[usize], &[(u32, u64, usize)], Vec<Vec<u8>>)>(1);
+    std::thread::scope(|s| {
+        let writer = s.spawn(move || {
+            for (batch, locs, raw) in rx {
+                write_chunks(did, batch, locs, &raw, src)?;
+            }
+            Ok::<_, ScxError>(())
+        });
+        for (batch, locs) in starts.chunks(BATCH).zip(all_locs.chunks(BATCH)) {
+            let raw = locs
+                .iter()
+                .map(|&(_, addr, size)| {
+                    let mut buf = vec![0u8; size];
+                    read_at(&file, &mut buf, addr)?;
+                    Ok(buf)
                 })
-                .transpose()?;
-            for (i, &start) in batch.iter().enumerate() {
-                let bytes = decoded.as_ref().map_or(&raw[i], |d| &d[i]);
-                // The last chunk is stored full size; only its first part is data.
-                let valid = (chunk.min(n - start) * elem).min(bytes.len());
-                if !check(&bytes[..valid]) {
-                    return Ok(false);
+                .collect::<Result<Vec<_>>>()?;
+            if let Some(check) = check.as_mut() {
+                let decoded = plan
+                    .map(|p| {
+                        raw.par_iter()
+                            .zip(locs)
+                            .map(|(b, &(mask, ..))| decode_chunk(p, mask, b, elem))
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .transpose()?;
+                for (i, &start) in batch.iter().enumerate() {
+                    let bytes = decoded.as_ref().map_or(&raw[i], |d| &d[i]);
+                    // The last chunk is stored full size; only its first part is data.
+                    let valid = (chunk.min(n - start) * elem).min(bytes.len());
+                    if !check(&bytes[..valid]) {
+                        return Ok(false);
+                    }
                 }
+            }
+            if tx.send((batch, locs, raw)).is_err() {
+                break; // the writer failed; join reports why
             }
         }
-        hdf5::sync::sync(|| {
-            for ((&start, &(mask, ..)), buf) in batch.iter().zip(locs).zip(&raw) {
-                let off = start as hdf5_sys::h5::hsize_t;
-                let rc = unsafe {
-                    hdf5_sys::h5d::H5Dwrite_chunk(
-                        did,
-                        0,
-                        mask,
-                        &off,
-                        buf.len(),
-                        buf.as_ptr().cast(),
-                    )
-                };
-                if rc < 0 {
-                    return Err(ScxError::InvalidFormat(format!(
-                        "H5Dwrite_chunk failed at element {start} of {}",
-                        src.name()
-                    )));
-                }
+        drop(tx);
+        writer.join().expect("chunk writer panicked")?;
+        Ok(true)
+    })
+}
+
+/// `H5Dwrite_chunk` each of a batch's stored chunks into the dataset `did`.
+fn write_chunks(
+    did: hdf5_sys::h5i::hid_t,
+    batch: &[usize],
+    locs: &[(u32, u64, usize)],
+    raw: &[Vec<u8>],
+    src: &Dataset,
+) -> Result<()> {
+    hdf5::sync::sync(|| {
+        for ((&start, &(mask, ..)), buf) in batch.iter().zip(locs).zip(raw) {
+            let off = start as hdf5_sys::h5::hsize_t;
+            let rc = unsafe {
+                hdf5_sys::h5d::H5Dwrite_chunk(did, 0, mask, &off, buf.len(), buf.as_ptr().cast())
+            };
+            if rc < 0 {
+                return Err(ScxError::InvalidFormat(format!(
+                    "H5Dwrite_chunk failed at element {start} of {}",
+                    src.name()
+                )));
             }
-            Ok(())
-        })?;
+        }
+        Ok(())
+    })
+}
+
+/// Whether the 1-D chunked datasets `a` and `b` hold the same values, decided
+/// without decoding either: same type, length, chunking and filters, and every
+/// chunk stored with the same filter mask and the same (still compressed)
+/// bytes. `false` when it can't tell (not 1-D chunked, a userblock), and for
+/// equal values stored differently.
+pub fn same_stored(a: &Dataset, b: &Dataset) -> Result<bool> {
+    let chunk = match (a.chunk(), b.chunk()) {
+        (Some(ca), Some(cb)) if ca == cb && ca.len() == 1 => ca[0],
+        _ => return Ok(false),
+    };
+    let n = a.size();
+    if n != b.size()
+        || a.dtype()? != b.dtype()?
+        || a.filters() != b.filters()
+        || a.file()?.fcpl()?.userblock() != 0
+        || b.file()?.fcpl()?.userblock() != 0
+    {
+        return Ok(false);
+    }
+    let (la, lb) = (chunk_locations(a, chunk, n)?, chunk_locations(b, chunk, n)?);
+    if la.iter().zip(&lb).any(|(x, y)| (x.0, x.2) != (y.0, y.2)) {
+        return Ok(false);
+    }
+    let (fa, fb) = (
+        std::fs::File::open(a.filename())?,
+        std::fs::File::open(b.filename())?,
+    );
+    let (mut ba, mut bb) = (Vec::new(), Vec::new());
+    for (&(_, addr_a, size), &(_, addr_b, _)) in la.iter().zip(&lb) {
+        ba.resize(size, 0);
+        bb.resize(size, 0);
+        read_at(&fa, &mut ba, addr_a)?;
+        read_at(&fb, &mut bb, addr_b)?;
+        if ba != bb {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -850,6 +913,42 @@ mod tests {
             .map(|&c| f64::from_le_bytes(c))
             .collect();
         assert_eq!(got, &vals[100..2900]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// same_stored: chunks stored byte for byte alike are the same values; one
+    /// changed value, other chunking or another deflate level are not.
+    #[test]
+    fn same_stored_compares_stored_bytes() {
+        let path = tmp("same_stored");
+        let vals = values(5000);
+        let mut other = vals.clone();
+        other[4321] += 1.0;
+        {
+            let f = File::create(&path).unwrap();
+            for (name, v, chunk, level) in [
+                ("a", &vals, 1024, 6),
+                ("b", &vals, 1024, 6),
+                ("c", &other, 1024, 6),
+                ("d", &vals, 512, 6),
+                ("e", &vals, 1024, 1),
+            ] {
+                f.new_dataset::<f64>()
+                    .shape([v.len()])
+                    .chunk([chunk])
+                    .deflate(level)
+                    .create(name)
+                    .unwrap()
+                    .write(v)
+                    .unwrap();
+            }
+        }
+        let f = File::open(&path).unwrap();
+        let ds = |n: &str| f.dataset(n).unwrap();
+        assert!(same_stored(&ds("a"), &ds("b")).unwrap());
+        for n in ["c", "d", "e"] {
+            assert!(!same_stored(&ds("a"), &ds(n)).unwrap(), "{n}");
+        }
         let _ = std::fs::remove_file(&path);
     }
 
