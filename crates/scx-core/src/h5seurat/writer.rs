@@ -75,6 +75,10 @@ pub struct H5SeuratWriter {
     seuratdisk_compat: bool,
     /// X was copied as stored (`copy_csr_from_h5ad`), indptr included.
     x_copied: bool,
+    /// The last group `copy_csr_from_h5ad` checked row by row: source file,
+    /// group and indptr. A later copy whose indptr and stored indices match
+    /// it holds the same rows, so it skips the check.
+    checked: Option<(std::path::PathBuf, String, Vec<i64>)>,
 }
 
 impl H5SeuratWriter {
@@ -151,6 +155,7 @@ impl H5SeuratWriter {
             sparse_state: None,
             seuratdisk_compat,
             x_copied: false,
+            checked: None,
         })
     }
 
@@ -272,19 +277,31 @@ impl<'a> RowCheck<'a> {
         }
     }
 
-    /// Feed the next indices, as little-endian int32 bytes.
+    /// Feed the next indices, as little-endian int32 bytes. Checks a row's
+    /// run at a time, without branching per value, so the loop vectorises:
+    /// a strictly increasing run is in range when its last value is.
     fn feed(&mut self, bytes: &[u8]) -> bool {
-        for c in bytes.as_chunks::<4>().0 {
-            let i = i32::from_le_bytes(*c) as i64;
+        let mut idx = bytes.as_chunks::<4>().0;
+        while !idx.is_empty() {
             while self.pos == self.indptr[self.row + 1] {
                 self.row += 1;
                 self.prev = -1;
             }
-            if i <= self.prev || i >= self.n_cols {
+            let take = ((self.indptr[self.row + 1] - self.pos) as usize).min(idx.len());
+            let (run, rest) = idx.split_at(take);
+            let mut prev = self.prev;
+            let mut ok = true;
+            for c in run {
+                let i = i32::from_le_bytes(*c) as i64;
+                ok &= i > prev;
+                prev = i;
+            }
+            if !ok || prev >= self.n_cols {
                 return false;
             }
-            self.prev = i;
-            self.pos += 1;
+            self.prev = prev;
+            self.pos += take as i64;
+            idx = rest;
         }
         true
     }
@@ -806,9 +823,12 @@ impl DatasetWriter for H5SeuratWriter {
         Ok(())
     }
 
-    fn copy_csr_from_h5ad(&mut self, src: &Path, group: &str, slot: &str) -> Result<bool> {
-        use crate::h5_chunk::copy_chunks;
-        let Ok(src) = File::open(src).and_then(|f| f.group(group)) else {
+    fn copy_csr_from_h5ad(&mut self, src_path: &Path, group: &str, slot: &str) -> Result<bool> {
+        use crate::h5_chunk::{copy_chunks, same_stored};
+        let Ok(file) = File::open(src_path) else {
+            return Ok(false);
+        };
+        let Ok(src) = file.group(group) else {
             return Ok(false);
         };
         // X's dtype is the one asked for; other slots keep the source's.
@@ -826,14 +846,20 @@ impl DatasetWriter for H5SeuratWriter {
         };
         // Copy under temporary names, renamed once all three are in.
         let tmp = |name: &str| format!("{name}.copy");
+        // A normalised X usually shares raw.X's rows: when it stores the same
+        // indices under the same indptr, the check already made covers it.
+        let indices = src.dataset("indices")?;
+        let checked_before = match &self.checked {
+            Some((p, g, ip)) if p == src_path && *ip == indptr => {
+                same_stored(&file.dataset(&format!("{g}/indices"))?, &indices)?
+            }
+            _ => false,
+        };
         // indices first, checked as they go; an unsorted row abandons the copy.
         let mut rows = RowCheck::new(&indptr, self.n_vars);
-        if !copy_chunks(
-            &src.dataset("indices")?,
-            &grp,
-            &tmp("indices"),
-            Some(&mut |b| rows.feed(b)),
-        )? {
+        let mut feed = |b: &[u8]| rows.feed(b);
+        let check: Option<crate::h5_chunk::ChunkCheck> = (!checked_before).then_some(&mut feed);
+        if !copy_chunks(&indices, &grp, &tmp("indices"), check)? {
             // ponytail: the partial copy stays in the file as dead space (HDF5
             // does not reclaim it); only input with unsorted rows pays it.
             if is_x {
@@ -853,6 +879,11 @@ impl DatasetWriter for H5SeuratWriter {
             }
             grp.relink(&tmp(name), name)?;
         }
+        if checked_before {
+            tracing::info!("{group}/indices match the checked copy's: not checked again");
+        } else {
+            self.checked = Some((src_path.to_path_buf(), group.to_string(), indptr));
+        }
         if is_x {
             self.x_copied = true;
         } else {
@@ -869,3 +900,38 @@ impl DatasetWriter for H5SeuratWriter {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod row_check_tests {
+    use super::RowCheck;
+
+    /// However the indices are split into pieces, RowCheck accepts exactly the
+    /// matrices whose rows are strictly increasing and in 0..n_cols, with an
+    /// empty row in between and a decrease across a row boundary allowed.
+    #[test]
+    fn rows_checked_across_any_split() {
+        let indptr = [0i64, 3, 3, 5, 9];
+        let good = [0, 2, 4, 1, 3, 0, 1, 2, 4];
+        let cases: [(&[i32], bool); 5] = [
+            (&good, true),
+            (&[0, 2, 2, 1, 3, 0, 1, 2, 4], false), // repeat in a row
+            (&[0, 2, 4, 3, 1, 0, 1, 2, 4], false), // decrease in a row
+            (&[0, 2, 4, 1, 3, 0, 1, 2, 5], false), // last index == n_cols
+            (&[-1, 2, 4, 1, 3, 0, 1, 2, 4], false), // negative
+        ];
+        for (idx, want) in cases {
+            let bytes: Vec<u8> = idx.iter().flat_map(|i| i.to_le_bytes()).collect();
+            for cut in 0..=idx.len() {
+                let (a, b) = bytes.split_at(cut * 4);
+                let mut rc = RowCheck::new(&indptr, 5);
+                assert_eq!(rc.feed(a) && rc.feed(b), want, "{idx:?} cut at {cut}");
+            }
+            let mut rc = RowCheck::new(&indptr, 5);
+            assert_eq!(
+                bytes.chunks(4).all(|c| rc.feed(c)),
+                want,
+                "{idx:?} one by one"
+            );
+        }
+    }
+}
