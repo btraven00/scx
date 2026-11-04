@@ -35,16 +35,26 @@ fn sorted_debug<V: std::fmt::Debug>(m: &std::collections::HashMap<String, V>) ->
 }
 
 async fn assert_same_as_h5ad(zarr: &str, h5ad: &str) {
-    assert_store_same_as_h5ad(&fixture(zarr), &fixture(h5ad), zarr).await;
+    assert_store_same_as_h5ad(&fixture(zarr), &fixture(h5ad), zarr, true).await;
 }
 
-async fn assert_store_same_as_h5ad(zarr_path: &Path, h5ad_path: &Path, zarr: &str) {
+/// Same values in every slot; with `same_layout`, also the same storage
+/// (indptr, layer and obsp metas): a dense h5ad matrix comes back from the
+/// writer as CSR, so a written store only matches it in values.
+async fn assert_store_same_as_h5ad(
+    zarr_path: &Path,
+    h5ad_path: &Path,
+    zarr: &str,
+    same_layout: bool,
+) {
     let mut z = ZarrAdReader::open(zarr_path, CHUNK).unwrap();
     let mut h = H5AdReader::open(h5ad_path, CHUNK).unwrap();
 
     assert_eq!(z.shape(), h.shape(), "{zarr}: shape");
     assert_eq!(z.dtype(), h.dtype(), "{zarr}: dtype");
-    assert_eq!(z.x_indptr(), h.x_indptr(), "{zarr}: X indptr");
+    if same_layout {
+        assert_eq!(z.x_indptr(), h.x_indptr(), "{zarr}: X indptr");
+    }
     assert_eq!(
         chunks(z.x_stream()).await,
         chunks(h.x_stream()).await,
@@ -81,7 +91,12 @@ async fn assert_store_same_as_h5ad(zarr_path: &Path, h5ad_path: &Path, zarr: &st
         z.layer_metas().await.unwrap(),
         h.layer_metas().await.unwrap(),
     );
-    assert_eq!(format!("{zl:?}"), format!("{hl:?}"), "{zarr}: layer metas");
+    let names =
+        |m: &[crate::ir::SparseMatrixMeta]| m.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&zl), names(&hl), "{zarr}: layers");
+    if same_layout {
+        assert_eq!(format!("{zl:?}"), format!("{hl:?}"), "{zarr}: layer metas");
+    }
     for (zm, hm) in zl.iter().zip(&hl) {
         assert_eq!(
             chunks(z.layer_stream(zm, CHUNK)).await,
@@ -91,7 +106,10 @@ async fn assert_store_same_as_h5ad(zarr_path: &Path, h5ad_path: &Path, zarr: &st
         );
     }
     let (zp, hp) = (z.obsp_metas().await.unwrap(), h.obsp_metas().await.unwrap());
-    assert_eq!(format!("{zp:?}"), format!("{hp:?}"), "{zarr}: obsp metas");
+    assert_eq!(names(&zp), names(&hp), "{zarr}: obsp");
+    if same_layout {
+        assert_eq!(format!("{zp:?}"), format!("{hp:?}"), "{zarr}: obsp metas");
+    }
     for (zm, hm) in zp.iter().zip(&hp) {
         assert_eq!(
             chunks(z.obsp_stream(zm, CHUNK)).await,
@@ -195,47 +213,191 @@ fn store_errors_keep_their_source() {
     assert!(source.downcast_ref::<std::io::Error>().is_some());
 }
 
+/// Write everything the h5ad reader returns for `src` as a Zarr store, X as
+/// `dtype`.
+async fn write_from_h5ad(src: &Path, out: &Path, dtype: crate::dtype::DataType) {
+    let mut h = H5AdReader::open(src, CHUNK).unwrap();
+    let (n_obs, n_vars) = h.shape();
+    let mut w = ZarrAdWriter::create(out, n_obs, n_vars, dtype).unwrap();
+    w.write_obs(&h.obs().await.unwrap()).await.unwrap();
+    w.write_var(&h.var().await.unwrap()).await.unwrap();
+    w.write_obsm(&h.obsm().await.unwrap()).await.unwrap();
+    w.write_varm(&h.varm().await.unwrap()).await.unwrap();
+    w.write_uns(&h.uns().await.unwrap()).await.unwrap();
+    for m in h.layer_metas().await.unwrap() {
+        w.begin_sparse("layers", &m.name, &m).await.unwrap();
+        let mut s = h.layer_stream(&m, CHUNK);
+        while let Some(c) = s.next().await {
+            w.write_sparse_chunk(&c.unwrap()).await.unwrap();
+        }
+        w.end_sparse().await.unwrap();
+    }
+    for m in h.obsp_metas().await.unwrap() {
+        w.begin_sparse("obsp", &m.name, &m).await.unwrap();
+        let mut s = h.obsp_stream(&m, CHUNK);
+        while let Some(c) = s.next().await {
+            w.write_sparse_chunk(&c.unwrap()).await.unwrap();
+        }
+        w.end_sparse().await.unwrap();
+    }
+    let mut s = h.x_stream();
+    while let Some(c) = s.next().await {
+        w.write_x_chunk(&c.unwrap()).await.unwrap();
+    }
+    w.finalize().await.unwrap();
+}
+
 /// Everything the h5ad reader returns, written as a Zarr v3 store, reads back
 /// identically through the Zarr reader (the writer's contract is the reader's
-/// in reverse) and as the h5ad it came from.
+/// in reverse) and as the h5ad it came from. `varied` covers every column
+/// encoding and uns value type the writer has; its dense matrices come back
+/// as CSR, so only values are compared.
 #[tokio::test]
 async fn writer_roundtrips_what_h5ad_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("written.zarr");
-    let src = fixture("small.h5ad");
-    {
-        let mut h = H5AdReader::open(&src, CHUNK).unwrap();
-        let (n_obs, n_vars) = h.shape();
-        let mut w = ZarrAdWriter::create(&out, n_obs, n_vars, h.dtype()).unwrap();
-        w.write_obs(&h.obs().await.unwrap()).await.unwrap();
-        w.write_var(&h.var().await.unwrap()).await.unwrap();
-        w.write_obsm(&h.obsm().await.unwrap()).await.unwrap();
-        w.write_varm(&h.varm().await.unwrap()).await.unwrap();
-        w.write_uns(&h.uns().await.unwrap()).await.unwrap();
-        for m in h.layer_metas().await.unwrap() {
-            w.begin_sparse("layers", &m.name, &m).await.unwrap();
-            let mut s = h.layer_stream(&m, CHUNK);
-            while let Some(c) = s.next().await {
-                w.write_sparse_chunk(&c.unwrap()).await.unwrap();
-            }
-            w.end_sparse().await.unwrap();
-        }
-        for m in h.obsp_metas().await.unwrap() {
-            w.begin_sparse("obsp", &m.name, &m).await.unwrap();
-            let mut s = h.obsp_stream(&m, CHUNK);
-            while let Some(c) = s.next().await {
-                w.write_sparse_chunk(&c.unwrap()).await.unwrap();
-            }
-            w.end_sparse().await.unwrap();
-        }
-        let mut s = h.x_stream();
-        while let Some(c) = s.next().await {
-            w.write_x_chunk(&c.unwrap()).await.unwrap();
-        }
-        w.finalize().await.unwrap();
+    for (name, same_layout) in [("small", true), ("varied", false)] {
+        let out = dir.path().join(format!("{name}.zarr"));
+        let src = fixture(&format!("{name}.h5ad"));
+        let dtype = H5AdReader::open(&src, CHUNK).unwrap().dtype();
+        write_from_h5ad(&src, &out, dtype).await;
+        assert_eq!(detect(&out), Some(Format::ZarrAd));
+        assert_store_same_as_h5ad(&out, &src, name, same_layout).await;
     }
-    assert_eq!(detect(&out), Some(Format::ZarrAd));
-    assert_store_same_as_h5ad(&out, &src, "written.zarr").await;
+}
+
+/// X is stored in the dtype asked for, whatever the source's, with the same
+/// values (all small integers here, exact in every dtype).
+#[tokio::test]
+async fn writer_stores_x_in_the_dtype_asked_for() {
+    use crate::dtype::DataType;
+    let dir = tempfile::tempdir().unwrap();
+    let src = fixture("varied.h5ad");
+    let values = |mut r: Box<dyn DatasetReader>| async move {
+        let c: Vec<MatrixChunk> = r.x_stream().map(|c| c.unwrap()).collect().await;
+        c.iter()
+            .map(|c| {
+                (
+                    c.data.indptr.clone(),
+                    c.data.indices.clone(),
+                    c.data.data.to_f64(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = values(Box::new(H5AdReader::open(&src, CHUNK).unwrap())).await;
+    for dtype in [DataType::F32, DataType::F64, DataType::I32, DataType::U32] {
+        let out = dir.path().join(format!("{dtype}.zarr"));
+        write_from_h5ad(&src, &out, dtype).await;
+        let z = ZarrAdReader::open(&out, CHUNK).unwrap();
+        assert_eq!(z.dtype(), dtype);
+        assert_eq!(values(Box::new(z)).await, want, "{dtype}");
+    }
+}
+
+/// Categoricals with more levels than int8 (int16) or int16 (int32) codes
+/// hold, a float column with a missing value (stored as NaN, so it reads back
+/// as NaN without a mask), nullable int64, and a column named `_index`, which
+/// is reserved and dropped.
+#[tokio::test]
+async fn writer_roundtrips_wide_categoricals_and_masked_columns() {
+    use crate::ir::{Column, ColumnData, ObsTable};
+    let n = 3;
+    let cat = |levels: usize| ColumnData::Categorical {
+        codes: vec![0, (levels - 1) as u32, 1],
+        levels: (0..levels).map(|i| format!("l{i}")).collect(),
+        ordered: false,
+    };
+    let obs = ObsTable {
+        index: (0..n).map(|i| format!("c{i}")).collect(),
+        columns: vec![
+            Column::new("wide16", cat(200)),
+            Column::new("wide32", cat(40_000)),
+            Column::with_missing(
+                "f",
+                ColumnData::Float(vec![1.0, 2.0, 3.0]),
+                vec![false, true, false],
+            ),
+            Column::with_missing(
+                "i64",
+                ColumnData::Int64(vec![5, 0, 7]),
+                vec![false, true, false],
+            ),
+            Column::new("_index", ColumnData::Int(vec![9, 9, 9])),
+        ],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("cats.zarr");
+    let mut w = ZarrAdWriter::create(&out, n, 0, crate::dtype::DataType::F32).unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_x_chunk(&MatrixChunk {
+        row_offset: 0,
+        nrows: n,
+        data: crate::ir::SparseMatrixCSR {
+            shape: (n, 0),
+            indptr: vec![0; n + 1],
+            indices: vec![],
+            data: crate::dtype::TypedVec::F32(vec![]),
+        },
+    })
+    .await
+    .unwrap();
+    w.finalize().await.unwrap();
+
+    let got = ZarrAdReader::open(&out, CHUNK)
+        .unwrap()
+        .obs()
+        .await
+        .unwrap();
+    let mut want = obs.clone();
+    want.columns.pop(); // `_index`
+    want.columns[2] = Column::new("f", ColumnData::Float(vec![1.0, f64::NAN, 3.0]));
+    assert_eq!(format!("{:?}", got.columns), format!("{:?}", want.columns));
+}
+
+/// Calls out of order are errors, not a corrupt store.
+#[tokio::test]
+async fn writer_rejects_misuse() {
+    use crate::dtype::DataType;
+    use crate::ir::{DenseMatrix, Embeddings};
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n);
+    assert!(ZarrAdWriter::create_at(p("a.zarr"), 1, 1, DataType::F32, "layers/").is_err());
+    assert!(ZarrAdWriter::create_at(p("b.zarr"), 1, 1, DataType::F32, "obsm/x").is_err());
+
+    let mut w = ZarrAdWriter::create_at(p("c.zarr"), 1, 1, DataType::F32, "layers/counts").unwrap();
+    let chunk = MatrixChunk {
+        row_offset: 0,
+        nrows: 1,
+        data: crate::ir::SparseMatrixCSR {
+            shape: (1, 1),
+            indptr: vec![0, 0],
+            indices: vec![],
+            data: crate::dtype::TypedVec::F32(vec![]),
+        },
+    };
+    assert!(
+        w.write_sparse_chunk(&chunk).await.is_err(),
+        "chunk before begin_sparse"
+    );
+    assert!(w.end_sparse().await.is_err(), "end before begin_sparse");
+    let mut bad = Embeddings::default();
+    bad.map.insert(
+        "X_bad".into(),
+        DenseMatrix {
+            shape: (1, 2),
+            data: vec![0.0],
+        },
+    );
+    assert!(
+        w.write_obsm(&bad).await.is_err(),
+        "1 value for a 1 x 2 matrix"
+    );
+    w.write_x_chunk(&chunk).await.unwrap();
+    w.finalize().await.unwrap();
+    assert!(w.write_x_chunk(&chunk).await.is_err(), "X after finalize");
+    assert!(w.finalize().await.is_err(), "finalize twice");
+    let z = ZarrAdReader::open(p("c.zarr"), CHUNK).unwrap();
+    assert_eq!(z.x_source(), "layers/counts");
 }
 
 /// Writing fewer rows than declared is an error, not a silently short store.
@@ -375,4 +537,105 @@ async fn row_range_stream_reads_only_its_indptr() {
         r.x_indptr().is_empty(),
         "an unreadable indptr is not a row pointer"
     );
+}
+
+/// `varied` holds what `small` lacks: dense int X, a CSC layer and obsp, a
+/// dense layer, int16..uint64 and float32 columns, float/int/bool and ordered
+/// categories, int obsm and every uns value type. Same contract as `small`.
+#[tokio::test]
+async fn varied_encodings_read_exactly_what_h5ad_reads() {
+    assert_same_as_h5ad("varied_v2.zarr", "varied.h5ad").await;
+    assert_same_as_h5ad("varied_v3.zarr", "varied.h5ad").await;
+}
+
+/// Without X the matrix comes from layers by h5ad's rules: the only layer, or
+/// counts/X among several; several without either is an error naming them.
+#[tokio::test]
+async fn without_x_layers_resolve_like_h5ad() {
+    assert_same_as_h5ad("nox_one_v3.zarr", "nox_one.h5ad").await;
+    let z = ZarrAdReader::open(fixture("nox_one_v3.zarr"), CHUNK).unwrap();
+    assert_eq!(z.x_source(), "layers/only");
+    let e = ZarrAdReader::open(fixture("nox_many_v3.zarr"), CHUNK)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(e.contains("multiple layers present (only, other)"), "{e}");
+    assert!(H5AdReader::open(fixture("nox_many.h5ad"), CHUNK).is_err());
+}
+
+/// X stored as CSC is refused with the one-line fix, not misread as CSR.
+#[test]
+fn csc_x_is_refused() {
+    let e = ZarrAdReader::open(fixture("csc_x_v3.zarr"), CHUNK)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(e.contains("stored as CSC") && e.contains("tocsr()"), "{e}");
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dst = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &dst);
+        } else {
+            std::fs::copy(e.path(), dst).unwrap();
+        }
+    }
+}
+
+/// Malformed stores fail with an error naming what is wrong; a dataframe
+/// column that is listed but missing, or in an encoding the reader doesn't
+/// know, is skipped rather than failing the whole frame.
+#[tokio::test]
+async fn malformed_stores_are_reported() {
+    use serde_json::{json, Map, Value};
+    let dir = tempfile::tempdir().unwrap();
+    // small_v3.zarr with the attributes of `node` edited.
+    let broken = |name: &str, node: &str, edit: &dyn Fn(&mut Map<String, Value>)| {
+        let p = dir.path().join(name);
+        copy_dir(&fixture("small_v3.zarr"), &p);
+        let f = p.join(node).join("zarr.json");
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        edit(v["attributes"].as_object_mut().unwrap());
+        std::fs::write(&f, v.to_string()).unwrap();
+        p
+    };
+    let err = |p: PathBuf| ZarrAdReader::open(p, CHUNK).err().unwrap().to_string();
+
+    let e = err(broken("root", "", &|a| {
+        a.insert("encoding-type".into(), json!("mudata"));
+    }));
+    assert!(e.contains("not an AnnData store"), "{e}");
+    let e = err(broken("shape", "X", &|a| {
+        a.insert("shape".into(), json!([60]));
+    }));
+    assert!(e.contains("bad X shape"), "{e}");
+    let e = err(broken("rows", "X", &|a| {
+        a.insert("shape".into(), json!([61, 40]));
+    }));
+    assert!(e.contains("X/indptr length 61 != n_obs+1 62"), "{e}");
+
+    let p = broken("cols", "obs", &|a| {
+        let order = a["column-order"].as_array_mut().unwrap();
+        order.push(json!("ghost"));
+        order.push(json!("weird"));
+    });
+    let weird = p.join("obs/weird");
+    std::fs::create_dir_all(&weird).unwrap();
+    std::fs::write(
+        weird.join("zarr.json"),
+        json!({"zarr_format": 3, "node_type": "group", "attributes": {}}).to_string(),
+    )
+    .unwrap();
+    let mut z = ZarrAdReader::open(&p, CHUNK).unwrap();
+    let mut h = H5AdReader::open(fixture("small.h5ad"), CHUNK).unwrap();
+    let names = |t: crate::ir::ObsTable| t.columns.into_iter().map(|c| c.name).collect::<Vec<_>>();
+    assert_eq!(names(z.obs().await.unwrap()), names(h.obs().await.unwrap()));
+
+    std::fs::remove_dir_all(p.join("obs")).unwrap();
+    let e = z.obs().await.err().unwrap().to_string();
+    assert!(e.contains("missing dataframe obs"), "{e}");
 }

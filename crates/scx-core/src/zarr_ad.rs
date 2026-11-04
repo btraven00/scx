@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use zarrs::array::{data_type as zdt, Array, ElementOwned};
 use zarrs::filesystem::FilesystemStore;
 use zarrs::group::Group;
@@ -229,12 +229,18 @@ fn get<T: ElementOwned>(arr: &ZArray, sub: Vec<Range<u64>>) -> Result<Vec<T>> {
         .map_err(|e| zerr(arr.path().as_str(), e))
 }
 
-/// Read a numeric (or bool) array as `f64`, converting from its stored type.
+/// Read a numeric (or bool) array as `$out`, converting from its stored
+/// type: `$name` the whole array or a range of a 1-D one, `$sub` any subset
+/// (row-major).
 macro_rules! read_numeric {
-    ($name:ident, $out:ty) => {
+    ($name:ident, $sub:ident, $out:ty) => {
         fn $name(arr: &ZArray, range: Option<Range<usize>>) -> Result<Vec<$out>> {
+            $sub(arr, subset(arr, range))
+        }
+
+        #[allow(dead_code)]
+        fn $sub(arr: &ZArray, s: Vec<Range<u64>>) -> Result<Vec<$out>> {
             let dt = arr.data_type();
-            let s = subset(arr, range);
             Ok(if *dt == zdt::float32() {
                 get::<f32>(arr, s)?.into_iter().map(|x| x as $out).collect()
             } else if *dt == zdt::float64() {
@@ -269,9 +275,9 @@ macro_rules! read_numeric {
         }
     };
 }
-read_numeric!(read_f64, f64);
-read_numeric!(read_i64, i64);
-read_numeric!(read_u64, u64);
+read_numeric!(read_f64, read_f64_subset, f64);
+read_numeric!(read_i64, read_i64_subset, i64);
+read_numeric!(read_u64, read_u64_subset, u64);
 
 fn read_strings(arr: &ZArray) -> Result<Vec<String>> {
     get::<String>(arr, subset(arr, None))
@@ -293,16 +299,23 @@ fn is_float(arr: &ZArray) -> bool {
     *arr.data_type() == zdt::float32() || *arr.data_type() == zdt::float64()
 }
 
-/// Same mapping as h5ad's `ad_detect_dtype`.
+/// Same mapping as h5ad's (`h5::value_dtype`): integers of any width are I32
+/// (signed) or U32 (unsigned, and bool).
 fn detect_dtype(arr: &ZArray) -> DataType {
     let dt = arr.data_type();
-    if *dt == zdt::float32() {
-        DataType::F32
-    } else if *dt == zdt::float64() {
+    if *dt == zdt::float64() {
         DataType::F64
-    } else if *dt == zdt::int32() || *dt == zdt::int64() {
-        DataType::I32 // i64 → i32 (counts fit)
-    } else if *dt == zdt::uint32() {
+    } else if [zdt::int8(), zdt::int16(), zdt::int32(), zdt::int64()].contains(dt) {
+        DataType::I32
+    } else if [
+        zdt::uint8(),
+        zdt::uint16(),
+        zdt::uint32(),
+        zdt::uint64(),
+        zdt::bool(),
+    ]
+    .contains(dt)
+    {
         DataType::U32
     } else {
         DataType::F32
@@ -420,28 +433,6 @@ fn read_dense_chunk(
         row_offset: rows.start,
         nrows: rows.len(),
         data: dense_to_csr(&vals, n_cols, dtype),
-    })
-}
-
-/// A 2-D subset as row-major f64 (read_f64 with an explicit multi-dim subset).
-fn read_f64_subset(arr: &ZArray, sub: Vec<Range<u64>>) -> Result<Vec<f64>> {
-    let dt = arr.data_type();
-    Ok(if *dt == zdt::float64() {
-        get::<f64>(arr, sub)?
-    } else if *dt == zdt::float32() {
-        get::<f32>(arr, sub)?.into_iter().map(f64::from).collect()
-    } else if *dt == zdt::int32() {
-        get::<i32>(arr, sub)?.into_iter().map(f64::from).collect()
-    } else if *dt == zdt::int64() {
-        get::<i64>(arr, sub)?
-            .into_iter()
-            .map(|x| x as f64)
-            .collect()
-    } else {
-        return Err(zerr(
-            arr.path().as_str(),
-            format!("unsupported dense dtype {dt:?}"),
-        ));
     })
 }
 
@@ -704,32 +695,30 @@ fn walk_group(store: &Store, path: &str) -> Value {
 }
 
 fn array_to_json(arr: &ZArray) -> Result<Value> {
+    // As h5_json::dataset_json: bools, ints, unsigned ints, floats and strings,
+    // any shape (flattened, row-major); a 0-D array is a scalar, and so is a
+    // one-element string array.
+    fn vec_or_scalar<T: serde::Serialize>(scalar: bool, v: Vec<T>) -> Value {
+        if scalar {
+            v.into_iter().next().map_or(Value::Null, |x| json!(x))
+        } else {
+            json!(v)
+        }
+    }
     let scalar = arr.shape().is_empty();
-    if is_string(arr) {
-        let mut v = read_strings(arr)?;
-        return Ok(if scalar || v.len() == 1 {
-            Value::String(v.pop().unwrap_or_default())
-        } else {
-            Value::from(v)
-        });
-    }
-    if arr.shape().len() > 1 || *arr.data_type() == zdt::bool() {
-        return Ok(Value::Null); // as h5ad: only scalars and 1-D numbers/strings
-    }
-    Ok(if is_float(arr) {
-        let v = read_f64(arr, None)?;
-        if scalar {
-            Value::from(v[0])
-        } else {
-            Value::from(v)
-        }
+    let dt = arr.data_type();
+    let unsigned = [zdt::uint8(), zdt::uint16(), zdt::uint32(), zdt::uint64()].contains(dt);
+    Ok(if is_string(arr) {
+        let v = read_strings(arr)?;
+        vec_or_scalar(scalar || v.len() == 1, v)
+    } else if *dt == zdt::bool() {
+        vec_or_scalar(scalar, read_bools(arr)?)
+    } else if is_float(arr) {
+        vec_or_scalar(scalar, read_f64(arr, None)?)
+    } else if unsigned {
+        vec_or_scalar(scalar, read_u64(arr, None)?)
     } else {
-        let v = read_i64(arr, None)?;
-        if scalar {
-            Value::from(v[0])
-        } else {
-            Value::from(v)
-        }
+        vec_or_scalar(scalar, read_i64(arr, None)?)
     })
 }
 

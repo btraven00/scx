@@ -484,43 +484,35 @@ impl Growable {
 /// One CSR group being streamed.
 struct CsrState {
     path: String,
-    data: Growable,
+    /// Created at begin when the value type is fixed (X), else at the first
+    /// chunk, in that chunk's type (layers, obsp: as the h5ad writer).
+    data: Option<Growable>,
     indices: Growable,
-    dtype: DataType,
+    dtype: Option<DataType>,
     indptr: Vec<u64>,
 }
 
+fn create_data(store: &Store, path: &str, dtype: DataType) -> Result<Growable> {
+    let path = format!("{path}/data");
+    match dtype {
+        DataType::F32 => Growable::create(store, &path, zdt::float32(), FillValue::from(0f32)),
+        DataType::F64 => Growable::create(store, &path, zdt::float64(), FillValue::from(0f64)),
+        DataType::I32 => Growable::create(store, &path, zdt::int32(), FillValue::from(0i32)),
+        DataType::U32 => Growable::create(store, &path, zdt::uint32(), FillValue::from(0u32)),
+    }
+}
+
 impl CsrState {
-    fn begin(store: &Store, path: &str, shape: (usize, usize), dtype: DataType) -> Result<Self> {
+    fn begin(
+        store: &Store,
+        path: &str,
+        shape: (usize, usize),
+        dtype: Option<DataType>,
+    ) -> Result<Self> {
         let mut attrs = encoding("csr_matrix", "0.1.0");
         attrs.insert("shape".into(), json!([shape.0, shape.1]));
         create_group(store, path, attrs)?;
-        let data = match dtype {
-            DataType::F32 => Growable::create(
-                store,
-                &format!("{path}/data"),
-                zdt::float32(),
-                FillValue::from(0f32),
-            )?,
-            DataType::F64 => Growable::create(
-                store,
-                &format!("{path}/data"),
-                zdt::float64(),
-                FillValue::from(0f64),
-            )?,
-            DataType::I32 => Growable::create(
-                store,
-                &format!("{path}/data"),
-                zdt::int32(),
-                FillValue::from(0i32),
-            )?,
-            DataType::U32 => Growable::create(
-                store,
-                &format!("{path}/data"),
-                zdt::uint32(),
-                FillValue::from(0u32),
-            )?,
-        };
+        let data = dtype.map(|d| create_data(store, path, d)).transpose()?;
         let indices = Growable::create(
             store,
             &format!("{path}/indices"),
@@ -536,18 +528,23 @@ impl CsrState {
         })
     }
 
-    fn append(&mut self, chunk: &MatrixChunk) -> Result<()> {
+    fn append(&mut self, store: &Store, chunk: &MatrixChunk) -> Result<()> {
         let csr: &SparseMatrixCSR = &chunk.data;
+        let dtype = *self.dtype.get_or_insert(csr.data.dtype());
+        let data = match &mut self.data {
+            Some(d) => d,
+            None => self.data.insert(create_data(store, &self.path, dtype)?),
+        };
         if !csr.indices.is_empty() {
-            match (&csr.data, self.dtype) {
-                (TypedVec::F32(v), DataType::F32) => self.data.append(v)?,
-                (TypedVec::F64(v), DataType::F64) => self.data.append(v)?,
-                (TypedVec::I32(v), DataType::I32) => self.data.append(v)?,
-                (TypedVec::U32(v), DataType::U32) => self.data.append(v)?,
-                (v, DataType::F32) => self.data.append(&cast(v, |x| x as f32))?,
-                (v, DataType::F64) => self.data.append(&cast(v, |x| x))?,
-                (v, DataType::I32) => self.data.append(&cast(v, |x| x as i32))?,
-                (v, DataType::U32) => self.data.append(&cast(v, |x| x as u32))?,
+            match (&csr.data, dtype) {
+                (TypedVec::F32(v), DataType::F32) => data.append(v)?,
+                (TypedVec::F64(v), DataType::F64) => data.append(v)?,
+                (TypedVec::I32(v), DataType::I32) => data.append(v)?,
+                (TypedVec::U32(v), DataType::U32) => data.append(v)?,
+                (v, DataType::F32) => data.append(&cast(v, |x| x as f32))?,
+                (v, DataType::F64) => data.append(&cast(v, |x| x))?,
+                (v, DataType::I32) => data.append(&cast(v, |x| x as i32))?,
+                (v, DataType::U32) => data.append(&cast(v, |x| x as u32))?,
             }
             let idx: Vec<i32> = csr.indices.iter().map(|&i| i as i32).collect();
             self.indices.append(&idx)?;
@@ -559,7 +556,12 @@ impl CsrState {
     }
 
     fn end(self, store: &Store) -> Result<u64> {
-        self.data.finish()?;
+        // No chunks: an empty matrix still needs its data array.
+        let data = match self.data {
+            Some(d) => d,
+            None => create_data(store, &self.path, DataType::F32)?,
+        };
+        data.finish()?;
         self.indices.finish()?;
         write_indptr(store, &format!("{}/indptr", self.path), &self.indptr)?;
         Ok(*self.indptr.last().unwrap())
@@ -615,7 +617,7 @@ impl ZarrAdWriter {
                 "x_path must be \"X\" or \"layers/<name>\", got {x_path:?}"
             )));
         }
-        let x = CsrState::begin(&store, x_path, (n_obs, n_vars), dtype)?;
+        let x = CsrState::begin(&store, x_path, (n_obs, n_vars), Some(dtype))?;
         Ok(Self {
             store,
             n_obs,
@@ -669,12 +671,10 @@ impl DatasetWriter for ZarrAdWriter {
         meta: &SparseMatrixMeta,
     ) -> Result<()> {
         self.dict_group(group_prefix)?;
-        // The value type is fixed at begin; chunks are cast to it. The X dtype
-        // is the one the reader reports, which is what every layer is too in
-        // practice (counts next to normalised data are both f32).
-        let dtype = self.x.as_ref().map_or(DataType::F32, |x| x.dtype);
+        // The value type is the first chunk's, as in the h5ad writer: a float
+        // layer next to an int X stays float.
         let path = format!("{group_prefix}/{name}");
-        self.sparse = Some(CsrState::begin(&self.store, &path, meta.shape, dtype)?);
+        self.sparse = Some(CsrState::begin(&self.store, &path, meta.shape, None)?);
         Ok(())
     }
 
@@ -682,7 +682,7 @@ impl DatasetWriter for ZarrAdWriter {
         let state = self.sparse.as_mut().ok_or_else(|| {
             ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into())
         })?;
-        state.append(chunk)
+        state.append(&self.store, chunk)
     }
 
     async fn end_sparse(&mut self) -> Result<()> {
@@ -697,7 +697,7 @@ impl DatasetWriter for ZarrAdWriter {
             .x
             .as_mut()
             .ok_or_else(|| ScxError::InvalidFormat("write_x_chunk after finalize".into()))?;
-        x.append(chunk)
+        x.append(&self.store, chunk)
     }
 
     async fn finalize(&mut self) -> Result<()> {
