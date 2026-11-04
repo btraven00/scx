@@ -174,6 +174,19 @@ fn output_hash_flag_picks_sidecar_hash() {
                 .starts_with("sha256:"),
             "{extra:?}: {side}"
         );
+        // The hash is of the output file's bytes, in lowercase hex.
+        let want_hash = match want {
+            Some("blake3:") => Some(format!(
+                "blake3:{}",
+                blake3::hash(&std::fs::read(&out).unwrap()).to_hex()
+            )),
+            Some(_) => Some(format!(
+                "sha256:{}",
+                scx_core::provenance::sha256_file(&out).unwrap()
+            )),
+            None => None,
+        };
+        assert_eq!(got.map(str::to_string), want_hash, "{extra:?}");
     }
 }
 
