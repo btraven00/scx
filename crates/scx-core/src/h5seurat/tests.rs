@@ -879,3 +879,73 @@ async fn dgcmatrix_copies_h5ad_csr_as_stored() {
         }
     }
 }
+
+/// A dgCMatrix row-range stream reads only its cells' part of the column
+/// pointer (see the h5ad reader's test of the same name). The last `indptr`
+/// entry is negative, which any read of it rejects: cells 0..3 still stream,
+/// while the whole-matrix stream, which does read it, fails.
+#[tokio::test]
+async fn row_range_stream_reads_only_its_indptr() {
+    let (n_obs, n_vars) = (4usize, 3usize);
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let out = tmp.path();
+    let mut w =
+        H5SeuratWriter::create(out, n_obs, n_vars, DataType::F32, None, None, None, false).unwrap();
+    w.write_obs(&ObsTable {
+        index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+        columns: vec![],
+    })
+    .await
+    .unwrap();
+    w.write_var(&VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    })
+    .await
+    .unwrap();
+    w.write_obsm(&Embeddings::default()).await.unwrap();
+    w.write_uns(&UnsTable::default()).await.unwrap();
+    w.write_x_chunk(&MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr: vec![0, 1, 3, 3, 4],
+            indices: vec![2, 0, 1, 0],
+            data: TypedVec::F32(vec![1.0, 2.0, 3.0, 4.0]),
+        },
+    })
+    .await
+    .unwrap();
+    w.finalize().await.unwrap();
+    drop(w);
+    {
+        let f = File::open_rw(out).unwrap();
+        f.unlink("assays/RNA/counts/indptr").unwrap();
+        f.group("assays/RNA/counts")
+            .unwrap()
+            .new_dataset::<i32>()
+            .shape(5)
+            .create("indptr")
+            .unwrap()
+            .write(&Array1::from_vec(vec![0i32, 1, 3, 3, -1]))
+            .unwrap();
+    }
+
+    let mut r = H5SeuratReader::open(out, 10, None, None).unwrap();
+    let mut s = r.x_stream_rows(vec![1..2, 0..1, 2..3]);
+    let c = s.next().await.unwrap().unwrap();
+    assert!(s.next().await.is_none());
+    drop(s);
+    assert_eq!((c.row_offset, c.nrows), (0, 3));
+    assert_eq!(c.data.indptr, vec![0, 1, 3, 3]);
+    assert_eq!(c.data.indices, vec![2, 0, 1]);
+    assert_eq!(c.data.data.to_f64(), vec![1.0, 2.0, 3.0]);
+
+    let err = r.x_stream().next().await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("negative index -1"), "{err}");
+    assert!(
+        r.x_indptr().is_empty(),
+        "an unreadable indptr is not a row pointer"
+    );
+}

@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use futures::stream::{self};
 use hdf5::types::{IntSize, TypeDescriptor, VarLenUnicode};
 use hdf5::File;
 
-use crate::h5::{read_csr_rows, read_u64, value_dtype, CsrReader};
+use crate::h5::{read_csr_rows, read_u64, read_u64_range, value_dtype, CsrReader};
 use crate::h5_str::{read_str_1d, read_str_attr, read_strings};
 use crate::stream::ChunkStream;
-use crate::stream::{normalize_ranges, row_chunks, row_range_chunks};
+use crate::stream::{
+    error_stream, load_indptr, normalize_ranges, read_block, row_chunks, row_range_chunks,
+    stream_indptr,
+};
 use crate::{
     dtype::DataType,
     error::{Result, ScxError},
@@ -40,7 +44,13 @@ use crate::{
 ///
 /// The sparse matrix is CSC (gene-major). We stream it as cell-major CSR chunks.
 enum XBackend {
-    DgCMatrix { indptr: Vec<u64>, dtype: DataType },
+    /// `indptr` is the CSC column pointer of the genes x cells matrix, i.e.
+    /// a CSR row pointer over cells (n_obs + 1 entries), read on first need:
+    /// a row-range stream reads just its cells' part.
+    DgCMatrix {
+        indptr: OnceLock<Vec<u64>>,
+        dtype: DataType,
+    },
     BpCells,
 }
 
@@ -109,19 +119,20 @@ impl H5SeuratReader {
         let x_backend = if crate::h5bpcells::probe_bpcells_version(&file, &dims_path).is_some() {
             XBackend::BpCells
         } else {
-            let indptr_ds_path = format!("{dims_path}/indptr");
-            let indptr = read_u64(&file.dataset(&indptr_ds_path)?)?;
-            if indptr.len() != n_obs + 1 {
+            let len = file.dataset(&format!("{dims_path}/indptr"))?.size();
+            if len != n_obs + 1 {
                 return Err(ScxError::InvalidFormat(format!(
-                    "indptr length {} != n_obs+1 {}",
-                    indptr.len(),
+                    "indptr length {len} != n_obs+1 {}",
                     n_obs + 1
                 )));
             }
 
             let data_ds_path = format!("{dims_path}/data");
             let dtype = value_dtype(&file.dataset(&data_ds_path)?)?;
-            XBackend::DgCMatrix { indptr, dtype }
+            XBackend::DgCMatrix {
+                indptr: OnceLock::new(),
+                dtype,
+            }
         };
 
         Ok(Self {
@@ -133,6 +144,11 @@ impl H5SeuratReader {
             chunk_size,
             x_backend,
         })
+    }
+
+    /// The whole dgCMatrix column (cell) pointer.
+    fn read_indptr(&self) -> Result<Vec<u64>> {
+        read_u64(&File::open(&self.path)?.dataset(&format!("{}/indptr", self.x_path))?)
     }
 }
 
@@ -709,7 +725,12 @@ pub fn open_h5seurat<P: AsRef<Path>>(
 impl DatasetReader for H5SeuratReader {
     fn x_indptr(&self) -> &[u64] {
         match &self.x_backend {
-            XBackend::DgCMatrix { indptr, .. } => indptr.as_slice(),
+            // ponytail: the trait can't return an error; streaming X reports it.
+            XBackend::DgCMatrix { indptr, .. } => load_indptr(indptr, || self.read_indptr())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("{}/indptr: {e}", self.x_path);
+                    &[]
+                }),
             XBackend::BpCells => &[],
         }
     }
@@ -869,18 +890,28 @@ impl DatasetReader for H5SeuratReader {
                 let chunk_size = self.chunk_size;
                 let dtype = *dtype;
                 let whole = normalize_ranges(ranges.clone()) == [0..n_obs];
+                let full = match stream_indptr(indptr, whole, || self.read_indptr()) {
+                    Ok(full) => full,
+                    Err(e) => return error_stream(e.to_string()),
+                };
                 // Opened on the first block, kept for the stream; the file
                 // stays open beside its datasets.
-                let mut open: Option<(File, CsrReader)> = None;
+                let mut open: Option<(File, hdf5::Dataset, CsrReader)> = None;
 
                 row_range_chunks(n_obs, ranges, chunk_size, move |rows| {
                     if open.is_none() {
                         let file = File::open(&path)?;
+                        let ip = file.dataset(&format!("{x_path}/indptr"))?;
                         let csr = CsrReader::open(&file, &x_path, dtype, whole)?;
-                        open = Some((file, csr));
+                        open = Some((file, ip, csr));
                     }
-                    let (_, csr) = open.as_ref().expect("opened above");
-                    csr.rows(indptr, rows, n_vars)
+                    let (_, ip, csr) = open.as_ref().expect("opened above");
+                    read_block(
+                        full,
+                        rows,
+                        |part| read_u64_range(ip, part),
+                        |ip, rows| csr.rows(ip, rows, n_vars),
+                    )
                 })
             }
             XBackend::BpCells => {
