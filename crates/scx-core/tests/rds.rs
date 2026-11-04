@@ -258,3 +258,160 @@ fn url_without_net_feature_says_so() {
         .unwrap();
     assert!(err.to_string().contains("without network support"), "{err}");
 }
+
+/// Base R objects a Seurat object can carry (closures in its commands,
+/// environments, ALTREP vectors, complex and raw vectors, latin1 strings)
+/// parse in every container R writes: format version 3, version 2 and `.rda`
+/// (scripts/make_rds_zoo_fixtures.R). An ASCII save is refused by name.
+#[test]
+fn any_base_r_object_parses() {
+    for (name, pad) in [("zoo.rds", ""), ("zoo_v2.rds", ""), ("zoo.rda", "  ")] {
+        let t = scx_core::rds::tree(&tiny(name), 3).unwrap();
+        for line in [
+            "$intseq: int[5]",
+            "$realseq: num[3] [2147483648.0, 2147483649.0, 2147483650.0]",
+            "$wrap_real: num[3] [1.0, 2.0, 3.0]",
+            "$wrap_int: int[3] [1, 2, 3]",
+            "$latin1: chr[1] [\"café\"]",
+            "$strs: chr[2] [\"a\", \"NA\"]",
+            "$fn: list[2]",
+            "... 6 more elements",
+        ] {
+            assert!(t.contains(&format!("  {pad}{line}")), "{name}: {line}\n{t}");
+        }
+    }
+    let e = scx_core::rds::tree(&tiny("zoo_ascii.rds"), 3)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("ASCII"), "{e}");
+}
+
+/// big_*: past the parser's LAZY_MIN, so @i, @x and meta.data are fetched from
+/// the stream after parsing, the path real files take. Every value follows a
+/// formula in scripts/make_tiny_fixtures_rds.R, recomputed here per cell; the
+/// v5 object is split by batch, so rows are matched by cell name. A complex
+/// and a list column are skipped.
+fn check_big(name: &str) {
+    use scx_core::ir::ColumnData;
+    let mut r = block_on(open(tiny(name).to_str().unwrap(), &OpenOptions::new(700))).unwrap();
+    assert_eq!(r.shape(), (5000, 6), "{name}");
+    let obs = block_on(r.obs()).unwrap();
+    let ks: Vec<usize> = obs.index.iter().map(|c| c[1..].parse().unwrap()).collect();
+
+    let mut rows = 0;
+    for c in block_on(r.x_stream().collect::<Vec<_>>()) {
+        let c = c.unwrap();
+        let data = match &c.data.data {
+            TypedVec::F64(v) => v,
+            other => panic!("{name}: X is {:?}", other.dtype()),
+        };
+        for i in 0..c.nrows {
+            let k = ks[c.row_offset + i];
+            let (a, b) = (c.data.indptr[i] as usize, c.data.indptr[i + 1] as usize);
+            let got: Vec<(u32, f64)> = (a..b).map(|j| (c.data.indices[j], data[j])).collect();
+            let want: Vec<(u32, f64)> = (0..6u32)
+                .map(|g| (g, ((7 * k + 3 * g as usize) % 5) as f64))
+                .filter(|&(_, v)| v != 0.0)
+                .collect();
+            assert_eq!(got, want, "{name}: cell c{k}");
+        }
+        rows += c.nrows;
+    }
+    assert_eq!(rows, 5000, "{name}");
+
+    let col = |n: &str| {
+        obs.columns
+            .iter()
+            .find(|c| c.name == n)
+            .unwrap_or_else(|| panic!("{name}: no column {n}"))
+    };
+    let missing = |n: &str, i: usize| col(n).mask.as_ref().is_some_and(|m| !m[i]);
+    for skipped in ["cplx", "lst"] {
+        assert!(
+            obs.columns.iter().all(|c| c.name != skipped),
+            "{name}: {skipped}"
+        );
+    }
+    for (i, &k) in ks.iter().enumerate() {
+        let at = format!("{name}: c{k}");
+        assert_eq!(missing("grp", i), k % 50 == 0, "{at} grp");
+        assert_eq!(missing("score", i), k % 40 == 0, "{at} score");
+        assert_eq!(missing("n", i), k % 30 == 0, "{at} n");
+        assert_eq!(missing("flag", i), k % 60 == 0, "{at} flag");
+        assert_eq!(missing("label", i), k % 70 == 0, "{at} label");
+        if let ColumnData::Categorical { codes, levels, .. } = &col("grp").data {
+            if k % 50 != 0 {
+                assert_eq!(levels[codes[i] as usize], ["a", "b", "c"][k % 3], "{at}");
+            }
+        } else {
+            panic!("{at}: grp is not categorical");
+        }
+        match (
+            &col("score").data,
+            &col("n").data,
+            &col("flag").data,
+            &col("label").data,
+        ) {
+            (
+                ColumnData::Float(s),
+                ColumnData::Int(n),
+                ColumnData::Bool(f),
+                ColumnData::String(l),
+            ) => {
+                if k % 40 != 0 {
+                    assert_eq!(s[i], k as f64 / 4.0, "{at}");
+                }
+                if k % 30 != 0 {
+                    assert_eq!(n[i], k as i32, "{at}");
+                }
+                if k % 60 != 0 {
+                    assert_eq!(f[i], k % 2 == 0, "{at}");
+                }
+                if k % 70 != 0 {
+                    assert_eq!(l[i], format!("s{k}"), "{at}");
+                }
+            }
+            other => panic!("{at}: column types {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn large_seurat_v4_read_from_the_stream() {
+    check_big("big_v4.rds");
+}
+
+#[test]
+fn large_seurat_v5_split_read_from_the_stream() {
+    check_big("big_v5_split.rds");
+}
+
+/// A `.rda` holds a pairlist of saved variables; the Seurat object is found
+/// among them.
+#[test]
+fn seurat_object_found_in_rda() {
+    check_big("big_v4.rda");
+}
+
+/// What can't be read says what it is: a list that holds no Seurat object is
+/// described by its elements, and a dense (non-dgCMatrix) layer is named.
+#[test]
+fn unreadable_objects_are_described() {
+    let err = |name: &str| {
+        scx_core::rds::RdsSeuratReader::open(&tiny(name), 4, None, None)
+            .err()
+            .unwrap()
+            .to_string()
+    };
+    let e = err("zoo.rds");
+    assert!(
+        e.contains("not a Seurat object; the file holds a list of 18 (intseq: integer vector, realseq: numeric vector")
+            && e.contains("+10 more"),
+        "{e}"
+    );
+    let e = err("tiny_v5_dense.rds");
+    assert!(
+        e.contains("layer 'counts'") && e.contains("only dgCMatrix layers"),
+        "{e}"
+    );
+}

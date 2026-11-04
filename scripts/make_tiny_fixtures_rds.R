@@ -44,6 +44,52 @@ v5 <- make("v5")
 stopifnot(class(v5[["RNA"]]) == "Assay5")
 saveRDS(v5, file.path(dir, "tiny_v5.rds"))
 
+# A dense counts layer, which the reader refuses (dgCMatrix layers only).
+dense5 <- v5
+LayerData(dense5, "counts") <- as.matrix(LayerData(dense5, "counts"))
+saveRDS(dense5, file.path(dir, "tiny_v5_dense.rds"))
+
 split5 <- split(v5, f = v5$donor)
 stopifnot(length(Layers(split5, search = "counts")) == 2)
 saveRDS(split5, file.path(dir, "tiny_v5_split.rds"))
+
+# big_*: larger than the parser's LAZY_MIN (4096 elements), so the reader takes
+# the path real files take: @i, @x and the meta.data columns are left in the
+# stream and fetched later. Values follow formulas the Rust test recomputes
+# (crates/scx-core/tests/rds.rs), for cell k and gene g (0-based):
+#   X[k, g] = (7k + 3g) %% 5, zeros not stored
+#   grp = c("a","b","c")[k %% 3 + 1], NA when k %% 50 == 0
+#   score = k / 4, NA when k %% 40 == 0;  n = k, NA when k %% 30 == 0
+#   flag = k %% 2 == 0, NA when k %% 60 == 0;  label = "s<k>", NA when k %% 70 == 0
+#   batch = k %% 2 (the v5 object is split by it)
+# plus a complex and a list column, which the reader skips.
+nc <- 5000; ng <- 6
+k <- 0:(nc - 1)
+vals <- outer(k, 0:(ng - 1), function(k, g) (7 * k + 3 * g) %% 5) # cells x genes
+big_counts <- as(Matrix(t(vals) * 1.0, sparse = TRUE), "dgCMatrix")
+dimnames(big_counts) <- list(paste0("g", 0:(ng - 1)), paste0("c", k))
+na_at <- function(x, m) { x[k %% m == 0] <- NA; x }
+big_meta <- data.frame(
+  grp = na_at(factor(c("a", "b", "c")[k %% 3 + 1], levels = c("a", "b", "c")), 50),
+  score = na_at(k / 4, 40),
+  n = na_at(as.integer(k), 30),
+  flag = na_at(k %% 2 == 0, 60),
+  label = na_at(paste0("s", k), 70),
+  batch = factor(k %% 2),
+  row.names = paste0("c", k)
+)
+make_big <- function(assay_version) {
+  options(Seurat.object.assay.version = assay_version)
+  o <- CreateSeuratObject(counts = big_counts, meta.data = big_meta, min.cells = 0, min.features = 0)
+  o@meta.data$cplx <- complex(real = k, imaginary = 1)
+  o@meta.data$lst <- I(as.list(k))
+  o
+}
+big4 <- make_big("v3")
+saveRDS(big4, file.path(dir, "big_v4.rds"))
+big5 <- make_big("v5")
+big5 <- split(big5, f = big5$batch)
+stopifnot(length(Layers(big5, search = "counts")) == 2)
+saveRDS(big5, file.path(dir, "big_v5_split.rds"))
+note <- "saved next to the object"
+save(note, big4, file = file.path(dir, "big_v4.rda"))
