@@ -1040,3 +1040,322 @@ fn test_export_unknown_slot_fails() {
         out_csv.to_str().unwrap(),
     ]));
 }
+
+// ---------------------------------------------------------------------------
+// scx merge — every slot group, the YAML config, and the errors
+// ---------------------------------------------------------------------------
+
+/// Every slot group's patchable entry, as a merge selector.
+const ALL_SLOTS: [&str; 7] = [
+    "obs/score",
+    "var/gene_score",
+    "obsm/X_emb",
+    "varm/PCs",
+    "obsp/conn",
+    "uns/note",
+    "layers/norm",
+];
+
+/// An h5ad with one entry in every slot group; the obs/var/obsm/varm/uns
+/// values are scaled by `k`, so two patches can be told apart.
+fn make_full_patch(path: &Path, n_obs: usize, n_vars: usize, k: f64) {
+    futures::executor::block_on(async {
+        let col = |n: usize| ColumnData::Float((0..n).map(|i| i as f64 * k).collect());
+        let dense = |rows: usize| DenseMatrix {
+            shape: (rows, 2),
+            data: (0..rows * 2).map(|i| i as f64 * k).collect(),
+        };
+        let obs = ObsTable {
+            index: (0..n_obs).map(|i| format!("cell_{i}")).collect(),
+            columns: vec![Column::new("score", col(n_obs))],
+        };
+        let var = VarTable {
+            index: (0..n_vars).map(|i| format!("gene_{i}")).collect(),
+            columns: vec![Column::new("gene_score", col(n_vars))],
+        };
+        let mut obsm = Embeddings::default();
+        obsm.map.insert("X_emb".into(), dense(n_obs));
+        let mut varm = Varm::default();
+        varm.map.insert("PCs".into(), dense(n_vars));
+        let mut w = H5AdWriter::create(path, n_obs, n_vars, DataType::F32).unwrap();
+        w.write_obs(&obs).await.unwrap();
+        w.write_var(&var).await.unwrap();
+        w.write_obsm(&obsm).await.unwrap();
+        w.write_varm(&varm).await.unwrap();
+        w.write_uns(&UnsTable {
+            raw: serde_json::json!({ "note": k }),
+        })
+        .await
+        .unwrap();
+        w.write_x_chunk(&diag_chunk(n_obs, n_vars)).await.unwrap();
+        w.finalize().await.unwrap();
+        drop(w);
+
+        let mut w = H5AdWriter::open_for_append(path).unwrap();
+        for (group, name, cols) in [("layers", "norm", n_vars), ("obsp", "conn", n_obs)] {
+            let (indptr, indices, data) = diag_sparse(n_obs, cols);
+            let meta = SparseMatrixMeta {
+                name: name.into(),
+                shape: (n_obs, cols),
+                indptr: indptr.clone(),
+            };
+            w.begin_sparse(group, name, &meta).await.unwrap();
+            w.write_sparse_chunk(&MatrixChunk {
+                row_offset: 0,
+                nrows: n_obs,
+                data: SparseMatrixCSR {
+                    shape: (n_obs, cols),
+                    indptr,
+                    indices,
+                    data: TypedVec::F32(data),
+                },
+            })
+            .await
+            .unwrap();
+            w.end_sparse().await.unwrap();
+        }
+    });
+}
+
+/// The scale `k` each patched slot of `out` carries (every slot must agree),
+/// and that the layer and obsp are there.
+fn patched_scale(out: &Path) -> f64 {
+    with_hdf5(|| {
+        futures::executor::block_on(async {
+            let mut r = H5AdReader::open(out, 5).unwrap();
+            let float = |c: &ColumnData| match c {
+                ColumnData::Float(v) => v[1],
+                other => panic!("not a float column: {other:?}"),
+            };
+            let obs = r.obs().await.unwrap();
+            let var = r.var().await.unwrap();
+            let col =
+                |cols: &[Column], n: &str| float(&cols.iter().find(|c| c.name == n).unwrap().data);
+            let ks = [
+                col(&obs.columns, "score"),
+                col(&var.columns, "gene_score"),
+                r.obsm().await.unwrap().map["X_emb"].data[1],
+                r.varm().await.unwrap().map["PCs"].data[1],
+                r.uns().await.unwrap().raw["note"].as_f64().unwrap(),
+            ];
+            assert!(ks.iter().all(|&k| k == ks[0]), "slots disagree: {ks:?}");
+            let names =
+                |m: Vec<SparseMatrixMeta>| m.into_iter().map(|m| m.name).collect::<Vec<_>>();
+            assert_eq!(names(r.layer_metas().await.unwrap()), ["norm"]);
+            assert_eq!(names(r.obsp_metas().await.unwrap()), ["conn"]);
+            ks[0]
+        })
+    })
+}
+
+/// A YAML config drives a create-mode merge of every slot group, with tags;
+/// appending the same slots then keeps them (skip) or replaces them with the
+/// second patch's (overwrite), for every slot group.
+#[test]
+fn test_merge_every_slot_from_config_then_skip_and_overwrite() {
+    let dir = TempDir::new().unwrap();
+    let p = |n: &str| dir.path().join(n);
+    with_hdf5(|| {
+        make_base_h5ad(&p("base.h5ad"), 6, 4);
+        make_full_patch(&p("one.h5ad"), 6, 4, 1.0);
+        make_full_patch(&p("two.h5ad"), 6, 4, 2.0);
+    });
+    let slots = ALL_SLOTS.map(|s| format!("\"{s}\"")).join(", ");
+    std::fs::write(
+        p("merge.yaml"),
+        format!(
+            "base: {}\noutput: {}\non_conflict: error\npatches:\n  - source: {}\n    slots: [{slots}]\ntags:\n  run: config\n",
+            p("base.h5ad").display(),
+            p("out.h5ad").display(),
+            p("one.h5ad").display(),
+        ),
+    )
+    .unwrap();
+    assert_success(&scx(&[
+        "merge",
+        "--config",
+        p("merge.yaml").to_str().unwrap(),
+    ]));
+    assert_eq!(patched_scale(&p("out.h5ad")), 1.0);
+    let tags = with_hdf5(|| {
+        futures::executor::block_on(async {
+            let uns = H5AdReader::open(p("out.h5ad"), 5)
+                .unwrap()
+                .uns()
+                .await
+                .unwrap();
+            uns.raw["scx_provenance"]["tags"].clone()
+        })
+    });
+    assert_eq!(tags, serde_json::json!({ "run": "config" }));
+
+    let spec = format!("{}:{}", p("two.h5ad").display(), ALL_SLOTS.join(","));
+    for (policy, want) in [("skip", 1.0), ("overwrite", 2.0)] {
+        assert_success(&scx(&[
+            "merge",
+            "--into",
+            p("out.h5ad").to_str().unwrap(),
+            "--patch",
+            &spec,
+            "--on-conflict",
+            policy,
+        ]));
+        assert_eq!(patched_scale(&p("out.h5ad")), want, "{policy}");
+    }
+    // The default policy refuses each slot group that already exists.
+    for slot in ALL_SLOTS {
+        let out = scx(&[
+            "merge",
+            "--into",
+            p("out.h5ad").to_str().unwrap(),
+            "--patch",
+            &format!("{}:{slot}", p("two.h5ad").display()),
+        ]);
+        assert_failure(&out);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(&format!("'{slot}' already exists")),
+            "{slot}: {err}"
+        );
+    }
+}
+
+/// Requests that can't be merged fail with a message saying why.
+#[test]
+fn test_merge_rejects_bad_requests() {
+    let dir = TempDir::new().unwrap();
+    let p = |n: &str| dir.path().join(n).to_str().unwrap().to_string();
+    with_hdf5(|| {
+        make_base_h5ad(Path::new(&p("base.h5ad")), 6, 4);
+        make_full_patch(Path::new(&p("patch.h5ad")), 6, 4, 1.0);
+        make_full_patch(Path::new(&p("wide.h5ad")), 6, 5, 1.0);
+        make_full_patch(Path::new(&p("tall.h5ad")), 7, 4, 1.0);
+    });
+    let yaml = |name: &str, body: &str| {
+        std::fs::write(p(name), body).unwrap();
+        p(name)
+    };
+    let create = |spec: &str| -> Vec<String> {
+        [
+            "merge",
+            "--base",
+            &p("base.h5ad"),
+            "--output",
+            &p("out.h5ad"),
+            "--patch",
+            spec,
+        ]
+        .map(String::from)
+        .to_vec()
+    };
+    let with = |mut v: Vec<String>, extra: &[&str]| {
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    let patch = p("patch.h5ad");
+    let mut cases: Vec<(Vec<String>, &str)> = vec![
+        (
+            vec![
+                "merge".into(),
+                "--patch".into(),
+                format!("{patch}:obs/score"),
+            ],
+            "specify either --base",
+        ),
+        (
+            with(create(&format!("{patch}:obs/score")), &["--tag", "novalue"]),
+            "--tag must be key=value",
+        ),
+        (
+            with(
+                create(&format!("{patch}:obs/score")),
+                &["--on-conflict", "maybe"],
+            ),
+            "unknown --on-conflict value 'maybe'",
+        ),
+        (
+            create(&format!("{patch}:bogus/x")),
+            "unknown slot group 'bogus'",
+        ),
+        (create(&format!("{patch}:layers/")), "slot name is empty"),
+        (create(&format!("{patch}:layers")), "must be 'group/name'"),
+        (
+            create(&format!("{}:layers/norm", p("wide.h5ad"))),
+            "shape mismatch for layer 'norm'",
+        ),
+        (
+            create(&format!("{}:obsp/conn", p("tall.h5ad"))),
+            "shape mismatch for obsp 'conn'",
+        ),
+        (
+            vec![
+                "merge".into(),
+                "--into".into(),
+                p("base.h5ad"),
+                "--patch".into(),
+                format!("{patch}:obs/score"),
+            ],
+            "no scx_provenance",
+        ),
+        (
+            vec!["merge".into(), "--config".into(), p("absent.yaml")],
+            "cannot read config",
+        ),
+        (
+            vec![
+                "merge".into(),
+                "--config".into(),
+                yaml("bad.yaml", "patches: [unclosed"),
+            ],
+            "invalid config",
+        ),
+        (
+            vec![
+                "merge".into(),
+                "--config".into(),
+                yaml(
+                    "slot.yaml",
+                    &format!(
+                "base: {}\noutput: {}\npatches:\n  - source: {patch}\n    slots: [\"nope\"]\n",
+                p("base.h5ad"), p("out.h5ad")),
+                ),
+            ],
+            "invalid slot 'nope'",
+        ),
+        (
+            vec![
+                "merge".into(),
+                "--config".into(),
+                yaml(
+                    "both.yaml",
+                    &format!(
+                        "base: {}\noutput: {}\ninto: {}\n",
+                        p("base.h5ad"),
+                        p("out.h5ad"),
+                        p("out.h5ad")
+                    ),
+                ),
+            ],
+            "mutually exclusive",
+        ),
+    ];
+    for (slot, what) in [
+        ("layers/x", "layer 'x' not found"),
+        ("obs/x", "column 'x' not found in patch obs"),
+        ("var/x", "column 'x' not found in patch var"),
+        ("obsm/x", "obsm entry 'x' not found"),
+        ("varm/x", "varm entry 'x' not found"),
+        ("obsp/x", "obsp 'x' not found"),
+        ("uns/x", "uns entry 'x' not found"),
+    ] {
+        cases.push((create(&format!("{patch}:{slot}")), what));
+    }
+    for (args, want) in cases {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = scx(&args);
+        assert_failure(&out);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(want), "{args:?}: want '{want}' in\n{err}");
+        let _ = std::fs::remove_file(p("out.h5ad"));
+    }
+}
