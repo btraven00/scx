@@ -562,3 +562,140 @@ async fn reads_orion_names_and_large_arrow_types() {
         other => panic!("expected f32, got {other:?}"),
     }
 }
+
+// --- obs column types and nulls; the gene axis's rules ---
+
+/// Per-cell lists plus one obs column of each scalar type the reader keeps,
+/// each with a null in row 1; a date column, which it skips; and a barcode
+/// column with a duplicate, which therefore stays a column.
+fn typed_obs_bytes() -> Vec<u8> {
+    use arrow::array::{BooleanArray, Date32Array, Float64Array, Int32Array};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "genes",
+            ArrowType::List(Arc::new(Field::new("item", ArrowType::Int64, true))),
+            true,
+        ),
+        Field::new(
+            "expressions",
+            ArrowType::List(Arc::new(Field::new("item", ArrowType::Float32, true))),
+            true,
+        ),
+        Field::new("barcode", ArrowType::Utf8, false),
+        Field::new("i32", ArrowType::Int32, true),
+        Field::new("i64", ArrowType::Int64, true),
+        Field::new("f32", ArrowType::Float32, true),
+        Field::new("f64", ArrowType::Float64, true),
+        Field::new("flag", ArrowType::Boolean, true),
+        Field::new("label", ArrowType::Utf8, true),
+        Field::new("day", ArrowType::Date32, true),
+    ]));
+    let mut genes_b = ListBuilder::new(Int64Builder::new());
+    let mut expr_b = ListBuilder::new(Float32Builder::new());
+    for _ in 0..3 {
+        genes_b.values().append_value(0);
+        genes_b.append(true);
+        expr_b.values().append_value(1.0);
+        expr_b.append(true);
+    }
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(genes_b.finish()),
+        Arc::new(expr_b.finish()),
+        Arc::new(StringArray::from(vec!["a", "a", "b"])),
+        Arc::new(Int32Array::from(vec![Some(1), None, Some(3)])),
+        Arc::new(Int64Array::from(vec![Some(10), None, Some(30)])),
+        Arc::new(Float32Array::from(vec![Some(0.5), None, Some(1.5)])),
+        Arc::new(Float64Array::from(vec![Some(2.5), None, Some(3.5)])),
+        Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)])),
+        Arc::new(StringArray::from(vec![Some("x"), None, Some("z")])),
+        Arc::new(Date32Array::from(vec![1, 2, 3])),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), cols).expect("batch");
+    let mut buf = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buf, schema, None).expect("writer");
+    writer.write(&batch).expect("write");
+    writer.close().expect("close");
+    buf
+}
+
+async fn store_with(name: &str, bytes: Vec<u8>) -> (Arc<dyn ObjectStore>, StorePath) {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = StorePath::from(name);
+    store.put(&path, bytes.into()).await.expect("put");
+    (store, path)
+}
+
+/// Each scalar Arrow type becomes its obs column type, and a null is a missing
+/// value, not 0, "" or false. Unsupported types are skipped; a barcode column
+/// that isn't unique is not the index.
+#[tokio::test]
+async fn obs_columns_keep_types_and_nulls() {
+    let (store, path) = store_with("typed.parquet", typed_obs_bytes()).await;
+    let mut reader = ParquetReader::open(store, path, Some(1), None, 2)
+        .await
+        .expect("open");
+    let obs = reader.obs().await.expect("obs");
+    assert_eq!(obs.index, vec!["0", "1", "2"]);
+    let names: Vec<&str> = obs.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["barcode", "i32", "i64", "f32", "f64", "flag", "label"]
+    );
+    let col = |n: &str| obs.columns.iter().find(|c| c.name == n).unwrap();
+    for n in &names[1..] {
+        assert_eq!(col(n).mask, Some(vec![true, false, true]), "{n}");
+    }
+    assert!(col("barcode").mask.is_none());
+    let f = |n: &str| match &col(n).data {
+        ColumnData::Float(v) => (v[0], v[2], v[1].is_nan()),
+        other => panic!("{n}: {other:?}"),
+    };
+    assert_eq!(f("f32"), (0.5, 1.5, true));
+    assert_eq!(f("f64"), (2.5, 3.5, true));
+    assert!(matches!(&col("i32").data, ColumnData::Int(v) if v[0] == 1 && v[2] == 3));
+    assert!(matches!(&col("i64").data, ColumnData::Int64(v) if v[0] == 10 && v[2] == 30));
+    assert!(matches!(&col("flag").data, ColumnData::Bool(v) if v[0] && !v[2]));
+    assert!(matches!(&col("label").data, ColumnData::String(v) if v[0] == "x" && v[2] == "z"));
+}
+
+/// The gene axis comes from a dense layout's columns, else from n_vars or a
+/// gene dictionary: a contradicting n_vars and a missing one are errors, and a
+/// dictionary next to a dense layout is ignored. Parquet carries no layers or
+/// obsp, so their streams are empty.
+#[tokio::test]
+async fn gene_axis_rules() {
+    let (store, path) = store_with("dense.parquet", dense_fixture_bytes()).await;
+    let e = ParquetReader::open(store.clone(), path.clone(), Some(5), None, 1024)
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        e.contains("n_vars=5 was provided but the dense layout has 4"),
+        "{e}"
+    );
+
+    let (dstore, dpath) = store_with("gene_metadata.parquet", gene_dict_bytes()).await;
+    let dict = super::GeneDict::load(dstore, dpath, 1024)
+        .await
+        .expect("dict");
+    let reader = ParquetReader::open(store, path, None, Some(dict), 1024)
+        .await
+        .expect("open");
+    assert_eq!(reader.shape(), (3, 4), "the dictionary is ignored");
+    let meta = crate::ir::SparseMatrixMeta {
+        name: "none".into(),
+        shape: (3, 4),
+        indptr: vec![],
+    };
+    assert!(reader.layer_stream(&meta, 2).next().await.is_none());
+    assert!(reader.obsp_stream(&meta, 2).next().await.is_none());
+
+    let (store, path) = fixture_store().await;
+    let e = ParquetReader::open(store, path, None, None, 1024)
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(e.contains("provide n_vars"), "{e}");
+}
