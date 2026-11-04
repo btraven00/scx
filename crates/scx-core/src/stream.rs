@@ -265,7 +265,9 @@ pub trait DatasetReader: Send {
 
     /// CSR row-pointer array for the main X matrix (n_obs+1 entries).
     /// Returns an empty slice when not available (dense X, BPCells, etc.).
-    /// Free to call — indptr is loaded at open time, not streamed.
+    /// Readers that stream row ranges read it on the first call, not at open
+    /// (a row-range stream reads only its rows' part); if that read fails they
+    /// log a warning and return an empty slice, and streaming X reports the error.
     fn x_indptr(&self) -> &[u64] {
         &[]
     }

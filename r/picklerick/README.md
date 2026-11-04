@@ -57,8 +57,8 @@ help page (`?read_h5ad`, `?convert`, ...); all of it is also on the
 
 `PicklerickMatrix()` is a `DelayedMatrix` (features x cells) whose blocks are
 read on demand through scx, for any format scx reads. Selecting cells reads
-only those cells from disk on `.h5ad` and AnnData Zarr stores; the row
-pointer is loaded, then just the selected rows' slices of `data`/`indices`.
+only those cells from disk on `.h5ad` and AnnData Zarr stores: their part
+of the row pointer, then their slices of `data`/`indices`.
 
 ```r
 m <- PicklerickMatrix("pbmc.zarr")          # or a layer: layer = "counts"
