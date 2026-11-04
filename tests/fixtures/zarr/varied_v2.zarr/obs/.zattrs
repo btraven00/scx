@@ -1,0 +1,18 @@
+{
+  "column-order": [
+    "int16",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "float32",
+    "cat_float",
+    "cat_int",
+    "cat_bool",
+    "cat_ordered"
+  ],
+  "_index": "_index",
+  "encoding-type": "dataframe",
+  "encoding-version": "0.2.0"
+}
