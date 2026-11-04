@@ -202,7 +202,7 @@ impl ParquetReader {
             index,
             columns: accs
                 .into_iter()
-                .map(|a| Column::new(a.name, a.data))
+                .map(|a| Column::with_missing(a.name, a.data, a.missing))
                 .collect(),
         })
     }
@@ -290,6 +290,9 @@ fn string_index_from(n: usize) -> Vec<String> {
 struct ColumnAcc {
     name: String,
     data: ColumnData,
+    /// Which values were null. `data` holds a placeholder there (0, NaN,
+    /// false, ""), which the column's mask marks missing.
+    missing: Vec<bool>,
 }
 
 impl ColumnAcc {
@@ -307,6 +310,7 @@ impl ColumnAcc {
         Some(Self {
             name: name.to_string(),
             data,
+            missing: Vec::new(),
         })
     }
 
@@ -314,6 +318,7 @@ impl ColumnAcc {
         let Some(col) = batch.column_by_name(&self.name) else {
             return Ok(());
         };
+        self.missing.extend((0..col.len()).map(|i| col.is_null(i)));
         let any = col.as_any();
         match &mut self.data {
             ColumnData::String(out) => {
@@ -346,12 +351,16 @@ impl ColumnAcc {
             ColumnData::Float(out) => {
                 if let Some(arr) = any.downcast_ref::<Float64Array>() {
                     for i in 0..arr.len() {
-                        out.push(if arr.is_null(i) { 0.0 } else { arr.value(i) });
+                        out.push(if arr.is_null(i) {
+                            f64::NAN
+                        } else {
+                            arr.value(i)
+                        });
                     }
                 } else if let Some(arr) = any.downcast_ref::<Float32Array>() {
                     for i in 0..arr.len() {
                         out.push(if arr.is_null(i) {
-                            0.0
+                            f64::NAN
                         } else {
                             arr.value(i) as f64
                         });
