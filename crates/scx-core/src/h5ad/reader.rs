@@ -14,7 +14,8 @@ use crate::h5::{
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
 use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows};
 use crate::stream::{
-    error_stream, normalize_ranges, row_chunks, row_range_chunks, ChunkStream, GENE_MAJOR_X,
+    error_stream, load_indptr, normalize_ranges, read_block, row_chunks, row_range_chunks,
+    stream_indptr, ChunkStream, GENE_MAJOR_X,
 };
 use crate::{
     dtype::DataType,
@@ -141,15 +142,14 @@ impl H5AdReader {
     /// The whole CSR row pointer, read on the first call; empty when X is
     /// dense or CSC.
     fn full_indptr(&self) -> Result<&[u64]> {
-        let Some(cell) = &self.indptr else {
-            return Ok(&[]);
-        };
-        if let Some(v) = cell.get() {
-            return Ok(v);
+        match &self.indptr {
+            Some(cell) => load_indptr(cell, || self.read_indptr()),
+            None => Ok(&[]),
         }
-        let file = File::open(&self.path)?;
-        let v = read_u64(&file.dataset(&format!("{}/indptr", self.x_path))?)?;
-        Ok(cell.get_or_init(|| v))
+    }
+
+    fn read_indptr(&self) -> Result<Vec<u64>> {
+        read_u64(&File::open(&self.path)?.dataset(&format!("{}/indptr", self.x_path))?)
     }
 }
 
@@ -835,16 +835,12 @@ impl DatasetReader for H5AdReader {
         let whole = normalize_ranges(ranges.clone()) == [0..this.n_obs];
         // A whole-matrix stream reads the full row pointer once; a row-range
         // stream reads each block's part of it, unless it is already loaded.
-        let full = match whole {
-            true => match this.full_indptr() {
-                Ok(v) => Some(v),
+        let full = match &this.indptr {
+            Some(cell) => match stream_indptr(cell, whole, || this.read_indptr()) {
+                Ok(full) => full,
                 Err(e) => return error_stream(e.to_string()),
             },
-            false => this
-                .indptr
-                .as_ref()
-                .and_then(OnceLock::get)
-                .map(Vec::as_slice),
+            None => None,
         };
         // The file and, for CSR, its indptr and indices/data readers, opened
         // on the first block.
@@ -862,15 +858,12 @@ impl DatasetReader for H5AdReader {
                 open = Some((file, csr));
             }
             match open.as_ref().expect("opened above") {
-                (_, Some((_, csr))) if full.is_some() => {
-                    csr.rows(full.expect("matched"), rows, this.n_vars)
-                }
-                (_, Some((ip, csr))) => {
-                    let part = read_u64_range(ip, rows.start..rows.end + 1)?;
-                    let mut chunk = csr.rows(&part, 0..rows.len(), this.n_vars)?;
-                    chunk.row_offset = rows.start;
-                    Ok(chunk)
-                }
+                (_, Some((ip, csr))) => read_block(
+                    full,
+                    rows,
+                    |part| read_u64_range(ip, part),
+                    |ip, rows| csr.rows(ip, rows, this.n_vars),
+                ),
                 (file, None) => read_rows(file, &this.x_path, &[], rows, this.n_vars),
             }
         })
