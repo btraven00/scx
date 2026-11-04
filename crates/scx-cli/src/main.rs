@@ -1215,6 +1215,20 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Hand freed heap memory back to the OS. glibc keeps what a large frame
+/// (obs strings, embeddings) freed, so the next phase's allocations add to the
+/// peak instead of reusing it. No-op off glibc.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: malloc_trim only returns free heap pages to the kernel.
+        unsafe { malloc_trim(0) };
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn convert_with_reader(
     reader: &mut dyn DatasetReader,
@@ -1260,20 +1274,6 @@ async fn convert_with_reader(
     let write_uns = filter.includes("uns");
     let obs = reader.obs().await?;
     let var = reader.var().await?;
-    let mut obsm = if filter.includes("obsm") {
-        reader.obsm().await?
-    } else {
-        Embeddings::default()
-    };
-    obsm.map
-        .retain(|k, _| filter.includes(&format!("obsm:{k}")));
-    let mut varm = if filter.includes("varm") {
-        reader.varm().await?
-    } else {
-        Varm::default()
-    };
-    varm.map
-        .retain(|k, _| filter.includes(&format!("varm:{k}")));
     let mut uns = if write_uns {
         reader.uns().await?
     } else {
@@ -1346,7 +1346,6 @@ async fn convert_with_reader(
     tracing::info!(
         obs_cols = obs.columns.len(),
         var_cols = var.columns.len(),
-        embeddings = obsm.map.len(),
         layers = layer_metas.len(),
         obsp = obsp_metas.len(),
         "metadata loaded in {:.2?}",
@@ -1409,12 +1408,37 @@ async fn convert_with_reader(
 
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
+    // Each frame is read, written and freed in turn, so that at most one of
+    // them is in memory, and none while the matrices are copied or streamed.
+    drop((obs, var));
+    release_freed_memory();
+    let mut obsm = if filter.includes("obsm") {
+        reader.obsm().await?
+    } else {
+        Embeddings::default()
+    };
+    obsm.map
+        .retain(|k, _| filter.includes(&format!("obsm:{k}")));
+    let mut varm = if filter.includes("varm") {
+        reader.varm().await?
+    } else {
+        Varm::default()
+    };
+    varm.map
+        .retain(|k, _| filter.includes(&format!("varm:{k}")));
+    tracing::info!(
+        embeddings = obsm.map.len(),
+        varm = varm.map.len(),
+        "read obsm, varm"
+    );
     if !obsm.map.is_empty() {
         writer.write_obsm(&obsm).await?;
     }
     if !varm.map.is_empty() {
         writer.write_varm(&varm).await?;
     }
+    drop((obsm, varm));
+    release_freed_memory();
 
     // Stream each layer — skip any whose name would collide with the X slot,
     // or that the slot filter drops.
@@ -1551,6 +1575,8 @@ async fn convert_with_reader(
     }
 
     writer.finalize().await?;
+    drop(writer);
+    release_freed_memory();
 
     tracing::info!(
         total = ?t0.elapsed(),

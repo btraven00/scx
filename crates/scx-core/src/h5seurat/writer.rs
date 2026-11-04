@@ -554,22 +554,20 @@ impl DatasetWriter for H5SeuratWriter {
             self.attr_reduction(&red_grp, red_name)?;
 
             let (n_obs, n_comps) = mat.shape;
-            // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs)
-            // Build a new C-contiguous (n_comps, n_obs) array.
-            // Avoid .t().to_owned(): hdf5-rs 0.8 rejects non-standard-layout inputs.
-            let mut buf = vec![0.0f64; n_obs * n_comps];
-            for j in 0..n_obs {
-                for i in 0..n_comps {
-                    buf[i * n_obs + j] = mat.data[j * n_comps + i];
-                }
-            }
-            let arr_t = Array2::from_shape_vec((n_comps, n_obs), buf)
-                .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+            // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs),
+            // written a component (one n_obs row) at a time, not as a whole
+            // transposed copy.
             let ds = red_grp
                 .new_dataset::<f64>()
                 .shape((n_comps, n_obs))
                 .create("cell.embeddings")?;
-            ds.write(&arr_t)?;
+            let mut row = vec![0.0f64; n_obs];
+            for i in 0..n_comps {
+                for (j, v) in row.iter_mut().enumerate() {
+                    *v = mat.data[j * n_comps + i];
+                }
+                ds.write_slice(&row, s![i, ..])?;
+            }
         }
         Ok(())
     }

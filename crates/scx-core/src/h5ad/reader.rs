@@ -563,7 +563,13 @@ fn ad_read_dense_dict(
             );
         }
         let shape = (arr.shape()[0], arr.shape()[1]);
-        let data = arr.as_standard_layout().iter().copied().collect();
+        // Row-major as read: take the buffer instead of copying it.
+        let arr = if arr.is_standard_layout() {
+            arr
+        } else {
+            arr.as_standard_layout().into_owned()
+        };
+        let data = arr.into_raw_vec_and_offset().0;
         map.insert(name, DenseMatrix { shape, data });
     }
     Ok(map)
