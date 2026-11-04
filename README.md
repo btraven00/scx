@@ -100,6 +100,15 @@ Design notes, scope, formats, and developer workflows live in [`docs/`](docs/).
 
 Each cell is a file; size = lines, color = coverage.
 
+## Acknowledgements
+
+Copying an h5ad's sparse matrices into a dgCMatrix h5seurat as stored, compressed
+chunks moved without decoding, follows
+[scConvert](https://github.com/mianaz/scConvert) (Ziyu Zeng), which converts
+h5ad to h5Seurat the same way. scx's implementation is its own; it also checks
+the dgCMatrix row rules during the copy and streams the matrix instead when
+they fail.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
