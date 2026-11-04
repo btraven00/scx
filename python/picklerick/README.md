@@ -76,8 +76,8 @@ for chunk in pk.open_stream("atlas.h5ad", chunk_size=5000):
 ```
 
 `where=` and `rows=` select rows before anything is decoded. On h5ad and
-Zarr the reader loads the row pointer, then reads only the selected rows'
-slices of `data`/`indices`, so a filter costs what its rows cost:
+Zarr the reader reads only the selected rows' part of the row pointer and
+their slices of `data`/`indices`, so a filter costs what its rows cost:
 
 ```python
 for chunk in pk.open_stream("emt.h5ad", where={"CellLine": "A549", "Time": ["3d", "7d"]}):

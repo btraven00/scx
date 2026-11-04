@@ -217,7 +217,7 @@ def open_stream(
 
     ``rows`` and ``where`` select rows; with both, a row must satisfy both.
     On h5ad, Zarr, h5seurat (dgCMatrix) and 10x HDF5 only the selected rows
-    are read (the row pointer is loaded, then just their slices of
+    are read (their part of the row pointer, then their slices of
     ``data``/``indices``), so filtering costs what the matching rows cost;
     BPCells and MatrixMarket input is still read through. Chunks never span
     a gap in the selection, and ``chunk.row_offset`` is each chunk's first
