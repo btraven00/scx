@@ -175,6 +175,8 @@ def _where_source(tmp_path):
 )
 @pytest.mark.parametrize("ext", ["h5ad", "zarr"])
 def test_convert_where_equals_anndata_subset(tmp_path, where, ext) -> None:
+    if ext == "zarr":
+        pytest.importorskip("zarr", minversion="3")  # scx writes Zarr v3
     src, path = _where_source(tmp_path)
     mask = np.ones(src.n_obs, dtype=bool)
     for col, vals in where.items():
