@@ -315,3 +315,64 @@ async fn x_stream_rows_matches_sliced_full_stream() {
     let mut bad = h.x_stream_rows(vec![55..61]);
     assert!(bad.next().await.unwrap().is_err(), "range past n_obs");
 }
+
+/// A row-range stream reads only its rows' part of `X/indptr` (see the h5ad
+/// reader's test of the same name). The indptr is stored in chunks of 2 and
+/// its last chunk, holding only the final entry, is garbage: rows 0..3 (the
+/// first two chunks) still stream, while the whole-matrix stream fails.
+#[tokio::test]
+async fn row_range_stream_reads_only_its_indptr() {
+    use std::sync::Arc;
+    use zarrs::array::{data_type as zdt, ArrayBuilder, FillValue};
+    use zarrs::filesystem::FilesystemStore;
+    use zarrs::group::GroupBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("bad_tail.zarr");
+    std::fs::create_dir(&root).unwrap();
+    let store = Arc::new(FilesystemStore::new(&root).unwrap());
+    let attrs = serde_json::json!({"encoding-type": "csr_matrix", "shape": [4, 3]});
+    GroupBuilder::new()
+        .attributes(attrs.as_object().unwrap().clone())
+        .build(store.clone(), "/X")
+        .unwrap()
+        .store_metadata()
+        .unwrap();
+    let ip = ArrayBuilder::new(vec![5], vec![2], zdt::int64(), FillValue::from(0i64))
+        .build(store.clone(), "/X/indptr")
+        .unwrap();
+    ip.store_metadata().unwrap();
+    ip.store_array_subset(&vec![0..5u64], &[0i64, 1, 3, 3, 4][..])
+        .unwrap();
+    let idx = ArrayBuilder::new(vec![4], vec![4], zdt::int32(), FillValue::from(0i32))
+        .build(store.clone(), "/X/indices")
+        .unwrap();
+    idx.store_metadata().unwrap();
+    idx.store_array_subset(&vec![0..4u64], &[2i32, 0, 1, 0][..])
+        .unwrap();
+    let data = ArrayBuilder::new(vec![4], vec![4], zdt::float32(), FillValue::from(0f32))
+        .build(store.clone(), "/X/data")
+        .unwrap();
+    data.store_metadata().unwrap();
+    data.store_array_subset(&vec![0..4u64], &[1f32, 2.0, 3.0, 4.0][..])
+        .unwrap();
+    let last = root.join("X/indptr/c/2");
+    assert!(last.exists(), "chunk layout changed");
+    std::fs::write(&last, b"bad").unwrap();
+
+    let mut r = ZarrAdReader::open(&root, 10).unwrap();
+    let mut s = r.x_stream_rows(vec![1..2, 0..1, 2..3]);
+    let c = s.next().await.unwrap().unwrap();
+    assert!(s.next().await.is_none());
+    drop(s);
+    assert_eq!((c.row_offset, c.nrows), (0, 3));
+    assert_eq!(c.data.indptr, vec![0, 1, 3, 3]);
+    assert_eq!(c.data.indices, vec![2, 0, 1]);
+    assert_eq!(c.data.data.to_f64(), vec![1.0, 2.0, 3.0]);
+
+    assert!(r.x_stream().next().await.unwrap().is_err());
+    assert!(
+        r.x_indptr().is_empty(),
+        "an unreadable indptr is not a row pointer"
+    );
+}
