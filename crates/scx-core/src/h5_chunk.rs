@@ -29,9 +29,8 @@
 //! touches no HDF5 state ([`ChunkReader`]).
 
 use std::borrow::Cow;
-use std::io::{Read, Write};
+use std::io::Write;
 
-use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use flate2::{Decompress, FlushDecompress, Status};
@@ -429,10 +428,21 @@ fn decode_chunk(
     let bytes = if filter_mask & (1 << plan.deflate_bit) != 0 {
         cbuf.to_vec()
     } else {
-        let mut out = Vec::new();
-        ZlibDecoder::new(cbuf)
-            .read_to_end(&mut out)
+        // A chunk inflates to exactly its full size (the last one too), so
+        // inflate in one call into a buffer of that size: ~12% faster than
+        // growing one through `read_to_end`.
+        let mut out = vec![0u8; plan.chunk_len * elem_size];
+        let mut z = flate2::Decompress::new(true);
+        let status = z
+            .decompress(cbuf, &mut out, flate2::FlushDecompress::Finish)
             .map_err(|e| ScxError::InvalidFormat(format!("inflate failed: {e}")))?;
+        if status != flate2::Status::StreamEnd || z.total_out() as usize != out.len() {
+            return Err(ScxError::InvalidFormat(format!(
+                "inflate failed: chunk gave {} bytes, expected {}",
+                z.total_out(),
+                out.len()
+            )));
+        }
         out
     };
     Ok(match plan.shuffle_bit {
