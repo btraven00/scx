@@ -96,6 +96,8 @@ fn every_output_format_holds_the_subset() {
         ("dgc.h5seurat", &["--dgcmatrix"], "data"),
         ("out.bpcells", &[], "counts"),
     ];
+    // Zarr output needs the optional `zarr` feature (off in the system-HDF5 CI job).
+    let cases = cases.iter().filter(|c| cfg!(feature = "zarr") || !c.0.ends_with(".zarr"));
     for (name, extra, layer) in cases {
         let out = dir.path().join(name);
         let args: Vec<&str> = B_OR_T.iter().chain(extra.iter()).copied().collect();
@@ -241,7 +243,10 @@ fn no_match_writes_an_empty_file() {
         ("e.zarr", &[]),
         ("e.h5seurat", &[]),
         ("dgc.h5seurat", &["--dgcmatrix"]),
-    ] {
+    ]
+    .into_iter()
+    .filter(|(name, _)| cfg!(feature = "zarr") || !name.ends_with(".zarr"))
+    {
         let out = dir.path().join(name);
         let args: Vec<&str> = ["--where", "cell_type=nope"]
             .into_iter()
