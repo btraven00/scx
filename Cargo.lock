@@ -3833,6 +3833,7 @@ dependencies = [
  "owo-colors",
  "parquet",
  "polars",
+ "rayon",
  "scx-core",
  "serde",
  "serde_json",

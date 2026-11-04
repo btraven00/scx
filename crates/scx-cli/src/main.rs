@@ -66,6 +66,40 @@ enum OutputHash {
     None,
 }
 
+/// blake3 of a file's bytes, hashed across threads. Parallel `pread`s fill
+/// one 16 MiB buffer at a time, so peak RSS stays at the buffer: an mmap of
+/// the whole file (`update_mmap_rayon`) gives the same digest at the same
+/// speed, but every mapped page counts toward the process's peak RSS, which
+/// put a 3 GB output's size into convert's measured memory.
+#[cfg(unix)]
+fn blake3_file(path: &Path) -> std::io::Result<blake3::Hash> {
+    use rayon::prelude::*;
+    use std::os::unix::fs::FileExt;
+    const BUF: usize = 16 << 20;
+    const PIECE: usize = 1 << 20;
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut buf = vec![0u8; BUF.min(len as usize)];
+    let mut hasher = blake3::Hasher::new();
+    let mut off = 0u64;
+    while off < len {
+        let n = BUF.min((len - off) as usize);
+        buf[..n]
+            .par_chunks_mut(PIECE)
+            .enumerate()
+            .try_for_each(|(i, c)| file.read_exact_at(c, off + (i * PIECE) as u64))?;
+        hasher.update_rayon(&buf[..n]);
+        off += n as u64;
+    }
+    Ok(hasher.finalize())
+}
+
+// ponytail: no positional read in std off unix; Windows keeps the mmap path.
+#[cfg(not(unix))]
+fn blake3_file(path: &Path) -> std::io::Result<blake3::Hash> {
+    Ok(blake3::Hasher::new().update_mmap_rayon(path)?.finalize())
+}
+
 #[derive(Parser)]
 #[command(name = "scx", version = VERSION, about = "Single-cell streaming interop engine")]
 enum Cli {
@@ -985,11 +1019,9 @@ async fn run() -> anyhow::Result<()> {
                 OutputHash::Sha256 => {
                     Some(provenance::sha256_file(output_path).map(|h| format!("sha256:{h}")))
                 }
-                OutputHash::Blake3 => Some(
-                    blake3::Hasher::new()
-                        .update_mmap_rayon(output_path)
-                        .map(|h| format!("blake3:{}", h.finalize().to_hex())),
-                ),
+                OutputHash::Blake3 => {
+                    Some(blake3_file(output_path).map(|h| format!("blake3:{}", h.to_hex())))
+                }
             }
             .transpose()
             .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?;
@@ -2149,6 +2181,28 @@ fn print_report_json(report: &scx_core::validate::ValidationReport) {
     });
 
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
+}
+
+#[cfg(test)]
+mod blake3_file_tests {
+    /// The recorded output hash must not change: `blake3_file` gives the same
+    /// digest as the whole-file mmap it replaced, for an empty file, a file
+    /// inside one buffer, and one spanning several buffers with a ragged tail.
+    #[test]
+    fn matches_whole_file_mmap_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        for len in [0usize, 1, (1 << 20) + 1, (16 << 20) * 2 + (3 << 20) + 7] {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 31 + i / 4099) as u8).collect();
+            let p = dir.path().join(format!("f{len}"));
+            std::fs::write(&p, &bytes).unwrap();
+            let old = blake3::Hasher::new()
+                .update_mmap_rayon(&p)
+                .unwrap()
+                .finalize();
+            assert_eq!(super::blake3_file(&p).unwrap(), old, "len {len}");
+            assert_eq!(old, blake3::hash(&bytes), "len {len}");
+        }
+    }
 }
 
 #[cfg(test)]
