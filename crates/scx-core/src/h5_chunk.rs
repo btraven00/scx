@@ -209,7 +209,7 @@ pub fn copy_chunks(
     name: &str,
     mut check: Option<ChunkCheck>,
 ) -> Result<bool> {
-    const BATCH: usize = 256;
+    const BATCH: usize = 64;
 
     let Some(chunk) = src.chunk().filter(|c| c.len() == 1).map(|c| c[0]) else {
         return Err(ScxError::InvalidFormat(format!(
