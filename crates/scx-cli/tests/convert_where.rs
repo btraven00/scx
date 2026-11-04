@@ -97,7 +97,9 @@ fn every_output_format_holds_the_subset() {
         ("out.bpcells", &[], "counts"),
     ];
     // Zarr output needs the optional `zarr` feature (off in the system-HDF5 CI job).
-    let cases = cases.iter().filter(|c| cfg!(feature = "zarr") || !c.0.ends_with(".zarr"));
+    let cases = cases
+        .iter()
+        .filter(|c| cfg!(feature = "zarr") || !c.0.ends_with(".zarr"));
     for (name, extra, layer) in cases {
         let out = dir.path().join(name);
         let args: Vec<&str> = B_OR_T.iter().chain(extra.iter()).copied().collect();
