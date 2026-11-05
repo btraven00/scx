@@ -31,6 +31,7 @@ scx-core = { path = "../scx-core", version = "0.5.0", default-features = false }
 # Runtime constructed in main() only under the `net` feature.
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

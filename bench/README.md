@@ -74,6 +74,17 @@ pixi run -e test Rscript bench/r/profile_read_h5ad.R    # profvis
 # heaptrack: bench/r/heaptrack_runner.R
 ```
 
+## Phase timing (`OBKIT_DIR`)
+
+With `OBKIT_DIR` set, `scx convert` appends start/end anchors for each phase
+to `$OBKIT_DIR/obkit-events.jsonl`, in the
+[obkit](https://github.com/omnibenchmark/obkit) events format (spec 0.1):
+`open`, `metadata`, `layers` (layers and raw.X), `obsp`, `x`, `finalize`
+(uns, waiting for the source hash, closing the writer) and `output_hash`.
+Joined with a memory sampler's time series (denet, obkit's `prof`), they
+split a run's time and peak memory by phase. Unset, nothing is written; a
+write error prints one warning and never fails the conversion.
+
 ## Results convention
 
 `bench/results/*.json` is **gitignored** (only `.gitignore` + the harness are

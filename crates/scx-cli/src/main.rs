@@ -1,5 +1,6 @@
 mod cmd_export;
 mod cmd_merge;
+mod obkit;
 
 use std::path::Path;
 
@@ -1003,6 +1004,7 @@ async fn run() -> anyhow::Result<()> {
                 genes: genes_arg.clone(),
                 source_hash: source_hash.algo(),
             };
+            let open_span = obkit::span("open");
             let mut reader = if input == "-" {
                 // Formats need random access, so stdin goes to a temporary
                 // file (hashed on the way) and is detected by content.
@@ -1036,6 +1038,7 @@ async fn run() -> anyhow::Result<()> {
                 );
                 reader = Box::new(sub);
             }
+            drop(open_span);
             // Convert into a sibling path and rename on success, so a failed
             // run leaves nothing behind and doesn't clobber an existing output.
             // The name keeps the extension, which picks the writer.
@@ -1083,6 +1086,7 @@ async fn run() -> anyhow::Result<()> {
             };
 
             // Directory outputs (BPCells, Zarr) are not hashed.
+            let hash_span = obkit::span("output_hash");
             let output_hash = match output_hash {
                 _ if !output_path.is_file() => None,
                 OutputHash::None => None,
@@ -1095,6 +1099,7 @@ async fn run() -> anyhow::Result<()> {
             }
             .transpose()
             .map_err(|e| anyhow::anyhow!("hashing output '{output}': {e}"))?;
+            drop(hash_span);
 
             let record = ProvenanceRecord {
                 scx_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1293,6 +1298,7 @@ async fn convert_with_reader(
     filters: &[(String, Vec<String>)],
 ) -> anyhow::Result<(usize, usize, Option<String>)> {
     let t0 = std::time::Instant::now();
+    let metadata_span = obkit::span("metadata");
     let (n_obs, n_vars) = reader.shape();
 
     let is_h5seurat = output.extension().and_then(|e| e.to_str()) == Some("h5seurat");
@@ -1482,9 +1488,11 @@ async fn convert_with_reader(
     }
     drop((obsm, varm));
     release_freed_memory();
+    drop(metadata_span);
 
     // Stream each layer — skip any whose name would collide with the X slot,
-    // or that the slot filter drops.
+    // or that the slot filter drops. raw.X, below, is part of this phase too.
+    let layers_span = obkit::span("layers");
     for meta in &layer_metas {
         if !filter.includes(&format!("layers:{}", meta.name)) {
             tracing::info!(name = %meta.name, "skipping layer (slot filter)");
@@ -1543,7 +1551,10 @@ async fn convert_with_reader(
         }
     }
 
+    drop(layers_span);
+
     // Stream each obsp matrix.
+    let obsp_span = obkit::span("obsp");
     for meta in &obsp_metas {
         if !filter.includes(&format!("obsp:{}", meta.name)) {
             tracing::info!(name = %meta.name, "skipping obsp (slot filter)");
@@ -1558,6 +1569,9 @@ async fn convert_with_reader(
         writer.end_sparse().await?;
     }
 
+    drop(obsp_span);
+
+    let x_span = obkit::span("x");
     let t_x = std::time::Instant::now();
     if let Some(mem) = csc_mem {
         let blocks = scx_core::transpose::write_x_csc(reader, &mut *writer, mem).await?;
@@ -1588,8 +1602,11 @@ async fn convert_with_reader(
         );
     }
 
+    drop(x_span);
+
     // uns goes last: its provenance record needs the source hash, which has
     // been computing alongside everything above.
+    let finalize_span = obkit::span("finalize");
     let source_sha256 = source_sha256
         .join()
         .map_err(|_| anyhow::anyhow!("source hashing thread panicked"))??
@@ -1620,6 +1637,7 @@ async fn convert_with_reader(
     writer.finalize().await?;
     drop(writer);
     release_freed_memory();
+    drop(finalize_span);
 
     tracing::info!(
         total = ?t0.elapsed(),
