@@ -3827,6 +3827,7 @@ dependencies = [
  "arrow",
  "bixverse-sc-data",
  "blake3",
+ "chrono",
  "clap",
  "flate2",
  "futures",
