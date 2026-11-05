@@ -9,6 +9,7 @@
 //!     `readVersion` reads it back.
 //!   - `matrixIterators/StoredMatrix.h`: same dataset names as directory format.
 
+use std::mem::take;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -493,12 +494,19 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
         let base = *self.idxptr.last().unwrap() - lo as u64;
         self.idxptr
             .extend(csr.indptr[1..=chunk.nrows].iter().map(|&p| base + p));
-        self.buf_indices.extend_from_slice(&csr.indices[lo..hi]);
-        match &csr.data {
-            TypedVec::U32(v) => self.buf_u32.extend_from_slice(&v[lo..hi]),
+        let indices = &csr.indices[lo..hi];
+        let i32_as_u32;
+        let vals: Option<&[u32]> = match &csr.data {
+            TypedVec::U32(v) => Some(&v[lo..hi]),
             // Float values are stored unpacked: stream them straight out.
-            TypedVec::F32(v) => self.sink.append("val", Arr::F32(&v[lo..hi]))?,
-            TypedVec::F64(v) => self.sink.append("val", Arr::F64(&v[lo..hi]))?,
+            TypedVec::F32(v) => {
+                self.sink.append("val", Arr::F32(&v[lo..hi]))?;
+                None
+            }
+            TypedVec::F64(v) => {
+                self.sink.append("val", Arr::F64(&v[lo..hi]))?;
+                None
+            }
             TypedVec::I32(v) => {
                 let v = &v[lo..hi];
                 if let Some(neg) = v.iter().find(|&&x| x < 0) {
@@ -507,28 +515,48 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
                          value ({neg}); convert with a float dtype instead"
                     )));
                 }
-                self.buf_u32.extend(v.iter().map(|&x| x as u32));
+                i32_as_u32 = v.iter().map(|&x| x as u32).collect::<Vec<_>>();
+                Some(&i32_as_u32)
+            }
+        };
+
+        // Blocks sit on 128-value boundaries of the whole stream. First top up
+        // the previous chunk's tail to one block, then encode this chunk's
+        // aligned run straight from its slice, and keep only the new tail
+        // (< 128 values) instead of copying the whole chunk into a buffer.
+        let mut start = 0;
+        if !self.buf_indices.is_empty() {
+            start = (128 - self.buf_indices.len()).min(indices.len());
+            self.buf_indices.extend_from_slice(&indices[..start]);
+            if let Some(v) = vals {
+                self.buf_u32.extend_from_slice(&v[..start]);
+            }
+            if self.buf_indices.len() == 128 {
+                let (bi, bv) = (take(&mut self.buf_indices), take(&mut self.buf_u32));
+                self.encode(&bi, vals.map(|_| &bv[..]))?;
             }
         }
-        self.flush(false)
+        let end = start + (indices.len() - start) / 128 * 128;
+        self.encode(&indices[start..end], vals.map(|v| &v[start..end]))?;
+        self.buf_indices.extend_from_slice(&indices[end..]);
+        if let Some(v) = vals {
+            self.buf_u32.extend_from_slice(&v[end..]);
+        }
+        Ok(())
     }
 
-    /// Encode the buffered nonzeros in whole 128-value chunks; with `last`,
-    /// also the final partial chunk.
-    fn flush(&mut self, last: bool) -> Result<()> {
-        let n = if last {
-            self.buf_indices.len()
-        } else {
-            self.buf_indices.len() / 128 * 128
-        };
-        if n == 0 {
+    /// BP-128 encode and append `indices` (and packed `vals`, for uint
+    /// matrices). Every block but the stream's last must be whole, so callers
+    /// pass a multiple of 128 values except at finalize.
+    fn encode(&mut self, indices: &[u32], vals: Option<&[u32]>) -> Result<()> {
+        if indices.is_empty() {
             return Ok(());
         }
         // BP-128 blocks are independent, so encode ENCODE_PIECE-value pieces in
         // parallel, then rebase and concatenate them in order. Pieces are whole
         // multiples of 128, so the bytes match a single serial encode.
         use rayon::prelude::*;
-        let pieces: Vec<_> = self.buf_indices[..n]
+        let pieces: Vec<_> = indices
             .par_chunks(ENCODE_PIECE)
             .map(encode_d1z)
             .collect::<Result<_>>()?;
@@ -541,13 +569,9 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
         self.sink.append("index_data", Arr::U32(&data))?;
         self.sink.append("index_idx", Arr::U32(&idx))?;
         self.sink.append("index_starts", Arr::U32(&starts))?;
-        self.buf_indices.drain(..n);
 
-        if self.val_kind == Some(DataType::U32) {
-            let pieces: Vec<_> = self.buf_u32[..n]
-                .par_chunks(ENCODE_PIECE)
-                .map(encode_for)
-                .collect();
+        if let Some(vals) = vals {
+            let pieces: Vec<_> = vals.par_chunks(ENCODE_PIECE).map(encode_for).collect();
             let (mut data, mut idx) = (Vec::new(), Vec::new());
             for (d, i) in pieces {
                 idx.extend(self.val.push_piece(d.len(), &i));
@@ -555,13 +579,15 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
             }
             self.sink.append("val_data", Arr::U32(&data))?;
             self.sink.append("val_idx", Arr::U32(&idx))?;
-            self.buf_u32.drain(..n);
         }
         Ok(())
     }
 
     pub(crate) fn finalize(mut self, row_names: &[String], col_names: &[String]) -> Result<()> {
-        self.flush(true)?;
+        // The stream's last block may be partial.
+        let (bi, bv) = (take(&mut self.buf_indices), take(&mut self.buf_u32));
+        let is_uint = self.val_kind == Some(DataType::U32);
+        self.encode(&bi, is_uint.then_some(&bv[..]))?;
 
         // Pad idxptr for trailing cells never streamed (e.g. an empty matrix).
         while self.idxptr.len() < self.ncol + 1 {
@@ -612,11 +638,10 @@ pub struct BpcellsH5Writer {
     layer: String,
     n_obs: usize,
     n_vars: usize,
-    obs: Option<ObsTable>,
-    var: Option<VarTable>,
-    obsm: Option<Embeddings>,
-    uns: Option<UnsTable>,
-    varm: Option<Varm>,
+    // Metadata is written as it arrives, so it isn't held through the matrix
+    // streams; only the names the matrices need at finalize are kept.
+    obs_names: Option<Vec<String>>,
+    var_names: Option<Vec<String>>,
     x_encoder: Option<BpcellsStreamEncoder<H5Sink>>,
     sparse_state: Option<PendingSparseMatrix>,
 }
@@ -686,11 +711,8 @@ impl BpcellsH5Writer {
             layer,
             n_obs,
             n_vars,
-            obs: None,
-            var: None,
-            obsm: None,
-            uns: None,
-            varm: None,
+            obs_names: None,
+            var_names: None,
             x_encoder: None,
             sparse_state: None,
         })
@@ -700,27 +722,105 @@ impl BpcellsH5Writer {
 #[async_trait]
 impl DatasetWriter for BpcellsH5Writer {
     async fn write_obs(&mut self, obs: &ObsTable) -> Result<()> {
-        self.obs = Some(obs.clone());
+        write_strings(&self.file.group("/")?, "cell.names", &obs.index)?;
+        let meta_grp = match self.file.group("meta.data") {
+            Ok(g) => g,
+            Err(_) => crate::h5::create_group(&self.file, "meta.data")?,
+        };
+        crate::h5seurat::seurat_write_meta_cols(&meta_grp, &obs.columns)?;
+        self.obs_names = Some(obs.index.clone());
         Ok(())
     }
 
     async fn write_var(&mut self, var: &VarTable) -> Result<()> {
-        self.var = Some(var.clone());
+        let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
+        write_strings(&assay_grp, "features", &var.index)?;
+        if !var.columns.is_empty() {
+            let mf_grp = match assay_grp.group("meta.features") {
+                Ok(g) => g,
+                Err(_) => crate::h5::create_group(&assay_grp, "meta.features")?,
+            };
+            crate::h5seurat::seurat_write_meta_cols(&mf_grp, &var.columns)?;
+        }
+        self.var_names = Some(var.index.clone());
         Ok(())
     }
 
     async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
-        self.obsm = Some(obsm.clone());
+        let reds_grp = self.reductions_group()?;
+        for (red_name, _, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
+            let red_grp = match reds_grp.group(red_name) {
+                Ok(g) => g,
+                Err(_) => crate::h5::create_group(&reds_grp, red_name)?,
+            };
+
+            // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs),
+            // as SeuratDisk and the dgCMatrix writer store it; R then reads
+            // it back as cells x components. Written a component at a time,
+            // not as a whole transposed copy.
+            let (n_obs, n_comps) = mat.shape;
+            let ds = red_grp
+                .new_dataset::<f64>()
+                .shape((n_comps, n_obs))
+                .create("cell.embeddings")?;
+            let mut row = vec![0.0f64; n_obs];
+            for i in 0..n_comps {
+                for (j, v) in row.iter_mut().enumerate() {
+                    *v = mat.data[j * n_comps + i];
+                }
+                ds.write_slice(&row, s![i, ..])?;
+            }
+
+            let key = if red_name.eq_ignore_ascii_case("pca") {
+                "PC_"
+            } else if red_name.eq_ignore_ascii_case("umap") {
+                "UMAP_"
+            } else {
+                ""
+            };
+            // Replacing, not creating: when varm came first it set key "".
+            crate::h5_str::write_str_array_attr(&red_grp, "active.assay", &[&self.assay])?;
+            crate::h5_str::write_str_array_attr(&red_grp, "key", &[key])?;
+        }
         Ok(())
     }
 
     async fn write_uns(&mut self, uns: &UnsTable) -> Result<()> {
-        self.uns = Some(uns.clone());
-        Ok(())
+        crate::h5seurat::seurat_write_uns(&self.file, uns)
     }
 
     async fn write_varm(&mut self, varm: &Varm) -> Result<()> {
-        self.varm = Some(varm.clone());
+        let reds_grp = self.reductions_group()?;
+        for (red_name, key, mat) in crate::h5seurat::reductions(&varm.map, "varm")? {
+            let red_grp = match reds_grp.group(red_name) {
+                Ok(g) => g,
+                Err(_) => crate::h5::create_group(&reds_grp, red_name)?,
+            };
+            crate::h5_str::write_str_attr(&red_grp, crate::h5seurat::VARM_KEY_ATTR, key)?;
+
+            let (n_vars, k) = mat.shape;
+            let mut buf = vec![0.0f64; n_vars * k];
+            for i in 0..n_vars {
+                for j in 0..k {
+                    buf[j * n_vars + i] = mat.data[i * k + j];
+                }
+            }
+            let arr_t = Array2::from_shape_vec((k, n_vars), buf)
+                .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
+            let ds = red_grp
+                .new_dataset::<f64>()
+                .shape((k, n_vars))
+                .create("feature.loadings")?;
+            ds.write(&arr_t)?;
+
+            // An obsm reduction of the same name sets these; don't override it.
+            if red_grp.attr("active.assay").is_err() {
+                crate::h5_str::write_str_array_attr(&red_grp, "active.assay", &[&self.assay])?;
+            }
+            if red_grp.attr("key").is_err() {
+                crate::h5_str::write_str_array_attr(&red_grp, "key", &[""])?;
+            }
+        }
         Ok(())
     }
 
@@ -779,16 +879,10 @@ impl DatasetWriter for BpcellsH5Writer {
         let state = self.sparse_state.take().ok_or_else(|| {
             ScxError::InvalidFormat("BPCells writer: end_sparse called without begin_sparse".into())
         })?;
-        let obs = self.obs.as_ref().ok_or_else(|| {
-            ScxError::InvalidFormat("BPCells writer end_sparse called before write_obs".into())
-        })?;
-        let var = self.var.as_ref().ok_or_else(|| {
-            ScxError::InvalidFormat("BPCells writer end_sparse called before write_var".into())
-        })?;
-
+        let (obs, var) = self.names("end_sparse")?;
         let (row_names, col_names) = match state.group_prefix.as_str() {
-            "layers" => (&var.index, &obs.index),
-            "obsp" => (&obs.index, &obs.index),
+            "layers" => (var, obs),
+            "obsp" => (obs, obs),
             other => {
                 return Err(ScxError::InvalidFormat(format!(
                     "BPCells writer: unsupported sparse group prefix '{other}'"
@@ -814,143 +908,50 @@ impl DatasetWriter for BpcellsH5Writer {
 
     async fn finalize(&mut self) -> Result<()> {
         let group_path = format!("assays/{}/{}", self.assay, self.layer);
-
-        let obs = self.obs.as_ref().ok_or_else(|| {
-            ScxError::InvalidFormat("BPCells writer finalize called before write_obs".into())
-        })?;
-        let var = self.var.as_ref().ok_or_else(|| {
-            ScxError::InvalidFormat("BPCells writer finalize called before write_var".into())
-        })?;
-
-        let root = self.file.group("/")?;
-        write_strings(&root, "cell.names", &obs.index)?;
-        let meta_grp = match self.file.group("meta.data") {
-            Ok(g) => g,
-            Err(_) => crate::h5::create_group(&self.file, "meta.data")?,
-        };
-        crate::h5seurat::seurat_write_meta_cols(&meta_grp, &obs.columns)?;
-
-        let assay_grp = self.file.group(&format!("assays/{}", self.assay))?;
-        write_strings(&assay_grp, "features", &var.index)?;
-        if !var.columns.is_empty() {
-            let mf_grp = match assay_grp.group("meta.features") {
-                Ok(g) => g,
-                Err(_) => crate::h5::create_group(&assay_grp, "meta.features")?,
-            };
-            crate::h5seurat::seurat_write_meta_cols(&mf_grp, &var.columns)?;
-        }
-
         // Always create reductions — SeuratDisk requires it even when empty.
-        let reds_grp = Some(match self.file.group("reductions") {
-            Ok(g) => g,
-            Err(_) => crate::h5::create_group(&self.file, "reductions")?,
-        });
-
-        if let (Some(reds_grp), Some(obsm)) = (&reds_grp, &self.obsm) {
-            for (red_name, _, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
-                let red_grp = match reds_grp.group(red_name) {
-                    Ok(g) => g,
-                    Err(_) => crate::h5::create_group(reds_grp, red_name)?,
-                };
-
-                // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs),
-                // as SeuratDisk and the dgCMatrix writer store it; R then reads
-                // it back as cells x components.
-                let (n_obs, n_comps) = mat.shape;
-                let arr_t = Array2::from_shape_vec((n_obs, n_comps), mat.data.clone())
-                    .map_err(|e| ScxError::InvalidFormat(e.to_string()))?
-                    .reversed_axes()
-                    .as_standard_layout()
-                    .into_owned();
-                let ds = red_grp
-                    .new_dataset::<f64>()
-                    .shape((n_comps, n_obs))
-                    .create("cell.embeddings")?;
-                ds.write(&arr_t)?;
-
-                let key = if red_name.eq_ignore_ascii_case("pca") {
-                    "PC_"
-                } else if red_name.eq_ignore_ascii_case("umap") {
-                    "UMAP_"
-                } else {
-                    ""
-                };
-                let assay_attr = vec![VarLenUnicode::from_str(&self.assay).unwrap_or_default()];
-                let key_attr = vec![VarLenUnicode::from_str(key).unwrap_or_default()];
-                let attr = red_grp
-                    .new_attr::<VarLenUnicode>()
-                    .shape(assay_attr.len())
-                    .create("active.assay")?;
-                attr.write(&Array1::from_vec(assay_attr))?;
-                let attr = red_grp
-                    .new_attr::<VarLenUnicode>()
-                    .shape(key_attr.len())
-                    .create("key")?;
-                attr.write(&Array1::from_vec(key_attr))?;
-            }
-        }
-
-        if let (Some(reds_grp), Some(varm)) = (&reds_grp, &self.varm) {
-            for (red_name, key, mat) in crate::h5seurat::reductions(&varm.map, "varm")? {
-                let red_grp = match reds_grp.group(red_name) {
-                    Ok(g) => g,
-                    Err(_) => crate::h5::create_group(reds_grp, red_name)?,
-                };
-                crate::h5_str::write_str_attr(&red_grp, crate::h5seurat::VARM_KEY_ATTR, key)?;
-
-                let (n_vars, k) = mat.shape;
-                let mut buf = vec![0.0f64; n_vars * k];
-                for i in 0..n_vars {
-                    for j in 0..k {
-                        buf[j * n_vars + i] = mat.data[i * k + j];
-                    }
-                }
-                let arr_t = Array2::from_shape_vec((k, n_vars), buf)
-                    .map_err(|e| ScxError::InvalidFormat(e.to_string()))?;
-                let ds = red_grp
-                    .new_dataset::<f64>()
-                    .shape((k, n_vars))
-                    .create("feature.loadings")?;
-                ds.write(&arr_t)?;
-
-                if red_grp.attr("active.assay").is_err() {
-                    let assay_attr = vec![VarLenUnicode::from_str(&self.assay).unwrap_or_default()];
-                    let attr = red_grp
-                        .new_attr::<VarLenUnicode>()
-                        .shape(assay_attr.len())
-                        .create("active.assay")?;
-                    attr.write(&Array1::from_vec(assay_attr))?;
-                }
-                if red_grp.attr("key").is_err() {
-                    let key_attr = vec![VarLenUnicode::from_str("").unwrap_or_default()];
-                    let attr = red_grp
-                        .new_attr::<VarLenUnicode>()
-                        .shape(key_attr.len())
-                        .create("key")?;
-                    attr.write(&Array1::from_vec(key_attr))?;
-                }
-            }
-        }
-
-        if let Some(uns) = &self.uns {
-            crate::h5seurat::seurat_write_uns(&self.file, uns)?;
-        }
+        self.reductions_group()?;
 
         // Stream-finalize X. Datasets were appended during write_x_chunk; if no
         // X chunks arrived, create an empty matrix to match prior behaviour.
-        match self.x_encoder.take() {
-            Some(enc) => enc.finalize(&var.index, &obs.index)?,
+        let x_encoder = self.x_encoder.take();
+        let (obs, var) = self.names("finalize")?;
+        let enc = match x_encoder {
+            Some(enc) => enc,
             None => BpcellsStreamEncoder::new_h5(
                 &self.file,
                 &group_path,
                 StorageOrder::Col,
                 self.n_vars,
                 self.n_obs,
-            )?
-            .finalize(&var.index, &obs.index)?,
-        }
+            )?,
+        };
+        enc.finalize(var, obs)?;
         self.file.flush()?;
         Ok(())
+    }
+}
+
+impl BpcellsH5Writer {
+    fn reductions_group(&self) -> Result<Group> {
+        Ok(match self.file.group("reductions") {
+            Ok(g) => g,
+            Err(_) => crate::h5::create_group(&self.file, "reductions")?,
+        })
+    }
+
+    /// (obs names, var names), required before any matrix is finalized.
+    fn names(&self, step: &str) -> Result<(&[String], &[String])> {
+        let missing = |what: &str| {
+            ScxError::InvalidFormat(format!("BPCells writer {step} called before {what}"))
+        };
+        Ok((
+            self.obs_names
+                .as_deref()
+                .ok_or_else(|| missing("write_obs"))?,
+            self.var_names
+                .as_deref()
+                .ok_or_else(|| missing("write_var"))?,
+        ))
     }
 }
 
@@ -1452,6 +1453,130 @@ mod tests {
         assert_eq!(
             read_version_attr(&file.group("matrix").unwrap()).as_deref(),
             Some("packed-float-matrix-v2")
+        );
+    }
+
+    /// Regression: push_chunk used to copy every chunk's indices into a buffer
+    /// before encoding (77 MB at peak on 100k HLCA cells). It must encode from
+    /// the chunk and hold only the < 128-value tail.
+    #[test]
+    fn stream_encoder_buffers_only_the_tail() {
+        let (n_genes, n_cells) = (300usize, 2000usize);
+        let (cg, cv) = synth_cells(n_genes, n_cells);
+        let dir = tempfile::tempdir().unwrap();
+        let f = File::create(dir.path().join("tail.h5")).unwrap();
+        let mut enc =
+            BpcellsStreamEncoder::new_h5(&f, "m", StorageOrder::Col, n_genes, n_cells).unwrap();
+        for start in [0, 1000] {
+            let (mut indptr, mut indices, mut data) = (vec![0u64], Vec::new(), Vec::new());
+            for c in start..start + 1000 {
+                indices.extend_from_slice(&cg[c]);
+                data.extend_from_slice(&cv[c]);
+                indptr.push(indices.len() as u64);
+            }
+            let nnz = indices.len();
+            enc.push_chunk(&MatrixChunk {
+                row_offset: start,
+                nrows: 1000,
+                data: SparseMatrixCSR {
+                    shape: (1000, n_genes),
+                    indptr,
+                    indices,
+                    data: TypedVec::U32(data),
+                },
+            })
+            .unwrap();
+            assert!(nnz > 1000, "chunk too small to tell: {nnz}");
+            for (name, buf) in [("indices", &enc.buf_indices), ("values", &enc.buf_u32)] {
+                assert!(buf.len() < 128, "{name} buffer holds {} values", buf.len());
+                assert!(
+                    buf.capacity() < 256,
+                    "{name} buffer grew to {}",
+                    buf.capacity()
+                );
+            }
+        }
+    }
+
+    /// Regression: the writer used to clone obs/var/obsm/varm/uns and write
+    /// them at finalize, holding them through the matrix streams (~60 MB on
+    /// 100k HLCA cells). They are now written on arrival, so obs must be in
+    /// the file before finalize, and varm before obsm must give the same
+    /// reduction attributes as the usual order (obsm's key wins).
+    #[tokio::test]
+    async fn bpcells_writer_writes_metadata_on_arrival_in_any_order() {
+        use crate::ir::{DenseMatrix, Embeddings, ObsTable, VarTable, Varm};
+        use crate::stream::DatasetWriter;
+        use hdf5::types::VarLenUnicode;
+
+        let (n_obs, n_vars) = (3usize, 4usize);
+        let obs = ObsTable {
+            index: vec!["c0".into(), "c1".into(), "c2".into()],
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+            columns: vec![],
+        };
+        let mut obsm = Embeddings::default();
+        obsm.map.insert(
+            "X_pca".into(),
+            DenseMatrix {
+                shape: (n_obs, 2),
+                data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            },
+        );
+        let mut varm = Varm::default();
+        varm.map.insert(
+            "X_pca".into(),
+            DenseMatrix {
+                shape: (n_vars, 2),
+                data: (0..8).map(f64::from).collect(),
+            },
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut attrs = Vec::new();
+        for varm_first in [false, true] {
+            let path = dir.path().join(format!("order_{varm_first}.h5seurat"));
+            let mut w = BpcellsH5Writer::create(
+                &path,
+                n_obs,
+                n_vars,
+                DataType::U32,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            w.write_obs(&obs).await.unwrap();
+            assert!(
+                w.file.dataset("cell.names").is_ok(),
+                "obs not written on arrival"
+            );
+            w.write_var(&var).await.unwrap();
+            if varm_first {
+                w.write_varm(&varm).await.unwrap();
+                w.write_obsm(&obsm).await.unwrap();
+            } else {
+                w.write_obsm(&obsm).await.unwrap();
+                w.write_varm(&varm).await.unwrap();
+            }
+            w.finalize().await.unwrap();
+            drop(w);
+
+            let red = File::open(&path).unwrap().group("reductions/pca").unwrap();
+            let read = |name: &str| -> Vec<String> {
+                let a = red.attr(name).unwrap().read_1d::<VarLenUnicode>().unwrap();
+                a.iter().map(|s| s.as_str().to_string()).collect()
+            };
+            attrs.push((read("key"), read("active.assay")));
+        }
+        assert_eq!(attrs[0], (vec!["PC_".to_string()], vec!["RNA".to_string()]));
+        assert_eq!(
+            attrs[0], attrs[1],
+            "varm before obsm changed the attributes"
         );
     }
 

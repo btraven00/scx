@@ -1363,11 +1363,10 @@ mod tests {
         let p = dir.path().join("a.h5seurat");
         let mut b = H5SeuratBuilder::new(&p, 4, 4, &opts).unwrap();
         check(b.add_obsm(obsm()).err().unwrap());
-        // BPCells writes obsm at finalize.
+        // BPCells writes obsm on arrival too, so it rejects at the same point.
         let p = dir.path().join("b.h5seurat");
         let mut b = BpcellsH5SeuratBuilder::new(&p, 4, 4, &opts).unwrap();
-        b.add_obsm(obsm()).unwrap();
-        check(b.finalize().err().unwrap());
+        check(b.add_obsm(obsm()).err().unwrap());
     }
 
     // Without SeuratDisk compat, `graphs` is not pre-created, so obsp's
