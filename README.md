@@ -39,7 +39,7 @@ build can opt out with `--no-default-features` — see
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
 | MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
 | Parquet, local or S3/GCS/HTTP (build with `--features net`) | ✓ | |
-| Seurat `.rds` / `.rda` (counts, meta.data, reductions, graphs; v3/v4 `Assay`, v5 `Assay5`) | ✓ | |
+| Seurat `.rds` / `.rda` (layers, cell and feature metadata, reductions, graphs; v3/v4 `Assay`, v5 `Assay5`) | ✓ | |
 | bixverse binary sparse store, v3 and v4 (build with `--features bixverse`) | ✓ | |
 
 Any readable format converts to any writable one: everything goes through a
