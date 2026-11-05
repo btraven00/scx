@@ -1,5 +1,6 @@
-//! Parallel inflate (and deflate, see [`DeflateAppender`]) for deflate-chunked
-//! 1-D HDF5 datasets.
+//! Parallel reads (and deflate, see [`DeflateAppender`]) of chunked 1-D HDF5
+//! datasets: unfiltered chunks are `pread` straight into place, deflate
+//! chunks are inflated across cores.
 //!
 //! libhdf5 decompresses a dataset's gzip chunks single-threaded, under the
 //! hdf5-metno process-global lock — so a normal `read_slice` is decode-bound on
@@ -8,8 +9,8 @@
 //! the raw compressed chunks (cheap) and inflate them across all cores.
 //!
 //! This path is used only when it is provably equivalent to the normal read:
-//! the dataset must be 1-D, chunked, and filtered by either deflate alone or
-//! shuffle-then-deflate. Anything else (blosc, scale-offset, fletcher32, …)
+//! the dataset must be 1-D, chunked, stored little-endian, and either
+//! unfiltered or filtered by deflate alone or shuffle-then-deflate. Anything else (blosc, scale-offset, fletcher32, …)
 //! falls back, because raw inflate would not reproduce the stored values.
 //! Per-chunk we honour the filter mask: HDF5 may store an individual chunk
 //! with a filter skipped when it didn't help.
@@ -45,24 +46,50 @@ use crate::error::{Result, ScxError};
 pub struct ChunkPlan {
     /// Chunk length in elements.
     pub chunk_len: usize,
-    /// Filter-mask bit for deflate — its index in the pipeline.
-    deflate_bit: u32,
+    /// Filter-mask bit for deflate — its index in the pipeline; `None` for
+    /// an unfiltered dataset, whose chunks hold the values as stored.
+    deflate_bit: Option<u32>,
     /// Filter-mask bit for shuffle, when the pipeline has one.
     shuffle_bit: Option<u32>,
 }
 
-/// Decode plan if `ds` is a 1-D chunked dataset this module can read directly;
-/// otherwise `None`, and the caller must use the normal HDF5 read path.
+impl ChunkPlan {
+    /// A set bit in a chunk's filter mask means that filter was skipped for
+    /// it, so a stage applies only when its own bit is clear.
+    fn deflated(&self, mask: u32) -> bool {
+        self.deflate_bit.is_some_and(|bit| mask & (1 << bit) == 0)
+    }
+
+    fn shuffled(&self, mask: u32) -> bool {
+        self.shuffle_bit.is_some_and(|bit| mask & (1 << bit) == 0)
+    }
+
+    /// The chunk's stored bytes are its values, untouched by any filter.
+    fn stored_raw(&self, mask: u32) -> bool {
+        !self.deflated(mask) && !self.shuffled(mask)
+    }
+}
+
+/// Decode plan if `ds` is a 1-D chunked dataset this module can read directly
+/// (unfiltered, deflate or shuffle+deflate, stored little-endian); otherwise
+/// `None`, and the caller must use the normal HDF5 read path.
 ///
 /// Filters are applied in pipeline order on write and unwound in reverse on
 /// read, so `[Shuffle, Deflate]` means inflate first, then un-shuffle. The
-/// filter-mask bit for each filter is its index in that pipeline.
+/// filter-mask bit for each filter is its index in that pipeline. An
+/// unfiltered chunk is read straight into place with `pread`; `H5Dread` would
+/// copy it through the chunk cache, one chunk at a time, under libhdf5's lock.
 pub fn chunk_plan(ds: &Dataset) -> Option<ChunkPlan> {
     let (deflate_bit, shuffle_bit) = match ds.filters().as_slice() {
-        [Filter::Deflate(_)] => (0, None),
-        [Filter::Shuffle, Filter::Deflate(_)] => (1, Some(0)),
+        [] => (None, None),
+        [Filter::Deflate(_)] => (Some(0), None),
+        [Filter::Shuffle, Filter::Deflate(_)] => (Some(1), Some(0)),
         _ => return None,
     };
+    // Bytes are taken as stored, so only little-endian storage decodes here.
+    if ds.dtype().ok()?.byte_order() == hdf5::datatype::ByteOrder::BigEndian {
+        return None;
+    }
     match ds.chunk() {
         Some(dims) if dims.len() == 1 => Some(ChunkPlan {
             chunk_len: dims[0],
@@ -223,7 +250,8 @@ pub fn copy_chunks(
         )));
     }
     let filters = src.filters();
-    let plan = chunk_plan(src);
+    // Unfiltered chunks are checked as stored; a plan is for decoding.
+    let plan = chunk_plan(src).filter(|_| !filters.is_empty());
     if check.is_some() && !filters.is_empty() && plan.is_none() {
         return Err(ScxError::InvalidFormat(format!(
             "{}: cannot decode {filters:?} to check it",
@@ -425,7 +453,7 @@ fn decode_chunk(
     cbuf: &[u8],
     elem_size: usize,
 ) -> Result<Vec<u8>> {
-    let bytes = if filter_mask & (1 << plan.deflate_bit) != 0 {
+    let bytes = if !plan.deflated(filter_mask) {
         cbuf.to_vec()
     } else {
         // A chunk inflates to exactly its full size (the last one too), so
@@ -464,7 +492,8 @@ pub fn read_range_parallel(
     plan: ChunkPlan,
 ) -> Result<Vec<u8>> {
     let mut out = vec![0u8; b.saturating_sub(a) * elem_size];
-    ChunkReader::with_plan(ds, plan, false)?.read_into(a, elem_size, &mut out)?;
+    ChunkReader::with_plan(ds, plan, a == 0 && b >= ds.size())?
+        .read_into(a, elem_size, &mut out)?;
     Ok(out)
 }
 
@@ -572,6 +601,17 @@ impl ChunkReader {
         };
         slices.into_par_iter().zip(&*locs).try_for_each(
             |((first, lo, dst), &(mask, addr, size))| {
+                let from = (lo - first) * elem_size;
+                if plan.stored_raw(mask) {
+                    // The values as stored: read the wanted part straight
+                    // into place, with no chunk buffer and no copy.
+                    if from + dst.len() > size {
+                        return Err(ScxError::InvalidFormat(format!(
+                            "chunk at element {first} is stored with {size} bytes, too few"
+                        )));
+                    }
+                    return Ok(read_at(file, dst, addr + from as u64)?);
+                }
                 let mut cbuf = vec![0u8; size];
                 read_at(file, &mut cbuf, addr)?;
                 decode_into(plan, mask, &cbuf, first, lo, dst, elem_size)
@@ -589,7 +629,9 @@ pub(crate) fn read_range_typed<T: bytemuck::Pod>(
     b: usize,
     plan: ChunkPlan,
 ) -> Result<Vec<T>> {
-    ChunkReader::with_plan(ds, plan, false)?.read_typed(a, b)
+    // A whole-dataset read lists every chunk in one pass; a per-chunk lookup
+    // walks HDF5's index each time.
+    ChunkReader::with_plan(ds, plan, a == 0 && b >= ds.size())?.read_typed(a, b)
 }
 
 impl ChunkReader {
@@ -642,12 +684,16 @@ fn decode_into(
     elem_size: usize,
 ) -> Result<()> {
     let whole = dst.len() == plan.chunk_len * elem_size;
-    let deflated = mask & (1 << plan.deflate_bit) == 0;
-    let shuffled = plan.shuffle_bit.is_some_and(|bit| mask & (1 << bit) == 0);
-    if whole && deflated && !shuffled {
+    if whole && plan.deflated(mask) && !plan.shuffled(mask) {
         return inflate_exact(cbuf, dst);
     }
-    let bytes = decode_chunk(plan, mask, cbuf, elem_size)?;
+    let decoded;
+    let bytes = if plan.stored_raw(mask) {
+        cbuf
+    } else {
+        decoded = decode_chunk(plan, mask, cbuf, elem_size)?;
+        &decoded
+    };
     let from = (lo - first) * elem_size;
     let src = bytes.get(from..from + dst.len()).ok_or_else(|| {
         ScxError::InvalidFormat(format!(
@@ -1205,5 +1251,92 @@ mod tests {
             }
         }
         assert_eq!(unshuffle(&shuffled, e), orig);
+    }
+
+    /// An unfiltered chunked dataset is read with `pread` straight into
+    /// place. Every kind of range must match the values written: whole,
+    /// chunk-aligned, inside one chunk, across a boundary, the short last
+    /// chunk, and empty.
+    #[test]
+    fn unfiltered_chunked_reads_match_the_values_written() {
+        let path = tmp("unfiltered");
+        let n = 10_000usize;
+        let u: Vec<u32> = (0..n as u32)
+            .map(|i| i.wrapping_mul(2_654_435_761))
+            .collect();
+        let f64s: Vec<f64> = u.iter().map(|&v| v as f64 * 0.5).collect();
+        {
+            let f = File::create(&path).unwrap();
+            f.new_dataset_builder()
+                .with_data(&u)
+                .chunk(1024)
+                .create("u")
+                .unwrap();
+            f.new_dataset_builder()
+                .with_data(&f64s)
+                .chunk(1024)
+                .create("f")
+                .unwrap();
+        }
+        let f = File::open(&path).unwrap();
+        let ranges = [
+            (0, n),
+            (0, 1024),
+            (1000, 1100),
+            (1023, 1025),
+            (9_000, n),
+            (9_999, n),
+            (3_000, 3_000),
+        ];
+        for (name, want) in [
+            ("u", bytemuck::cast_slice::<u32, u8>(&u)),
+            ("f", bytemuck::cast_slice::<f64, u8>(&f64s)),
+        ] {
+            let ds = f.dataset(name).unwrap();
+            let plan = chunk_plan(&ds).expect("an unfiltered chunked dataset has a plan");
+            let elem = ds.dtype().unwrap().size();
+            for (a, b) in ranges {
+                let got = read_range_parallel(&ds, a, b, elem, plan).unwrap();
+                assert_eq!(got, &want[a * elem..b * elem], "{name}[{a}..{b}]");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Bytes are taken as stored, so big-endian storage gets no plan and
+    /// libhdf5 converts it on read, as before.
+    #[test]
+    fn big_endian_storage_has_no_plan_and_still_reads() {
+        use hdf5_sys::h5t::{H5T_order_t, H5Tset_order};
+        let path = tmp("bigendian");
+        let vals: Vec<i32> = (0..3000).collect();
+        {
+            let f = File::create(&path).unwrap();
+            let dt = hdf5::Datatype::from_type::<i32>().unwrap();
+            hdf5::sync::sync(|| unsafe { H5Tset_order(dt.id(), H5T_order_t::H5T_ORDER_BE) });
+            let ds = f
+                .new_dataset_builder()
+                .empty_as(&dt)
+                .chunk(1024)
+                .shape(vals.len())
+                .create("be")
+                .unwrap();
+            ds.write(&vals).unwrap();
+        }
+        let f = File::open(&path).unwrap();
+        let ds = f.dataset("be").unwrap();
+        assert_eq!(
+            ds.dtype().unwrap().byte_order(),
+            hdf5::datatype::ByteOrder::BigEndian
+        );
+        assert!(
+            chunk_plan(&ds).is_none(),
+            "big-endian storage must not take the pread path"
+        );
+        assert_eq!(
+            crate::h5::read_u32_range(&ds, 10..20).unwrap(),
+            (10..20).collect::<Vec<u32>>()
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
