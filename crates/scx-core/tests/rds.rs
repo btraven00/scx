@@ -5,6 +5,9 @@
 //! Split layers put X rows in layer order, so everything is compared by cell
 //! name.
 
+#[path = "common/convert.rs"]
+mod convert;
+
 use futures::executor::block_on;
 use futures::StreamExt;
 use scx_core::detect::{detect, Format};
@@ -104,6 +107,17 @@ fn check(name: &str) {
                 continue;
             }
             assert!(!col.is_na(row), "{name}: {col_name}[{row}] is NA");
+            // The R type maps to its IR type, not to a lossier one
+            // (integer to float, logical to integer, character to factor).
+            let want_type = match spec["type"].as_str().unwrap() {
+                "categorical" => "categorical",
+                "int" => "int32",
+                "bool" => "bool",
+                "float" => "float64",
+                "string" => "string",
+                t => panic!("unknown type {t}"),
+            };
+            assert_eq!(col.data.dtype_str(), want_type, "{name}: {col_name} type");
             let got = col.data.value_str(row);
             let ok = match spec["type"].as_str().unwrap() {
                 "float" => got.parse::<f64>().unwrap() == want.as_f64().unwrap(),
@@ -414,4 +428,275 @@ fn unreadable_objects_are_described() {
         e.contains("layer 'counts'") && e.contains("only dgCMatrix layers"),
         "{e}"
     );
+}
+
+/// A dense row-major matrix from a nested JSON array.
+fn json_matrix(v: &Value) -> Vec<Vec<f64>> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect()
+        })
+        .collect()
+}
+
+fn dense_obsp(r: &mut dyn scx_core::stream::DatasetReader, name: &str) -> Vec<Vec<f64>> {
+    let metas = block_on(r.obsp_metas()).unwrap();
+    let meta = metas.iter().find(|m| m.name == name).unwrap();
+    let n = meta.shape.0;
+    let mut out = vec![vec![0.0; meta.shape.1]; n];
+    let mut rows = 0;
+    for c in block_on(r.obsp_stream(meta, 4).collect::<Vec<_>>()) {
+        let c = c.unwrap();
+        let v = c.data.data.to_f64();
+        for k in 0..c.nrows {
+            let (a, b) = (c.data.indptr[k] as usize, c.data.indptr[k + 1] as usize);
+            assert!(
+                c.data.indices[a..b].windows(2).all(|w| w[0] < w[1]),
+                "{name}: row columns not sorted"
+            );
+            for j in a..b {
+                out[c.row_offset + k][c.data.indices[j] as usize] = v[j];
+            }
+        }
+        rows += c.nrows;
+    }
+    assert_eq!(rows, n);
+    out
+}
+
+/// @reductions -> obsm (`X_pca`, `X_umap`) and varm (`X_pca` loadings; the
+/// umap has none), @graphs -> obsp, all against expected.json by cell name.
+/// The graph is asymmetric, so a missed transpose of R's CSC shows.
+fn check_slots(name: &str) {
+    let e = expected();
+    let mut r = block_on(open(tiny(name).to_str().unwrap(), &OpenOptions::new(4))).unwrap();
+    let obs = block_on(r.obs()).unwrap();
+    let names: Vec<&str> = e["obs_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let src: Vec<usize> = obs
+        .index
+        .iter()
+        .map(|c| names.iter().position(|n| n == c).unwrap())
+        .collect();
+
+    let obsm = block_on(r.obsm()).unwrap();
+    let mut keys: Vec<&String> = obsm.map.keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["X_pca", "X_umap"], "{name}");
+    let pca = json_matrix(&e["obsm"]["X_pca"]);
+    for (key, scale) in [("X_pca", 1.0), ("X_umap", 2.0)] {
+        let m = &obsm.map[key];
+        assert_eq!(m.shape, (6, 2), "{name}: {key}");
+        for (row, &s) in src.iter().enumerate() {
+            let want: Vec<f64> = pca[s].iter().map(|v| v * scale).collect();
+            assert_eq!(
+                m.data[row * 2..row * 2 + 2],
+                want[..],
+                "{name}: {key} {}",
+                names[s]
+            );
+        }
+    }
+
+    let varm = block_on(r.varm()).unwrap();
+    let keys: Vec<&String> = varm.map.keys().collect();
+    assert_eq!(keys, ["X_pca"], "{name}");
+    let want: Vec<f64> = json_matrix(&e["varm"]["PCs"]).concat();
+    assert_eq!(varm.map["X_pca"].shape, (5, 2), "{name}");
+    assert_eq!(varm.map["X_pca"].data, want, "{name}");
+
+    let got = dense_obsp(&mut *r, "RNA_snn");
+    let want = json_matrix(&e["obsp"]["connectivities"]);
+    for (i, &si) in src.iter().enumerate() {
+        for (j, &sj) in src.iter().enumerate() {
+            assert_eq!(
+                got[i][j], want[si][sj],
+                "{name}: RNA_snn[{}, {}]",
+                names[si], names[sj]
+            );
+        }
+    }
+}
+
+#[test]
+fn reductions_and_graphs_v4() {
+    check_slots("tiny_v4.rds");
+}
+
+#[test]
+fn reductions_and_graphs_v5() {
+    check_slots("tiny_v5.rds");
+}
+
+#[test]
+fn reductions_and_graphs_follow_split_row_order() {
+    check_slots("tiny_v5_split.rds");
+}
+
+/// The big objects' reductions and graph are past LAZY_MIN, so they come
+/// from the fetch pass; formulas as in scripts/make_tiny_fixtures_rds.R.
+fn check_big_slots(name: &str) {
+    let mut r = block_on(open(tiny(name).to_str().unwrap(), &OpenOptions::new(700))).unwrap();
+    let obs = block_on(r.obs()).unwrap();
+    let ks: Vec<usize> = obs.index.iter().map(|c| c[1..].parse().unwrap()).collect();
+    let mut row_of = vec![0; ks.len()];
+    for (row, &k) in ks.iter().enumerate() {
+        row_of[k] = row;
+    }
+    let nc = ks.len();
+
+    let obsm = block_on(r.obsm()).unwrap();
+    let pca = &obsm.map["X_pca"];
+    assert_eq!(pca.shape, (nc, 2), "{name}");
+    for (row, &k) in ks.iter().enumerate() {
+        assert_eq!(
+            pca.data[row * 2..row * 2 + 2],
+            [k as f64, k as f64 + 0.1],
+            "{name}: c{k}"
+        );
+    }
+    let varm = block_on(r.varm()).unwrap();
+    let want: Vec<f64> = (0..6).flat_map(|g| [g as f64, g as f64 - 1.0]).collect();
+    assert_eq!(varm.map["X_pca"].data, want, "{name}");
+
+    let metas = block_on(r.obsp_metas()).unwrap();
+    assert_eq!(metas.len(), 1, "{name}");
+    let mut seen = 0;
+    for c in block_on(r.obsp_stream(&metas[0], 700).collect::<Vec<_>>()) {
+        let c = c.unwrap();
+        let v = c.data.data.to_f64();
+        for i in 0..c.nrows {
+            let k = ks[c.row_offset + i];
+            let (a, b) = (c.data.indptr[i] as usize, c.data.indptr[i + 1] as usize);
+            let mut got: Vec<(u32, f64)> = (a..b).map(|j| (c.data.indices[j], v[j])).collect();
+            let mut want = vec![
+                (row_of[(k + 1) % nc] as u32, (k % 7 + 1) as f64),
+                (row_of[(k + 2) % nc] as u32, 0.5),
+            ];
+            got.sort_by_key(|e| e.0);
+            want.sort_by_key(|e| e.0);
+            assert_eq!(got, want, "{name}: graph row c{k}");
+        }
+        seen += c.nrows;
+    }
+    assert_eq!(seen, nc, "{name}");
+}
+
+#[test]
+fn large_reductions_and_graph_v4() {
+    check_big_slots("big_v4.rds");
+}
+
+#[test]
+fn large_reductions_and_graph_v5_split() {
+    check_big_slots("big_v5_split.rds");
+}
+
+/// The file `scx convert x.rds out.h5ad` writes, read with hdf5 directly
+/// rather than scx's reader: each R meta.data type lands as the AnnData
+/// encoding pandas reads back as the same type, NA included, and the
+/// reductions and graph are there.
+#[tokio::test]
+async fn rds_to_h5ad_keeps_obs_types_and_slots() {
+    use hdf5::types::VarLenUnicode;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.h5ad");
+    let mut r = convert::open(&tiny("tiny_v5_split.rds"), "counts", 4).await;
+    convert::write(&mut *r, convert::Out::H5ad, &path, 4).await;
+
+    let f = hdf5::File::open(&path).unwrap();
+    let enc = |loc: &hdf5::Location| -> String {
+        loc.attr("encoding-type")
+            .unwrap()
+            .read_scalar::<VarLenUnicode>()
+            .unwrap()
+            .to_string()
+    };
+    let obs = f.group("obs").unwrap();
+    // R type -> (encoding, dtype of the values)
+    for (col, want_enc, want_dtype) in [
+        ("cell_type", "categorical", None), // factor with NA -> code -1
+        ("batch", "nullable-integer", Some("i32")), // integer with NA
+        ("flag", "nullable-boolean", Some("bool")), // logical with NA
+        ("score", "array", Some("f64")),    // double, NA as NaN
+        ("is_doublet", "array", Some("bool")), // logical, no NA
+        ("donor", "string-array", None),    // character
+        ("n_counts", "array", Some("i32")), // integer, no NA
+    ] {
+        let (got_enc, ds) = match obs.group(col) {
+            Ok(g) => (enc(&g), g.dataset("values").ok()),
+            Err(_) => {
+                let ds = obs
+                    .dataset(col)
+                    .unwrap_or_else(|_| panic!("obs/{col} missing"));
+                (enc(&ds), Some(ds))
+            }
+        };
+        assert_eq!(got_enc, want_enc, "obs/{col}");
+        if let Some(want) = want_dtype {
+            let td = ds.unwrap().dtype().unwrap().to_descriptor().unwrap();
+            let got = match td {
+                hdf5::types::TypeDescriptor::Integer(hdf5::types::IntSize::U4) => "i32",
+                hdf5::types::TypeDescriptor::Float(hdf5::types::FloatSize::U8) => "f64",
+                hdf5::types::TypeDescriptor::Boolean => "bool",
+                other => panic!("obs/{col}: dtype {other:?}"),
+            };
+            assert_eq!(got, want, "obs/{col}");
+        }
+    }
+    // NA positions survive: batch and flag masks, score NaN, cell_type -1.
+    let e = expected();
+    let names: Vec<String> = f
+        .dataset("obs/_index")
+        .unwrap()
+        .read_1d::<VarLenUnicode>()
+        .unwrap()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let row = |col: &str, i: usize| -> bool {
+        let cell = &names[i];
+        let k = e["obs_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|n| n == cell.as_str())
+            .unwrap();
+        e["obs"][col]["values"][k].is_null()
+    };
+    for col in ["batch", "flag"] {
+        let mask = f
+            .dataset(&format!("obs/{col}/mask"))
+            .unwrap()
+            .read_raw::<bool>()
+            .unwrap();
+        for (i, &m) in mask.iter().enumerate() {
+            assert_eq!(m, row(col, i), "obs/{col}/mask[{i}]");
+        }
+    }
+    let score = f.dataset("obs/score").unwrap().read_raw::<f64>().unwrap();
+    let codes = f
+        .dataset("obs/cell_type/codes")
+        .unwrap()
+        .read_raw::<i8>()
+        .unwrap();
+    for i in 0..names.len() {
+        assert_eq!(score[i].is_nan(), row("score", i), "obs/score[{i}]");
+        assert_eq!(codes[i] == -1, row("cell_type", i), "obs/cell_type[{i}]");
+    }
+
+    assert_eq!(f.dataset("obsm/X_pca").unwrap().shape(), [6, 2]);
+    assert_eq!(f.dataset("obsm/X_umap").unwrap().shape(), [6, 2]);
+    assert_eq!(f.dataset("varm/X_pca").unwrap().shape(), [5, 2]);
+    assert!(f.group("obsp/RNA_snn").is_ok());
 }

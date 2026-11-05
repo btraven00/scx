@@ -3,13 +3,16 @@
 //! Supports the v3/v4 `Assay` class (`@counts`, `@data` dgCMatrix slots) and
 //! the v5 `Assay5` class (`@layers`, with cell and feature names in the
 //! `@cells` / `@features` LogMaps), including layers split by group
-//! (`counts.g1`, `counts.g2`, ...). Everything else on the object
-//! (reductions, graphs, scale.data, commands) is ignored.
+//! (`counts.g1`, `counts.g2`, ...). `@reductions` become obsm (`X_<name>`,
+//! cell embeddings) and varm (feature loadings of reductions on the read
+//! assay), `@graphs` become obsp. Everything else on the object (neighbors,
+//! scale.data, images, commands) is ignored.
 //!
 //! The matrices come before the names and meta.data in the stream, so the
 //! reader decompresses the file up to three times: a skeleton pass at open
 //! that skips large vectors, a pass fetching the metadata vectors it needs,
-//! and one pass per `x_stream`.
+//! and one pass per `x_stream`. Reductions and graphs are fetched in their
+//! own pass when `obsm` / `varm` / `obsp_metas` ask for them.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -22,8 +25,11 @@ use super::open_stream;
 use super::xdr::{be_f64s, be_i32s, Kind, Node, Num, Parser, Xdr, NA_INT};
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
-use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, SparseMatrixCSR, VarTable};
-use crate::stream::{ChunkStream, DatasetReader};
+use crate::ir::{
+    Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+    SparseMatrixMeta, VarTable, Varm,
+};
+use crate::stream::{row_chunks, ChunkStream, DatasetReader};
 
 /// One dgCMatrix layer, genes x cells: its columns are rows of X.
 struct Layer {
@@ -43,6 +49,16 @@ pub struct RdsSeuratReader {
     indptr: Vec<u64>,
     obs: ObsTable,
     var: VarTable,
+    /// The read assay's name: varm keeps only reductions computed on it.
+    assay: String,
+    /// The object's cells in object order, and each one's X row.
+    cells: Vec<String>,
+    row_of: HashMap<String, usize>,
+    /// `@reductions` (DimReduc) and `@graphs` (Graph) entries, still lazy.
+    reductions: Vec<(String, Node)>,
+    graphs: Vec<(String, Node)>,
+    /// Graphs as CSR in X row order, built by `obsp_metas`.
+    obsp: HashMap<String, SparseMatrixCSR>,
 }
 
 /// Fetched lazy vectors, keyed by stream offset.
@@ -174,6 +190,20 @@ impl RdsSeuratReader {
             });
         }
 
+        let row_of = order
+            .iter()
+            .enumerate()
+            .map(|(row, &k)| (cells[k].clone(), row))
+            .collect();
+        let named = |slot_name: &str| -> Vec<(String, Node)> {
+            obj.attr(slot_name).map_or_else(Vec::new, |l| {
+                l.names()
+                    .into_iter()
+                    .zip(l.items().iter().map(|(_, n)| n.clone()))
+                    .collect()
+            })
+        };
+        let (reductions, graphs) = (named("reductions"), named("graphs"));
         let obs = ObsTable {
             index: order.iter().map(|&k| cells[k].clone()).collect(),
             columns: match meta {
@@ -192,8 +222,262 @@ impl RdsSeuratReader {
                 index: genes,
                 columns: Vec::new(),
             },
+            assay: assay_name,
+            cells,
+            row_of,
+            reductions,
+            graphs,
+            obsp: HashMap::new(),
         })
     }
+
+    /// The X row of each of `n` cells named by `names` (a matrix's row or
+    /// column names), or in object order when the matrix has no names.
+    fn rows_for(&self, names: Option<Vec<String>>, n: usize) -> Result<Vec<usize>> {
+        let names = names.unwrap_or_else(|| self.cells.clone());
+        if names.len() != n || n != self.cells.len() {
+            return Err(bad(format!(
+                "{n} rows, but the object has {} cells",
+                self.cells.len()
+            )));
+        }
+        names
+            .iter()
+            .map(|c| {
+                self.row_of
+                    .get(c)
+                    .copied()
+                    .ok_or_else(|| bad(format!("cell '{c}' is not in the object")))
+            })
+            .collect()
+    }
+
+    /// Every reduction's cell embeddings, (n_obs, k) in X row order.
+    fn read_obsm(&self) -> Result<Embeddings> {
+        let embs: Vec<(&str, &Node)> = self
+            .reductions
+            .iter()
+            .filter_map(|(name, r)| Some((name.as_str(), r.attr("cell.embeddings")?)))
+            .collect();
+        let fetched = fetch(
+            &self.path,
+            &embs.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+        )?;
+        let mut map = HashMap::new();
+        for (name, n) in embs {
+            let got = dense(n, &fetched).and_then(
+                |RMatrix {
+                     nrow,
+                     ncol,
+                     values: v,
+                     rownames,
+                 }| {
+                    let rows = self.rows_for(rownames, nrow)?;
+                    let mut data = vec![0.0; nrow * ncol];
+                    for (i, &row) in rows.iter().enumerate() {
+                        for c in 0..ncol {
+                            data[row * ncol + c] = v[c * nrow + i];
+                        }
+                    }
+                    Ok(DenseMatrix {
+                        shape: (nrow, ncol),
+                        data,
+                    })
+                },
+            );
+            match got {
+                Ok(m) => {
+                    map.insert(format!("X_{}", name.to_lowercase()), m);
+                }
+                Err(e) => tracing::warn!("rds: skipping reduction '{name}': {e}"),
+            }
+        }
+        Ok(Embeddings { map })
+    }
+
+    /// Feature loadings of the reductions computed on the read assay, on
+    /// the full var axis by name: NaN where a gene has no loading, as
+    /// Seurat's `Loadings()` covers only the features the reduction used.
+    fn read_varm(&self) -> Result<Varm> {
+        let loads: Vec<(&str, &Node)> = self
+            .reductions
+            .iter()
+            .filter(|(name, r)| {
+                let used = str1(r.attr("assay.used"));
+                let ok = used.as_deref().is_none_or(|a| a == self.assay);
+                if !ok {
+                    tracing::info!("rds: varm '{name}' is on assay {used:?}; skipped");
+                }
+                ok
+            })
+            .filter_map(|(name, r)| Some((name.as_str(), r.attr("feature.loadings")?)))
+            .filter(|(_, n)| n.len() > 0)
+            .collect();
+        let fetched = fetch(
+            &self.path,
+            &loads.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+        )?;
+        let var_pos: HashMap<&str, usize> = self
+            .var
+            .index
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (g.as_str(), i))
+            .collect();
+        let n_vars = self.var.index.len();
+        let mut map = HashMap::new();
+        for (name, n) in loads {
+            let got = dense(n, &fetched).and_then(|RMatrix { nrow, ncol, values: v, rownames }| {
+                let genes = match rownames {
+                    Some(g) => g,
+                    None if nrow == n_vars => self.var.index.clone(),
+                    None => return Err(bad(format!("{nrow} unnamed loading rows"))),
+                };
+                let mut data = vec![f64::NAN; n_vars * ncol];
+                let mut dropped = 0;
+                for (i, g) in genes.iter().enumerate() {
+                    let Some(&row) = var_pos.get(g.as_str()) else {
+                        dropped += 1;
+                        continue;
+                    };
+                    for c in 0..ncol {
+                        data[row * ncol + c] = v[c * nrow + i];
+                    }
+                }
+                if dropped > 0 {
+                    tracing::warn!(
+                        "rds: varm '{name}': {dropped} of {nrow} loading features are not in the assay"
+                    );
+                }
+                Ok(DenseMatrix {
+                    shape: (n_vars, ncol),
+                    data,
+                })
+            });
+            match got {
+                Ok(m) => {
+                    map.insert(format!("X_{}", name.to_lowercase()), m);
+                }
+                Err(e) => tracing::warn!("rds: skipping loadings of '{name}': {e}"),
+            }
+        }
+        Ok(Varm { map })
+    }
+
+    /// Every graph as CSR in X row order. A Graph is a dgCMatrix, so CSC:
+    /// column c holds the edges into cell c. Transposing gives rows; both
+    /// axes are then renumbered to X rows and each row's columns sorted.
+    fn read_graphs(&self) -> Result<HashMap<String, SparseMatrixCSR>> {
+        let mut want = Vec::new();
+        for (_, g) in &self.graphs {
+            for s in ["i", "p", "x"] {
+                if let Some(n) = g.attr(s) {
+                    want.push(n);
+                }
+            }
+        }
+        let fetched = fetch(&self.path, &want)?;
+        let mut out = HashMap::new();
+        for (name, g) in &self.graphs {
+            match self.graph_csr(g, &fetched) {
+                Ok(m) => {
+                    out.insert(name.clone(), m);
+                }
+                Err(e) => tracing::warn!("rds: skipping graph '{name}': {e}"),
+            }
+        }
+        Ok(out)
+    }
+
+    fn graph_csr(&self, g: &Node, f: &Fetched) -> Result<SparseMatrixCSR> {
+        let dim = ints(slot(g, "Dim")?, f)?;
+        let n = self.cells.len();
+        if dim != [n as i32, n as i32] {
+            return Err(bad(format!("graph is {dim:?}, expected [{n}, {n}]")));
+        }
+        let dn = slot(g, "Dimnames")?.items();
+        let names = |k: usize| match dn.get(k).map(|(_, v)| &v.kind) {
+            Some(Kind::Str(v)) => Some(v.iter().map(|s| s.clone().unwrap_or_default()).collect()),
+            _ => None,
+        };
+        let src_row = self.rows_for(names(0), n)?;
+        let src_col = self.rows_for(names(1), n)?;
+        let (i, p, x) = (
+            ints(slot(g, "i")?, f)?,
+            ints(slot(g, "p")?, f)?,
+            reals(slot(g, "x")?, f)?,
+        );
+        if p.len() != n + 1 || i.len() != x.len() || *p.last().unwrap() as usize != i.len() {
+            return Err(bad("graph @i / @p / @x do not fit together".into()));
+        }
+        let mut counts = vec![0u64; n + 1];
+        for &r in &i {
+            counts[src_row[r as usize] + 1] += 1;
+        }
+        for k in 0..n {
+            counts[k + 1] += counts[k];
+        }
+        let indptr = counts.clone();
+        let mut next = counts;
+        let mut entries = vec![(0u32, 0.0f64); i.len()];
+        for c in 0..n {
+            for t in p[c] as usize..p[c + 1] as usize {
+                let row = src_row[i[t] as usize];
+                entries[next[row] as usize] = (src_col[c] as u32, x[t]);
+                next[row] += 1;
+            }
+        }
+        for r in 0..n {
+            entries[indptr[r] as usize..indptr[r + 1] as usize].sort_unstable_by_key(|e| e.0);
+        }
+        let (indices, data) = entries.into_iter().unzip();
+        Ok(SparseMatrixCSR {
+            shape: (n, n),
+            indptr,
+            indices,
+            data: TypedVec::F64(data),
+        })
+    }
+}
+
+/// An R numeric matrix.
+struct RMatrix {
+    nrow: usize,
+    ncol: usize,
+    /// Column-major, as R stores it.
+    values: Vec<f64>,
+    rownames: Option<Vec<String>>,
+}
+
+fn dense(n: &Node, f: &Fetched) -> Result<RMatrix> {
+    let dim = match n.attr("dim").map(|d| &d.kind) {
+        Some(Kind::Int(d)) if d.len() == 2 => (d[0] as usize, d[1] as usize),
+        _ => return Err(bad("matrix without a 2-D dim".into())),
+    };
+    let v = match &n.kind {
+        Kind::Int(_) | Kind::Lazy { num: Num::Int, .. } => {
+            ints(n, f)?.into_iter().map(f64::from).collect()
+        }
+        _ => reals(n, f)?,
+    };
+    if v.len() != dim.0 * dim.1 {
+        return Err(bad(format!("matrix of {} values is not {dim:?}", v.len())));
+    }
+    let rownames = n.attr("dimnames").and_then(|dn| match dn.items().first() {
+        Some((
+            _,
+            Node {
+                kind: Kind::Str(v), ..
+            },
+        )) => Some(v.iter().map(|s| s.clone().unwrap_or_default()).collect()),
+        _ => None,
+    });
+    Ok(RMatrix {
+        nrow: dim.0,
+        ncol: dim.1,
+        values: v,
+        rownames,
+    })
 }
 
 /// The Seurat object: the root, or (for a `.rda`) the first saved Seurat object.
@@ -614,6 +898,61 @@ impl DatasetReader for RdsSeuratReader {
 
     async fn var(&mut self) -> Result<VarTable> {
         Ok(self.var.clone())
+    }
+
+    async fn obsm(&mut self) -> Result<Embeddings> {
+        self.read_obsm()
+    }
+
+    async fn varm(&mut self) -> Result<Varm> {
+        self.read_varm()
+    }
+
+    async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
+        if self.obsp.is_empty() && !self.graphs.is_empty() {
+            self.obsp = self.read_graphs()?;
+        }
+        // Stream order, so the output does not depend on hashing.
+        Ok(self
+            .graphs
+            .iter()
+            .filter_map(|(name, _)| {
+                let m = self.obsp.get(name)?;
+                Some(SparseMatrixMeta {
+                    name: name.clone(),
+                    shape: m.shape,
+                    indptr: m.indptr.clone(),
+                })
+            })
+            .collect())
+    }
+
+    fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
+        let Some(m) = self.obsp.get(&meta.name) else {
+            return crate::stream::error_stream(format!(
+                "rds: obsp '{}' was not listed by obsp_metas",
+                meta.name
+            ));
+        };
+        row_chunks(m.shape.0, chunk_size, move |r| {
+            let (lo, hi) = (m.indptr[r.start] as usize, m.indptr[r.end] as usize);
+            let TypedVec::F64(x) = &m.data else {
+                unreachable!("graphs are read as f64")
+            };
+            Ok(MatrixChunk {
+                row_offset: r.start,
+                nrows: r.len(),
+                data: SparseMatrixCSR {
+                    shape: (r.len(), m.shape.1),
+                    indptr: m.indptr[r.start..=r.end]
+                        .iter()
+                        .map(|v| v - lo as u64)
+                        .collect(),
+                    indices: m.indices[lo..hi].to_vec(),
+                    data: TypedVec::F64(x[lo..hi].to_vec()),
+                },
+            })
+        })
     }
 
     fn x_indptr(&self) -> &[u64] {
