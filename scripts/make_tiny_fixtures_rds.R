@@ -31,9 +31,25 @@ for (name in names(e$obs)) {
 # An R ordered factor, not in expected.json: the reader must keep `ordered`.
 meta$cell_type_ordered <- factor(meta$cell_type, levels = levels(meta$cell_type), ordered = TRUE)
 
+# Reductions and a graph from expected.json: pca (X_pca + PCs loadings), a
+# umap without loadings, and obsp$connectivities as the RNA_snn Graph. The
+# graph is asymmetric, so a reader that forgets to transpose R's CSC fails.
+add_slots <- function(o, emb, loadings, graph, cells, genes) {
+  rownames(emb) <- cells; colnames(emb) <- paste0("PC_", seq_len(ncol(emb)))
+  rownames(loadings) <- genes; colnames(loadings) <- colnames(emb)
+  o[["pca"]] <- CreateDimReducObject(embeddings = emb, loadings = loadings, key = "PC_", assay = "RNA")
+  umap <- emb * 2; colnames(umap) <- paste0("UMAP_", seq_len(ncol(umap)))
+  o[["umap"]] <- CreateDimReducObject(embeddings = umap, key = "UMAP_", assay = "RNA")
+  dimnames(graph) <- list(cells, cells)
+  g <- as.Graph(as(graph, "CsparseMatrix")); DefaultAssay(g) <- "RNA"
+  o[["RNA_snn"]] <- g
+  o
+}
+
 make <- function(assay_version) {
   options(Seurat.object.assay.version = assay_version)
-  CreateSeuratObject(counts = counts, meta.data = meta, min.cells = 0, min.features = 0)
+  o <- CreateSeuratObject(counts = counts, meta.data = meta, min.cells = 0, min.features = 0)
+  add_slots(o, e$obsm$X_pca, e$varm$PCs, e$obsp$connectivities, e$obs_names, e$var_names)
 }
 
 v4 <- make("v3")
@@ -62,7 +78,10 @@ saveRDS(split5, file.path(dir, "tiny_v5_split.rds"))
 #   score = k / 4, NA when k %% 40 == 0;  n = k, NA when k %% 30 == 0
 #   flag = k %% 2 == 0, NA when k %% 60 == 0;  label = "s<k>", NA when k %% 70 == 0
 #   batch = k %% 2 (the v5 object is split by it)
-# plus a complex and a list column, which the reader skips.
+# plus a complex and a list column, which the reader skips, and
+#   pca: emb[k, c] = k + c / 10 (c = 0, 1), loadings[g, c] = g - c
+#   RNA_snn: cell k -> (k + 1) %% nc weight k %% 7 + 1, and -> (k + 2) %% nc weight 0.5
+# (umap = 2 * pca, no loadings), all past LAZY_MIN.
 nc <- 5000; ng <- 6
 k <- 0:(nc - 1)
 vals <- outer(k, 0:(ng - 1), function(k, g) (7 * k + 3 * g) %% 5) # cells x genes
@@ -83,7 +102,11 @@ make_big <- function(assay_version) {
   o <- CreateSeuratObject(counts = big_counts, meta.data = big_meta, min.cells = 0, min.features = 0)
   o@meta.data$cplx <- complex(real = k, imaginary = 1)
   o@meta.data$lst <- I(as.list(k))
-  o
+  emb <- outer(k, 0:1, function(k, c) k + c / 10)
+  loadings <- outer(0:(ng - 1), 0:1, function(g, c) g - c)
+  graph <- sparseMatrix(i = c(k, k) + 1, j = c((k + 1) %% nc, (k + 2) %% nc) + 1,
+                        x = c(k %% 7 + 1, rep(0.5, nc)), dims = c(nc, nc))
+  add_slots(o, emb, loadings, graph, paste0("c", k), paste0("g", 0:(ng - 1)))
 }
 big4 <- make_big("v3")
 saveRDS(big4, file.path(dir, "big_v4.rds"))
