@@ -16,6 +16,7 @@ r/picklerick/src/rust/target/
 *.swo
 .RData
 .Rhistory
+.claude
 /lcov.info
 
 # coverage runs

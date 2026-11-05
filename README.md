@@ -1,8 +1,10 @@
 # SCX — Single-Cell format conversion
 
+<p align="center"><img src="docs/logo.png" alt="SCX logo" width="200"></p>
+
 [![codecov](https://codecov.io/github/btraven00/scx/graph/badge.svg?token=NSMO60CRF5)](https://codecov.io/github/btraven00/scx)
 
-Swiss-army knife for single-cell format conversion, designed for reproducible benchmarks.
+The swiss-army knife for single-cell format conversion.
 
 ## Install
 
@@ -88,9 +90,7 @@ reproducibility is preserved.
 
 ## Docs
 
-Tutorials and the command-line, Python and R references are at
-<https://btraven00.github.io/scx/>. The site is built from [`site/`](site/)
-with `scripts/render_docs.sh`.
+You can find [user-facing tutorials and the command-line, Python and R references](https://btraven00.github.io/scx/) at the live site. PRs welcome!
 
 Design notes, scope, formats, and developer workflows live in [`docs/`](docs/).
 
