@@ -825,6 +825,9 @@ async fn run() -> anyhow::Result<()> {
                      and not Parquet URLs"
                 );
             }
+            if !input_path.exists() {
+                anyhow::bail!("no such file or directory: '{input}'");
+            }
             let fmt = detect::detect(input_path);
 
             let chunk = 1000;
