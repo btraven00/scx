@@ -3,7 +3,10 @@
 //! Supports the v3/v4 `Assay` class (`@counts`, `@data` dgCMatrix slots) and
 //! the v5 `Assay5` class (`@layers`, with cell and feature names in the
 //! `@cells` / `@features` LogMaps), including layers split by group
-//! (`counts.g1`, `counts.g2`, ...). `@reductions` become obsm (`X_<name>`,
+//! (`counts.g1`, `counts.g2`, ...). The assay's other dgCMatrix layers
+//! (`data`, ...) are layers; dense ones (`scale.data`) are skipped with a
+//! warning. The assay's feature metadata (`@meta.features` on `Assay`,
+//! `@meta.data` on `Assay5`) is var. `@reductions` become obsm (`X_<name>`,
 //! cell embeddings) and varm (feature loadings of reductions on the read
 //! assay), `@graphs` become obsp. Everything else on the object (neighbors,
 //! scale.data, images, commands) is ignored.
@@ -41,12 +44,20 @@ struct Layer {
     row_offset: usize,
 }
 
+/// One matrix of the assay (X, or another layer): its dgCMatrix parts (one,
+/// or one per split group) in X row order, and the CSR row pointer over them.
+struct Matrix {
+    parts: Vec<Layer>,
+    indptr: Vec<u64>,
+}
+
 pub struct RdsSeuratReader {
     path: PathBuf,
     chunk_size: usize,
     n_vars: usize,
-    layers: Vec<Layer>,
-    indptr: Vec<u64>,
+    x: Matrix,
+    /// The assay's other dgCMatrix layers, by base name (`data`, ...).
+    layers: Vec<(String, Matrix)>,
     obs: ObsTable,
     var: VarTable,
     /// The read assay's name: varm keeps only reductions computed on it.
@@ -97,40 +108,45 @@ impl RdsSeuratReader {
         })?;
         let layer = layer.unwrap_or("counts");
         let meta = obj.attr("meta.data");
+        // The assay's other layers; one that is not dgCMatrix is skipped.
+        let others: Vec<(String, Vec<(String, &Node)>)> = other_layers(a, layer)
+            .into_iter()
+            .filter_map(|base| match pick_layers(a, &base) {
+                Ok(p) => Some((base, p)),
+                Err(e) => {
+                    tracing::warn!("rds: layer '{base}' is not read: {e}");
+                    None
+                }
+            })
+            .collect();
+        let var_meta = if a.has_class("Assay5") {
+            a.attr("meta.data")
+        } else {
+            a.attr("meta.features")
+        }
+        .filter(|m| !m.is_null() && !m.items().is_empty());
 
         // Everything below `p` and the LogMaps / meta.data columns can be lazy;
         // fetch the ones we need in one sweep.
         let mut want: Vec<&Node> = Vec::new();
         let picked = pick_layers(a, layer)?;
-        for (_, m) in &picked {
+        for (_, m) in picked.iter().chain(others.iter().flat_map(|(_, p)| p)) {
             want.push(slot(m, "p")?);
         }
         if a.has_class("Assay5") {
             want.push(slot(a, "cells")?);
             want.push(slot(a, "features")?);
         }
-        if let Some(meta) = meta {
-            want.extend(meta.items().iter().map(|(_, c)| c));
+        for m in meta.iter().chain(var_meta.iter()) {
+            want.extend(m.items().iter().map(|(_, c)| c));
         }
         let fetched = fetch(path, &want)?;
 
         // Cell and gene names, and which cells each layer holds.
-        let (cells, genes, layer_rows) = if a.has_class("Assay5") {
+        let (cells, genes, members) = if a.has_class("Assay5") {
             let (cells, member) = logmap(slot(a, "cells")?, &fetched)?;
             let (genes, fmember) = logmap(slot(a, "features")?, &fetched)?;
-            let mut rows = Vec::new();
-            for (name, _) in &picked {
-                let col = member
-                    .get(name)
-                    .ok_or_else(|| bad(format!("layer '{name}' missing from the @cells LogMap")))?;
-                if !fmember.get(name).is_some_and(|f| f.iter().all(|&b| b)) {
-                    return Err(bad(format!(
-                        "layer '{name}' covers only some features; unsupported"
-                    )));
-                }
-                rows.push((0..cells.len()).filter(|&k| col[k]).collect::<Vec<_>>());
-            }
-            (cells, genes, rows)
+            (cells, genes, Some((member, fmember)))
         } else {
             let (_, m) = &picked[0];
             let dn = slot(m, "Dimnames")?.items();
@@ -138,10 +154,29 @@ impl RdsSeuratReader {
                 Some(Kind::Str(v)) => Ok(v.iter().map(|s| s.clone().unwrap_or_default()).collect()),
                 _ => Err(bad(format!("'{layer}' matrix has no dimnames"))),
             };
-            let cells: Vec<String> = names(1)?;
-            let rows = vec![(0..cells.len()).collect()];
-            (cells, names(0)?, rows)
+            (names(1)?, names(0)?, None)
         };
+        // The object cells each part of a layer holds, in part order.
+        let part_rows = |picked: &[(String, &Node)]| -> Result<Vec<Vec<usize>>> {
+            let Some((member, fmember)) = &members else {
+                return Ok(vec![(0..cells.len()).collect()]);
+            };
+            picked
+                .iter()
+                .map(|(name, _)| {
+                    let col = member.get(name).ok_or_else(|| {
+                        bad(format!("layer '{name}' missing from the @cells LogMap"))
+                    })?;
+                    if !fmember.get(name).is_some_and(|f| f.iter().all(|&b| b)) {
+                        return Err(bad(format!(
+                            "layer '{name}' covers only some features; unsupported"
+                        )));
+                    }
+                    Ok((0..cells.len()).filter(|&k| col[k]).collect())
+                })
+                .collect()
+        };
+        let layer_rows = part_rows(&picked)?;
 
         // The layers must partition the object's cells; X rows follow layer order.
         let order: Vec<usize> = layer_rows.iter().flatten().copied().collect();
@@ -163,32 +198,32 @@ impl RdsSeuratReader {
         }
 
         let n_vars = genes.len();
+        let x = build_matrix(&picked, &layer_rows, n_vars, &fetched)?;
+        // Another layer streams in X's row order, so its parts must hold
+        // X's cells in X's order: Seurat splits every layer of an assay alike.
         let mut layers = Vec::new();
-        let mut indptr = vec![0u64];
-        for ((name, m), rows) in picked.iter().zip(&layer_rows) {
-            let dim = ints(slot(m, "Dim")?, &fetched)?;
-            if dim.len() != 2 || dim[0] as usize != n_vars || dim[1] as usize != rows.len() {
-                return Err(bad(format!(
-                    "layer '{name}' is {dim:?}, expected [{n_vars}, {}]",
-                    rows.len()
-                )));
-            }
-            let p: Vec<u64> = ints(slot(m, "p")?, &fetched)?
-                .into_iter()
-                .map(|v| v as u64)
-                .collect();
-            if p.len() != rows.len() + 1 {
-                return Err(bad(format!("layer '{name}': @p has {} entries", p.len())));
-            }
-            let base = *indptr.last().unwrap();
-            indptr.extend(p[1..].iter().map(|v| base + v));
-            layers.push(Layer {
-                i: slot(m, "i")?.clone(),
-                x: slot(m, "x")?.clone(),
-                p,
-                row_offset: indptr.len() - 1 - rows.len(),
+        for (base, p) in &others {
+            let got = part_rows(p).and_then(|rows| {
+                if rows.iter().flatten().ne(order.iter()) {
+                    return Err(bad("its cells are not split as X's are".into()));
+                }
+                build_matrix(p, &rows, n_vars, &fetched)
             });
+            match got {
+                Ok(m) => layers.push((base.clone(), m)),
+                Err(e) => tracing::warn!("rds: layer '{base}' is not read: {e}"),
+            }
         }
+        let var_columns = match var_meta {
+            Some(m) => {
+                let all: Vec<usize> = (0..n_vars).collect();
+                meta_columns(m, &genes, &all, &fetched).unwrap_or_else(|e| {
+                    tracing::warn!("rds: feature metadata is not read: {e}");
+                    Vec::new()
+                })
+            }
+            None => Vec::new(),
+        };
 
         let row_of = order
             .iter()
@@ -215,12 +250,12 @@ impl RdsSeuratReader {
             path: path.to_path_buf(),
             chunk_size,
             n_vars,
+            x,
             layers,
-            indptr,
             obs,
             var: VarTable {
                 index: genes,
-                columns: Vec::new(),
+                columns: var_columns,
             },
             assay: assay_name,
             cells,
@@ -548,6 +583,75 @@ fn kind_name(n: &Node) -> &'static str {
     }
 }
 
+/// The dgCMatrix parts `picked` of one layer, holding `rows` (object cells,
+/// per part), as one matrix over `n_vars` genes.
+fn build_matrix(
+    picked: &[(String, &Node)],
+    rows: &[Vec<usize>],
+    n_vars: usize,
+    fetched: &Fetched,
+) -> Result<Matrix> {
+    let mut parts = Vec::new();
+    let mut indptr = vec![0u64];
+    for ((name, m), rows) in picked.iter().zip(rows) {
+        let dim = ints(slot(m, "Dim")?, fetched)?;
+        if dim.len() != 2 || dim[0] as usize != n_vars || dim[1] as usize != rows.len() {
+            return Err(bad(format!(
+                "layer '{name}' is {dim:?}, expected [{n_vars}, {}]",
+                rows.len()
+            )));
+        }
+        let p: Vec<u64> = ints(slot(m, "p")?, fetched)?
+            .into_iter()
+            .map(|v| v as u64)
+            .collect();
+        if p.len() != rows.len() + 1 {
+            return Err(bad(format!("layer '{name}': @p has {} entries", p.len())));
+        }
+        let base = *indptr.last().unwrap();
+        indptr.extend(p[1..].iter().map(|v| base + v));
+        parts.push(Layer {
+            i: slot(m, "i")?.clone(),
+            x: slot(m, "x")?.clone(),
+            p,
+            row_offset: indptr.len() - 1 - rows.len(),
+        });
+    }
+    Ok(Matrix { parts, indptr })
+}
+
+/// The assay's layers other than `x_layer`, by base name: a split layer
+/// (`data.g1`, `data.g2`) is one name. Empty slots of a v3/v4 `Assay` (an
+/// unscaled object's 0 x 0 `scale.data`) are not layers.
+fn other_layers(a: &Node, x_layer: &str) -> Vec<String> {
+    const KNOWN: [&str; 3] = ["counts", "scale.data", "data"];
+    let names: Vec<String> = if a.has_class("Assay5") {
+        a.attr("layers").map_or_else(Vec::new, |l| l.names())
+    } else {
+        KNOWN
+            .iter()
+            // An S4 dgCMatrix has no length of its own; a dense slot has
+            // its values' length, 0 when empty.
+            .filter(|n| {
+                a.attr(n)
+                    .is_some_and(|m| !m.is_null() && (m.has_class("dgCMatrix") || m.len() > 0))
+            })
+            .map(|n| n.to_string())
+            .collect()
+    };
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        let base = KNOWN
+            .iter()
+            .find(|b| n == **b || n.starts_with(&format!("{b}.")))
+            .map_or(n.clone(), |b| b.to_string());
+        if base != x_layer && !out.contains(&base) {
+            out.push(base);
+        }
+    }
+    out
+}
+
 /// The dgCMatrix layers named `layer`, or split as `layer.<group>`, in stream order.
 fn pick_layers<'a>(a: &'a Node, layer: &str) -> Result<Vec<(String, &'a Node)>> {
     let picked: Vec<(String, &Node)> = if a.has_class("Assay5") {
@@ -575,10 +679,13 @@ fn pick_layers<'a>(a: &'a Node, layer: &str) -> Result<Vec<(String, &'a Node)>> 
     }
     for (name, m) in &picked {
         if !m.has_class("dgCMatrix") {
+            let what = match m.class() {
+                c if c.is_empty() && m.attr("dim").is_some() => "a dense matrix".to_string(),
+                c => format!("{c:?}"),
+            };
             return Err(bad(format!(
-                "layer '{name}' is {:?}; only dgCMatrix layers are supported \
-                 (on-disk BPCells layers live outside the .rds)",
-                m.class()
+                "layer '{name}' is {what}; only dgCMatrix layers are supported \
+                 (on-disk BPCells layers live outside the .rds)"
             )));
         }
     }
@@ -885,7 +992,7 @@ impl Scan {
 #[async_trait]
 impl DatasetReader for RdsSeuratReader {
     fn shape(&self) -> (usize, usize) {
-        (self.indptr.len() - 1, self.n_vars)
+        (self.x.indptr.len() - 1, self.n_vars)
     }
 
     fn dtype(&self) -> DataType {
@@ -956,28 +1063,64 @@ impl DatasetReader for RdsSeuratReader {
     }
 
     fn x_indptr(&self) -> &[u64] {
-        &self.indptr
+        &self.x.indptr
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
-        let mut scan = Scan {
-            path: self.path.clone(),
-            xdr: None,
-            layer: 0,
-            row: 0,
-            started: false,
-            i: Vec::new(),
-            x_small: None,
-        };
-        let (layers, n_vars, chunk) = (&self.layers, self.n_vars, self.chunk_size);
-        let mut failed = false;
-        Box::pin(stream::iter(std::iter::from_fn(move || {
-            if failed {
-                return None;
-            }
-            let next = scan.next_chunk(layers, n_vars, chunk);
-            failed = matches!(next, Some(Err(_)));
-            next
-        })))
+        scan_stream(&self.path, &self.x.parts, self.n_vars, self.chunk_size)
     }
+
+    async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
+        let n_obs = self.x.indptr.len() - 1;
+        Ok(self
+            .layers
+            .iter()
+            .map(|(name, m)| SparseMatrixMeta {
+                name: name.clone(),
+                shape: (n_obs, self.n_vars),
+                indptr: m.indptr.clone(),
+            })
+            .collect())
+    }
+
+    fn layer_stream<'a>(
+        &'a self,
+        meta: &'a SparseMatrixMeta,
+        chunk_size: usize,
+    ) -> ChunkStream<'a> {
+        match self.layers.iter().find(|(n, _)| *n == meta.name) {
+            Some((_, m)) => scan_stream(&self.path, &m.parts, self.n_vars, chunk_size),
+            None => crate::stream::error_stream(format!(
+                "rds: layer '{}' was not listed by layer_metas",
+                meta.name
+            )),
+        }
+    }
+}
+
+/// Row chunks of a matrix's `parts`, read forward through the stream.
+fn scan_stream<'a>(
+    path: &Path,
+    parts: &'a [Layer],
+    n_vars: usize,
+    chunk: usize,
+) -> ChunkStream<'a> {
+    let mut scan = Scan {
+        path: path.to_path_buf(),
+        xdr: None,
+        layer: 0,
+        row: 0,
+        started: false,
+        i: Vec::new(),
+        x_small: None,
+    };
+    let mut failed = false;
+    Box::pin(stream::iter(std::iter::from_fn(move || {
+        if failed {
+            return None;
+        }
+        let next = scan.next_chunk(parts, n_vars, chunk);
+        failed = matches!(next, Some(Err(_)));
+        next
+    })))
 }

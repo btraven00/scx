@@ -255,7 +255,7 @@ fn gzipped_rds_is_read() {
 fn tree_shows_classes_slots_and_lengths() {
     let t = scx_core::rds::tree(&tiny("tiny_v5_split.rds"), 4).unwrap();
     assert!(t.starts_with("<root>: S4 <Seurat>"), "{t}");
-    assert!(t.contains("@layers: list[2]"), "{t}");
+    assert!(t.contains("@layers: list[4]"), "{t}");
     assert!(
         t.contains("$counts.d0: S4 <dgCMatrix>") || t.contains("$counts.d1: S4 <dgCMatrix>"),
         "{t}"
@@ -526,6 +526,41 @@ fn check_slots(name: &str) {
             );
         }
     }
+
+    // The `data` layer (split alike in v5) streams in X's row order, and the
+    // assay's feature metadata is var.
+    let metas = block_on(r.layer_metas()).unwrap();
+    assert_eq!(
+        metas.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        ["data"],
+        "{name}"
+    );
+    let mut data = vec![vec![0.0; 5]; 6];
+    for c in block_on(r.layer_stream(&metas[0], 4).collect::<Vec<_>>()) {
+        let c = c.unwrap();
+        let v = c.data.data.to_f64();
+        for k in 0..c.nrows {
+            for j in c.data.indptr[k] as usize..c.data.indptr[k + 1] as usize {
+                data[c.row_offset + k][c.data.indices[j] as usize] = v[j];
+            }
+        }
+    }
+    let want = json_matrix(&e["X"]);
+    for (row, &s) in src.iter().enumerate() {
+        assert_eq!(data[row], want[s], "{name}: data layer, {}", names[s]);
+    }
+    let var = block_on(r.var()).unwrap();
+    assert_eq!(var.columns.len(), 1, "{name}");
+    let sym = &var.columns[0];
+    assert_eq!(sym.name, "gene_symbol", "{name}");
+    let want: Vec<&str> = e["var"]["gene_symbol"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let got: Vec<String> = (0..5).map(|g| sym.data.value_str(g)).collect();
+    assert_eq!(got, want, "{name}");
 }
 
 #[test]
@@ -568,6 +603,33 @@ fn check_big_slots(name: &str) {
     let varm = block_on(r.varm()).unwrap();
     let want: Vec<f64> = (0..6).flat_map(|g| [g as f64, g as f64 - 1.0]).collect();
     assert_eq!(varm.map["X_pca"].data, want, "{name}");
+
+    let layers = block_on(r.layer_metas()).unwrap();
+    assert_eq!(layers.len(), 1, "{name}");
+    let mut seen = 0;
+    for c in block_on(r.layer_stream(&layers[0], 700).collect::<Vec<_>>()) {
+        let c = c.unwrap();
+        let v = c.data.data.to_f64();
+        for i in 0..c.nrows {
+            let k = ks[c.row_offset + i];
+            let (a, b) = (c.data.indptr[i] as usize, c.data.indptr[i + 1] as usize);
+            let got: Vec<(u32, f64)> = (a..b).map(|j| (c.data.indices[j], v[j])).collect();
+            let want: Vec<(u32, f64)> = (0..6u32)
+                .map(|g| (g, 2.0 * ((7 * k + 3 * g as usize) % 5) as f64))
+                .filter(|&(_, v)| v != 0.0)
+                .collect();
+            assert_eq!(got, want, "{name}: data layer, cell c{k}");
+        }
+        seen += c.nrows;
+    }
+    assert_eq!(seen, nc, "{name}");
+    let var = block_on(r.var()).unwrap();
+    let got: Vec<String> = (0..6).map(|g| var.columns[0].data.value_str(g)).collect();
+    assert_eq!(
+        got,
+        (0..6).map(|g| format!("id{g}")).collect::<Vec<_>>(),
+        "{name}"
+    );
 
     let metas = block_on(r.obsp_metas()).unwrap();
     assert_eq!(metas.len(), 1, "{name}");
@@ -699,4 +761,6 @@ async fn rds_to_h5ad_keeps_obs_types_and_slots() {
     assert_eq!(f.dataset("obsm/X_umap").unwrap().shape(), [6, 2]);
     assert_eq!(f.dataset("varm/X_pca").unwrap().shape(), [5, 2]);
     assert!(f.group("obsp/RNA_snn").is_ok());
+    assert!(f.group("layers/data").is_ok(), "the data layer");
+    assert!(f.dataset("var/gene_symbol").is_ok(), "feature metadata");
 }

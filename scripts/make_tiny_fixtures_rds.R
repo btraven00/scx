@@ -46,9 +46,21 @@ add_slots <- function(o, emb, loadings, graph, cells, genes) {
   o
 }
 
+# A `data` layer (expected.json's normalised X) and a feature-metadata
+# column (gene_symbol): on `Assay` they are @data and @meta.features, on
+# `Assay5` a layer and @meta.data.
+data_m <- as(t(e$X), "CsparseMatrix"); data_m <- as(data_m * 1.0, "dgCMatrix")
+dimnames(data_m) <- dimnames(counts)
+add_data <- function(o, data, symbols) {
+  LayerData(o, "data") <- data
+  o[["RNA"]][["gene_symbol"]] <- symbols
+  o
+}
+
 make <- function(assay_version) {
   options(Seurat.object.assay.version = assay_version)
   o <- CreateSeuratObject(counts = counts, meta.data = meta, min.cells = 0, min.features = 0)
+  o <- add_data(o, data_m, setNames(e$var$gene_symbol$values, e$var_names))
   add_slots(o, e$obsm$X_pca, e$varm$PCs, e$obsp$connectivities, e$obs_names, e$var_names)
 }
 
@@ -81,6 +93,7 @@ saveRDS(split5, file.path(dir, "tiny_v5_split.rds"))
 # plus a complex and a list column, which the reader skips, and
 #   pca: emb[k, c] = k + c / 10 (c = 0, 1), loadings[g, c] = g - c
 #   RNA_snn: cell k -> (k + 1) %% nc weight k %% 7 + 1, and -> (k + 2) %% nc weight 0.5
+#   data layer = 2 * X; feature column gene_symbol = "id<g>"
 # (umap = 2 * pca, no loadings), all past LAZY_MIN.
 nc <- 5000; ng <- 6
 k <- 0:(nc - 1)
@@ -102,6 +115,7 @@ make_big <- function(assay_version) {
   o <- CreateSeuratObject(counts = big_counts, meta.data = big_meta, min.cells = 0, min.features = 0)
   o@meta.data$cplx <- complex(real = k, imaginary = 1)
   o@meta.data$lst <- I(as.list(k))
+  o <- add_data(o, big_counts * 2, setNames(paste0("id", 0:(ng - 1)), rownames(big_counts)))
   emb <- outer(k, 0:1, function(k, c) k + c / 10)
   loadings <- outer(0:(ng - 1), 0:1, function(g, c) g - c)
   graph <- sparseMatrix(i = c(k, k) + 1, j = c((k + 1) %% nc, (k + 2) %% nc) + 1,
