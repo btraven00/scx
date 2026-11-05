@@ -179,7 +179,7 @@ pub fn sniff(path: &Path) -> Option<Format> {
         }
     }
 
-    // --- H5AD (legacy, pre-0.8) ---
+    // --- H5AD (legacy, pre-0.8; and pre-0.7, below) ---
     // Older AnnData did not write the root `encoding-type = "anndata"` attr,
     // but still lays out the canonical /X, /obs, /var structure and tags the
     // /obs and /var groups with `encoding-type = "dataframe"`. Recognise that
@@ -197,6 +197,16 @@ pub fn sniff(path: &Path) -> Option<Format> {
     let var_is_df = group_encoding("var").as_deref() == Some("dataframe");
     let has_x = file.group("X").is_ok() || file.dataset("X").is_ok();
     if has_x && obs_is_df && var_is_df {
+        return Some(Format::H5Ad);
+    }
+    // anndata < 0.7 wrote obs and var as compound datasets, not groups.
+    let is_compound = |name: &str| {
+        file.dataset(name)
+            .and_then(|d| d.dtype())
+            .and_then(|t| t.to_descriptor())
+            .is_ok_and(|t| matches!(t, hdf5::types::TypeDescriptor::Compound(_)))
+    };
+    if has_x && is_compound("obs") && is_compound("var") {
         return Some(Format::H5Ad);
     }
 

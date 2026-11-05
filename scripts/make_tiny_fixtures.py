@@ -25,6 +25,10 @@
                             counts layer (the common scanpy layout)
     tiny_raw_subset.h5ad    X keeps genes 0-3, raw.X keeps all 5 genes (raw
                             frozen before gene filtering)
+    tiny_legacy.h5ad        the anndata < 0.7 layout (scanpy's pbmc3k files):
+                            compound obs/var/obsm/varm, an h5sparse CSR X,
+                            categorical levels in uns/<col>_categories, the
+                            graph in uns/neighbors
 
 tiny_v4.h5seurat also carries a second assay (ADT, 2 features x 6 cells) that
 an RNA-only conversion drops.
@@ -221,6 +225,42 @@ def write_edge_h5ad():
     a.write_zarr(OUT / "tiny_edge.zarr", convert_strings_to_categoricals=False)
 
 
+def write_legacy_h5ad():
+    """The anndata < 0.7 layout, written with h5py as that anndata did."""
+    gz = dict(compression="gzip")
+    S = lambda xs: np.array([x.encode() for x in xs])  # fixed-length bytes
+    with h5py.File(OUT / "tiny_legacy.h5ad", "w") as f:
+        x = sp.csr_matrix(X)
+        g = f.create_group("X")
+        g.attrs["h5sparse_format"] = "csr"
+        g.attrs["h5sparse_shape"] = np.array(x.shape)
+        for k in ["data", "indices", "indptr"]:
+            g.create_dataset(k, data=getattr(x, k), **gz)
+        codes = np.array(
+            [-1 if c is None else CELL_TYPE_LEVELS.index(c) for c in CELL_TYPE], dtype=np.int8
+        )
+        obs = np.rec.fromarrays(
+            [S(CELLS), codes, np.array(SCORE, np.float32), np.array(IS_DOUBLET),
+             S(DONOR), np.array(N_COUNTS, np.int64)],
+            names=["index", "cell_type", "score", "is_doublet", "donor", "n_counts"],
+        )
+        f.create_dataset("obs", data=obs, **gz)
+        f.create_dataset("var", data=np.rec.fromarrays([S(GENES), S(SYMBOLS)], names=["index", "gene_symbol"]), **gz)
+        sub = lambda name, m: np.array(
+            [(row,) for row in m], dtype=[(name, m.dtype, (m.shape[1],))]
+        )
+        f.create_dataset("obsm", data=sub("X_pca", PCA), **gz)
+        f.create_dataset("varm", data=sub("PCs", PCS), **gz)
+        f.create_dataset("uns/cell_type_categories", data=S(CELL_TYPE_LEVELS), **gz)
+        f.create_dataset("uns/title", data=S(["tiny"]), **gz)
+        c = f.create_group("uns/neighbors/connectivities")
+        c.attrs["h5sparse_format"] = "csr"
+        c.attrs["h5sparse_shape"] = np.array(CONN.shape)
+        for k in ["data", "indices", "indptr"]:
+            c.create_dataset(k, data=getattr(CONN, k), **gz)
+        f.create_dataset("uns/neighbors/params/n_neighbors", data=np.array([2]), **gz)
+
+
 def write_10x():
     # Cell Ranger stores features x barcodes CSC, i.e. CSR over cells.
     m = sp.csr_matrix(COUNTS)
@@ -337,6 +377,7 @@ def main():
     write_raw_h5ad()
     write_raw_gzip_h5ad()
     write_edge_h5ad()
+    write_legacy_h5ad()
     write_10x()
     write_mtx()
     write_h5seurat()
