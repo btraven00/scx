@@ -2,7 +2,8 @@
 //!
 //! Supports the 10x "Market Exchange" (MEX) triplet directory
 //! (`matrix.mtx[.gz]` + `barcodes.tsv[.gz]` + `features.tsv[.gz]`/`genes.tsv[.gz]`),
-//! a GEO-style prefixed triplet (`PREFIX_matrix.mtx.gz`, …), and a bare
+//! a GEO-style prefixed triplet (`PREFIX_matrix.mtx.gz`, …) given as its
+//! matrix file or as a directory holding exactly one such triplet, and a bare
 //! `.mtx[.gz]` file (synthetic integer obs/var indices).
 //!
 //! The matrix is streamed one cell-chunk at a time, so a 350M-nonzero file
@@ -42,6 +43,9 @@ pub struct MtxReader {
     var_index: Option<Vec<String>>,
     /// Feature symbols (column 2), exposed as a `gene_symbols` var column.
     var_names: Option<Vec<String>>,
+    /// Feature types (column 3 of a v3 `features.tsv`, e.g. "Gene Expression",
+    /// "Antibody Capture"), exposed as a `feature_types` var column.
+    var_types: Option<Vec<String>>,
 }
 
 /// Parsed MatrixMarket banner + dimensions.
@@ -125,6 +129,25 @@ fn read_header(reader: &mut dyn BufRead) -> Result<Header> {
     }
 }
 
+/// The `*matrix.mtx[.gz]` files in `dir` (GEO-style `PREFIX_matrix.mtx.gz`),
+/// sorted. Used when `dir` has no plain `matrix.mtx[.gz]`.
+pub(crate) fn prefixed_matrices(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("matrix.mtx") || n.ends_with("matrix.mtx.gz"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 fn first_existing(dir: &Path, names: &[String]) -> Option<PathBuf> {
     names.iter().map(|n| dir.join(n)).find(|p| p.is_file())
 }
@@ -135,12 +158,26 @@ fn resolve_paths(input: &Path) -> Result<(PathBuf, Option<PathBuf>, Option<PathB
     let gz = |stem: &str| vec![format!("{stem}.gz"), stem.to_string()];
 
     if input.is_dir() {
-        let mtx = first_existing(input, &gz("matrix.mtx")).ok_or_else(|| {
-            ScxError::InvalidFormat(format!(
-                "no matrix.mtx[.gz] in directory '{}'",
-                input.display()
-            ))
-        })?;
+        let Some(mtx) = first_existing(input, &gz("matrix.mtx")) else {
+            // A GEO download: one prefixed triplet reads as its matrix file.
+            return match prefixed_matrices(input).as_slice() {
+                [one] => resolve_paths(one),
+                [] => Err(ScxError::InvalidFormat(format!(
+                    "no matrix.mtx[.gz] in directory '{}'",
+                    input.display()
+                ))),
+                many => Err(ScxError::InvalidFormat(format!(
+                    "directory '{}' holds {} prefixed matrices ({}); convert one \
+                     PREFIX_matrix.mtx.gz at a time, then `scx concat` the results",
+                    input.display(),
+                    many.len(),
+                    many.iter()
+                        .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
+            };
+        };
         let barcodes = first_existing(input, &gz("barcodes.tsv"));
         let mut feat_names = gz("features.tsv");
         feat_names.extend(gz("genes.tsv"));
@@ -167,10 +204,11 @@ fn resolve_paths(input: &Path) -> Result<(PathBuf, Option<PathBuf>, Option<PathB
     Ok((input.to_path_buf(), barcodes, features))
 }
 
-/// Read a tsv, returning column 0 and (if present) column 1.
-fn read_tsv_cols(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
+/// Read a tsv, returning column 0 and (where present) columns 1 and 2.
+type TsvCols = (Vec<String>, Vec<String>, Vec<String>);
+fn read_tsv_cols(path: &Path) -> Result<TsvCols> {
     let mut reader = open_bufread(path)?;
-    let (mut col0, mut col1) = (Vec::new(), Vec::new());
+    let (mut col0, mut col1, mut col2) = (Vec::new(), Vec::new(), Vec::new());
     let mut line = String::new();
     while reader.read_line({
         line.clear();
@@ -186,8 +224,11 @@ fn read_tsv_cols(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
         if let Some(c1) = it.next() {
             col1.push(c1.to_string());
         }
+        if let Some(c2) = it.next() {
+            col2.push(c2.to_string());
+        }
     }
-    Ok((col0, col1))
+    Ok((col0, col1, col2))
 }
 
 impl MtxReader {
@@ -205,12 +246,16 @@ impl MtxReader {
             Some(p) => Some(read_tsv_cols(p)?.0),
             None => None,
         };
-        let (var_index, var_names) = match &features_path {
+        let (var_index, var_names, var_types) = match &features_path {
             Some(p) => {
-                let (ids, names) = read_tsv_cols(p)?;
-                (Some(ids), (!names.is_empty()).then_some(names))
+                let (ids, names, types) = read_tsv_cols(p)?;
+                (
+                    Some(ids),
+                    (!names.is_empty()).then_some(names),
+                    (!types.is_empty()).then_some(types),
+                )
             }
-            None => (None, None),
+            None => (None, None, None),
         };
 
         // Orient: match the metadata lengths to the matrix axes. 10x lays out
@@ -254,6 +299,7 @@ impl MtxReader {
             obs_index,
             var_index,
             var_names,
+            var_types,
         })
     }
 }
@@ -466,13 +512,19 @@ impl DatasetReader for MtxReader {
             .var_index
             .clone()
             .unwrap_or_else(|| (0..self.n_vars).map(|i| i.to_string()).collect());
-        let columns = match &self.var_names {
-            Some(names) if names.len() == index.len() => vec![Column::new(
-                "gene_symbols".to_string(),
-                ColumnData::String(names.clone()),
-            )],
-            _ => Vec::new(),
-        };
+        // A column with a value for every feature; ragged ones are dropped.
+        let columns = [
+            ("gene_symbols", &self.var_names),
+            ("feature_types", &self.var_types),
+        ]
+        .into_iter()
+        .filter_map(|(name, v)| match v {
+            Some(v) if v.len() == index.len() => {
+                Some(Column::new(name.to_string(), ColumnData::String(v.clone())))
+            }
+            _ => None,
+        })
+        .collect();
         Ok(VarTable { index, columns })
     }
 
@@ -600,6 +652,61 @@ mod tests {
         let var = block_on(r.var()).unwrap();
         assert_eq!(var.index, vec!["ENSG1", "ENSG2", "ENSG3"]);
         assert_eq!(var.columns[0].name, "gene_symbols");
+        // v3 features.tsv column 3 is kept.
+        assert_eq!(var.columns[1].name, "feature_types");
+        assert_eq!(var.columns[1].data.value_str(0), "Gene Expression");
+    }
+
+    /// A GEO download: the triplet's files carry a sample prefix. A directory
+    /// holding one such triplet is detected and read like a MEX directory.
+    #[test]
+    fn geo_prefixed_directory_reads_its_triplet() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "GSM1_A549_matrix.mtx", MTX);
+        write_file(dir.path(), "GSM1_A549_barcodes.tsv", "AAA\nBBB\nCCC\nDDD\n");
+        write_file(
+            dir.path(),
+            "GSM1_A549_features.tsv",
+            "ENSG1\tGeneA\tGene Expression\n\
+             ENSG2\tGeneB\tGene Expression\n\
+             CD3\tCD3\tAntibody Capture\n",
+        );
+        assert_eq!(
+            crate::detect::detect(dir.path()),
+            Some(crate::detect::Format::Mtx)
+        );
+        let mut r = block_on(crate::open(
+            dir.path().to_str().unwrap(),
+            &crate::OpenOptions::new(1000),
+        ))
+        .unwrap();
+        assert_eq!(r.shape(), (4, 3));
+        assert_eq!(
+            block_on(r.obs()).unwrap().index,
+            vec!["AAA", "BBB", "CCC", "DDD"]
+        );
+        let var = block_on(r.var()).unwrap();
+        assert_eq!(var.index, vec!["ENSG1", "ENSG2", "CD3"]);
+        let types: Vec<String> = (0..3).map(|i| var.columns[1].data.value_str(i)).collect();
+        assert_eq!(
+            types,
+            ["Gene Expression", "Gene Expression", "Antibody Capture"]
+        );
+    }
+
+    /// A GEO series directory with one triplet per sample is not guessed at:
+    /// the error names the matrices.
+    #[test]
+    fn several_prefixed_matrices_are_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "GSM1_A_matrix.mtx", MTX);
+        write_file(dir.path(), "GSM2_B_matrix.mtx", MTX);
+        let err = MtxReader::open(dir.path(), 1000).err().unwrap().to_string();
+        assert!(err.contains("2 prefixed matrices"), "{err}");
+        assert!(
+            err.contains("GSM1_A_matrix.mtx") && err.contains("GSM2_B_matrix.mtx"),
+            "{err}"
+        );
     }
 
     #[test]

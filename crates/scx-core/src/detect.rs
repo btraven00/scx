@@ -153,6 +153,11 @@ pub fn sniff_dir(path: &Path) -> Option<Format> {
     if path.join("matrix.mtx").exists() || path.join("matrix.mtx.gz").exists() {
         return Some(Format::Mtx);
     }
+    // GEO-style PREFIX_matrix.mtx.gz: the reader takes exactly one, and
+    // explains when there are several.
+    if !crate::mtx::prefixed_matrices(path).is_empty() {
+        return Some(Format::Mtx);
+    }
     if path.join(".zgroup").exists() || path.join("zarr.json").exists() {
         return Some(Format::ZarrAd);
     }
