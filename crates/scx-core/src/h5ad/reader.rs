@@ -8,6 +8,7 @@ use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
 use hdf5::{File, Group};
 use ndarray::s;
 
+use super::legacy;
 use crate::h5::{
     read_csr_rows, read_u32_range, read_u64, read_u64_range, read_values, value_dtype, CsrReader,
 };
@@ -241,8 +242,10 @@ fn read_rows(
 /// The `[rows, cols]` `shape` attribute of a sparse matrix group.
 pub(super) fn read_shape(grp: &Group) -> Result<(usize, usize)> {
     let bad = |what: String| ScxError::InvalidFormat(format!("{}/shape {what}", grp.name()));
+    // anndata < 0.7 (h5sparse) named it `h5sparse_shape`.
     let attr = grp
         .attr("shape")
+        .or_else(|_| grp.attr("h5sparse_shape"))
         .map_err(|_| bad("attribute missing".into()))?;
     let shape = attr.read_raw::<i64>()?;
     let [rows, cols] = shape[..] else {
@@ -255,6 +258,9 @@ pub(super) fn read_shape(grp: &Group) -> Result<(usize, usize)> {
 /// Read a dataframe group at `group_path` (e.g. "obs" or "var").
 /// Returns (index, columns).
 fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<Column>)> {
+    if legacy::compound(file, group_path).is_some() {
+        return legacy::read_dataframe(file, group_path);
+    }
     let grp = file.group(group_path)?;
     let index = ad_read_df_index(file, group_path)?;
 
@@ -300,6 +306,9 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
 /// Read the index of the dataframe group at `group_path`, named by its
 /// `_index` attribute (default "index").
 fn ad_read_df_index(file: &File, group_path: &str) -> Result<Vec<String>> {
+    if legacy::compound(file, group_path).is_some() {
+        return legacy::read_dataframe(file, group_path).map(|(index, _)| index);
+    }
     let grp = file.group(group_path)?;
     let index_name = read_str_attr(&grp, "_index").unwrap_or_else(|_| "index".into());
     ad_read_index(file, &format!("{group_path}/{index_name}"))
@@ -537,6 +546,9 @@ fn ad_read_dense_dict(
     group: &str,
     n_rows: Option<usize>,
 ) -> Result<HashMap<String, DenseMatrix>> {
+    if let Some(map) = legacy::read_dense_dict(file, group)? {
+        return Ok(map);
+    }
     let Ok(grp) = file.group(group) else {
         return Ok(HashMap::new());
     };
@@ -610,6 +622,7 @@ fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<Spar
 
 fn is_csc(grp: &Group) -> bool {
     read_str_attr(grp, "encoding-type").is_ok_and(|enc| enc == "csc_matrix")
+        || read_str_attr(grp, "h5sparse_format").is_ok_and(|f| f == "csc")
 }
 
 /// Row chunks of the layer or obsp matrix at `matrix`. A CSC matrix is read
@@ -726,6 +739,9 @@ impl DatasetReader for H5AdReader {
                         }
                     }
                 }
+                if legacy::is_legacy(&file) {
+                    legacy::trim_uns(&file, &mut raw);
+                }
                 Ok(UnsTable { raw })
             }
         }
@@ -767,7 +783,12 @@ impl DatasetReader for H5AdReader {
     async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
         let file = File::open(&self.path)?;
         let Ok(grp) = file.group("obsp") else {
-            return Ok(Vec::new());
+            return legacy::obsp_names(&file)
+                .into_iter()
+                .map(|name| {
+                    ad_read_sparse_meta(&file, &name, &format!("{}/{name}", legacy::NEIGHBORS))
+                })
+                .collect();
         };
         grp.member_names()?
             .into_iter()
@@ -792,7 +813,13 @@ impl DatasetReader for H5AdReader {
     }
 
     fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
-        sparse_chunks(&self.path, format!("obsp/{}", meta.name), meta, chunk_size)
+        let modern = File::open(&self.path).is_ok_and(|f| f.group("obsp").is_ok());
+        let group = if modern {
+            format!("obsp/{}", meta.name)
+        } else {
+            format!("{}/{}", legacy::NEIGHBORS, meta.name)
+        };
+        sparse_chunks(&self.path, group, meta, chunk_size)
     }
 
     async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {

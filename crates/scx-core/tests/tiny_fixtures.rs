@@ -480,3 +480,105 @@ async fn edge_csc_layer_reads_like_dense() {
         }
     }
 }
+
+/// The anndata < 0.7 layout (scanpy's pbmc3k files): detected as h5ad, and
+/// read the way anndata reads it today. Compound obs/var columns keep their
+/// types; int codes plus `uns/<col>_categories` become a categorical; the
+/// compound obsm/varm become matrices; the h5sparse X streams; the graph in
+/// `uns/neighbors` becomes obsp and, like the levels, leaves uns.
+#[tokio::test]
+async fn h5ad_legacy_pre_0_7() {
+    use scx_core::detect::{detect, Format};
+    let e = expected();
+    assert_eq!(detect(&tiny("tiny_legacy.h5ad")), Some(Format::H5Ad));
+    check_matrix("tiny_legacy.h5ad", "X").await;
+    check_obs_names("tiny_legacy.h5ad").await;
+    check_cell_type("tiny_legacy.h5ad").await;
+
+    let mut r = open("tiny_legacy.h5ad").await;
+    let obs = r.obs().await.unwrap();
+    let col = |n: &str| obs.columns.iter().find(|c| c.name == n).unwrap();
+    let types: Vec<(&str, &str)> = obs
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.data.dtype_str()))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            ("cell_type", "categorical"),
+            ("score", "float64"),
+            ("is_doublet", "bool"),
+            ("donor", "string"),
+            ("n_counts", "int64"),
+        ]
+    );
+    let ColumnData::Float(score) = &col("score").data else {
+        unreachable!()
+    };
+    for (got, want) in score
+        .iter()
+        .zip(e["obs"]["score"]["values"].as_array().unwrap())
+    {
+        match want.as_f64() {
+            Some(w) => assert_eq!(*got, w),
+            None => assert!(got.is_nan()),
+        }
+    }
+    let ColumnData::Bool(d) = &col("is_doublet").data else {
+        unreachable!()
+    };
+    let want: Vec<bool> = e["obs"]["is_doublet"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(d, &want);
+    assert_eq!(col("donor").data.value_str(1), "d1");
+    let ColumnData::Int64(n) = &col("n_counts").data else {
+        unreachable!()
+    };
+    let want: Vec<i64> = e["obs"]["n_counts"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(n, &want);
+    let var = r.var().await.unwrap();
+    assert_eq!(var.columns[0].name, "gene_symbol");
+    assert_eq!(var.columns[0].data.value_str(0), "CD3E");
+
+    let obsm = r.obsm().await.unwrap();
+    assert_eq!(obsm.map["X_pca"].shape, (6, 2));
+    assert_eq!(obsm.map["X_pca"].data, matrix(&e["obsm"]["X_pca"]).concat());
+    let varm = r.varm().await.unwrap();
+    assert_eq!(varm.map["PCs"].data, matrix(&e["varm"]["PCs"]).concat());
+
+    let metas = r.obsp_metas().await.unwrap();
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].name, "connectivities");
+    let mut dense = vec![vec![0.0; 6]; 6];
+    let mut s = r.obsp_stream(&metas[0], 4);
+    while let Some(c) = s.next().await {
+        let c = c.unwrap();
+        let v = c.data.data.to_f64();
+        for k in 0..c.nrows {
+            for j in c.data.indptr[k] as usize..c.data.indptr[k + 1] as usize {
+                dense[c.row_offset + k][c.data.indices[j] as usize] = v[j];
+            }
+        }
+    }
+    drop(s);
+    assert_eq!(dense, matrix(&e["obsp"]["connectivities"]));
+
+    let uns = r.uns().await.unwrap().raw;
+    assert!(uns.get("cell_type_categories").is_none(), "{uns}");
+    assert!(uns["neighbors"].get("connectivities").is_none(), "{uns}");
+    assert!(
+        uns["neighbors"]["params"].get("n_neighbors").is_some(),
+        "{uns}"
+    );
+    assert!(uns.get("title").is_some(), "{uns}");
+}

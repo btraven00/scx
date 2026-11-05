@@ -4,6 +4,7 @@
 //! types so the external paths `crate::h5ad::{H5AdReader, H5AdWriter,
 //! WriterMode}` stay stable.
 
+mod legacy;
 mod reader;
 pub(crate) mod writer;
 

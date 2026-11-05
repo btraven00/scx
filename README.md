@@ -32,7 +32,7 @@ build can opt out with `--no-default-features` — see
 
 | Format | Read | Write |
 |---|:-:|:-:|
-| AnnData `.h5ad` | ✓ | ✓ |
+| AnnData `.h5ad` (also the pre-0.7 layout, read only) | ✓ | ✓ |
 | AnnData Zarr (v2, v3; directory) | ✓ | ✓ (v3) |
 | Seurat `.h5seurat` (dgCMatrix or BPCells-backed) | ✓ | ✓ |
 | BPCells matrix directory | ✓ | ✓ X only |
