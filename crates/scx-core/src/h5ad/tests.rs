@@ -2307,3 +2307,73 @@ async fn row_range_stream_reads_only_its_indptr() {
         "an unreadable indptr is not a row pointer"
     );
 }
+
+/// Regression: raw/X, layers and obsp opened a fresh `CsrReader` per row
+/// block, without the chunk index, so each block looked every deflate chunk
+/// up in libhdf5's B-tree again (raw/X streamed ~60% slower than X on gzip
+/// HLCA). They now keep one indexed reader across blocks. This checks that
+/// the reused reader still returns X's values block by block, on a gzip file
+/// spanning several HDF5 chunks and read in many small blocks.
+#[tokio::test]
+async fn raw_stream_reuses_indexed_reader_across_blocks() {
+    let (n_obs, n_vars) = (3000usize, 400usize);
+    let (mut indptr, mut indices, mut data) = (vec![0u64], Vec::new(), Vec::new());
+    for c in 0..n_obs {
+        for g in (c % 5..n_vars).step_by(4) {
+            indices.push(g as u32);
+            data.push((c * 7 + g) as f32);
+        }
+        indptr.push(indices.len() as u64);
+    }
+    assert!(indices.len() > 3 * 65_536, "needs several HDF5 chunks");
+
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let mut w =
+        H5AdWriter::create_compressed(tmp.path(), n_obs, n_vars, DataType::F32, Some(4)).unwrap();
+    w.write_obs(&ObsTable {
+        index: (0..n_obs).map(|i| format!("c{i}")).collect(),
+        columns: vec![],
+    })
+    .await
+    .unwrap();
+    w.write_var(&VarTable {
+        index: (0..n_vars).map(|i| format!("g{i}")).collect(),
+        columns: vec![],
+    })
+    .await
+    .unwrap();
+    w.write_x_chunk(&MatrixChunk {
+        row_offset: 0,
+        nrows: n_obs,
+        data: SparseMatrixCSR {
+            shape: (n_obs, n_vars),
+            indptr,
+            indices,
+            data: TypedVec::F32(data),
+        },
+    })
+    .await
+    .unwrap();
+    w.finalize().await.unwrap();
+    drop(w);
+    {
+        // raw/X is X's own (gzip) storage; raw/var matches var.
+        let f = File::open_rw(tmp.path()).unwrap();
+        crate::h5::create_group(&f, "raw").unwrap();
+        f.link_hard("X", "raw/X").unwrap();
+        f.link_hard("var", "raw/var").unwrap();
+    }
+
+    let mut r = H5AdReader::open(tmp.path(), 37).unwrap();
+    let meta = r.raw_meta().await.unwrap().expect("raw/X with X's genes");
+    let raw: Vec<_> = r.raw_stream(&meta, 37).map(|c| c.unwrap()).collect().await;
+    let x: Vec<_> = r.x_stream().map(|c| c.unwrap()).collect().await;
+    assert!(raw.len() > 50, "only {} blocks", raw.len());
+    assert_eq!(raw.len(), x.len());
+    for (a, b) in raw.iter().zip(&x) {
+        assert_eq!((a.row_offset, a.nrows), (b.row_offset, b.nrows));
+        assert_eq!(a.data.indptr, b.data.indptr);
+        assert_eq!(a.data.indices, b.data.indices);
+        assert_eq!(a.data.data, b.data.data);
+    }
+}

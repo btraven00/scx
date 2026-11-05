@@ -624,6 +624,10 @@ fn sparse_chunks<'a>(
 ) -> ChunkStream<'a> {
     let mut csc: Option<SparseMatrixCSR> = None;
     let mut file = None;
+    // Opened once for the whole stream, as x_stream does: a reader per block
+    // looked every deflate chunk up again in libhdf5's B-tree (a linear scan,
+    // under its global lock), which made raw/X ~60% slower than X.
+    let mut csr: Option<CsrReader> = None;
     row_chunks(meta.shape.0, chunk_size, move |rows| {
         let file = open_once(&mut file, path)?;
         if csc.is_none() && !meta.indptr.is_empty() {
@@ -645,10 +649,20 @@ fn sparse_chunks<'a>(
                 csc = Some(csc_to_csr(meta.shape, &col_ptr, &rows_ids, &data));
             }
         }
-        match &csc {
-            Some(m) => Ok(csr_rows(m, rows)),
-            None => read_rows(file, &matrix, &meta.indptr, rows, meta.shape.1),
+        if let Some(m) = &csc {
+            return Ok(csr_rows(m, rows));
         }
+        if meta.indptr.is_empty() {
+            return read_rows(file, &matrix, &meta.indptr, rows, meta.shape.1);
+        }
+        if csr.is_none() {
+            let dtype = value_dtype(&file.dataset(&format!("{matrix}/data"))?)?;
+            // Every row is streamed, so list all chunk locations up front.
+            csr = Some(CsrReader::open(file, &matrix, dtype, true)?);
+        }
+        csr.as_ref()
+            .expect("opened above")
+            .rows(&meta.indptr, rows, meta.shape.1)
     })
 }
 
