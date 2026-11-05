@@ -2,11 +2,14 @@
 
 ## Checklist
 
-1. Merge the release PR (below). This tags the release and starts the conda
+1. Record performance on the release PR's head and compare it with the
+   previous release ([below](#performance-record)). Commit the result file to
+   the release PR. Explain any flagged regression in the PR, or fix it first.
+2. Merge the release PR (below). This tags the release and starts the conda
    and wheel builds.
-2. Publish the crates: `scx-core`, then `scx-cli`.
-3. Refresh the R package's lockfile, and commit it.
-4. Upload the wheels to PyPI.
+3. Publish the crates: `scx-core`, then `scx-cli`.
+4. Refresh the R package's lockfile, and commit it.
+5. Upload the wheels to PyPI.
 
 ## scx-core, scx-cli, scx-picklerick and picklerick (R)
 
@@ -27,6 +30,50 @@ push to `main` also publishes conda packages to `edge`, versioned
 
 ```sh
 gh workflow run conda-package.yml -f tag=scx-cli-vX.Y.Z
+```
+
+## Performance record
+
+Every release records the read and write hot paths, so a gain or a
+regression shows up as a number against the previous release. It runs before
+a release, not on every commit: it takes about 30 minutes and needs a quiet
+machine. Run it on omni. The reference numbers come from there, and numbers
+from different CPUs don't compare.
+
+```sh
+CARGO_TARGET_DIR=$PWD/target python3 bench/release/release_bench.py run \
+  --data /data/ben/scx-bench/ref --work /data/ben/scx-bench/tmp
+python3 bench/release/release_bench.py compare \
+  bench/results/release-<previous>.json bench/results/release-<this>.json
+```
+
+`run` refuses to start when the 1-minute load is above `--max-load` (default 4).
+It writes two layers to `bench/results/release-<version>.json`:
+
+- **End to end**: `scx convert` wall time and peak RSS (GNU time), median of 3,
+  at 8 rayon threads. Each input is converted to BPCells h5seurat, dgCMatrix
+  h5seurat and h5ad. The inputs are the gzip reference and an uncompressed copy.
+- **Criterion `perf` bench** (`crates/scx-core/benches/perf.rs`): the BP-128
+  kernels, each X writer, and the X reader (uncompressed and gzip). It uses
+  seeded synthetic data, so it runs on any checkout. Writers and the reader run
+  at 1 and 8 threads; if both take the same time, the path has gone serial.
+
+The reference is the HLCA core h5ad (584,944 cells, gzip). It is fetched with
+[hapiq](https://github.com/btraven00/hapiq) from its versioned CELLxGENE URL
+and checked against a pinned sha256 (`REF_URL` and `REF_SHA256` in the script).
+It is never committed. `h5repack -f NONE` (from the pixi env's `hdf5`) makes the
+uncompressed copy, so both inputs hold the same values. Both are cached in
+`--data` (~24 GB). To use a hapiq binary that isn't on `PATH`, set `HAPIQ`.
+
+`compare` prints every metric and flags changes beyond 5% (`--threshold`). It
+exits 1 if anything got slower or used more memory. It warns when the two files
+come from different CPUs.
+
+To backfill a release recorded before this suite existed, point `run` at that
+release's binary and skip criterion:
+
+```sh
+python3 bench/release/release_bench.py run --scx /path/to/scx-0.5.0 --no-criterion --label 0.5.0
 ```
 
 ## Publishing the crates
