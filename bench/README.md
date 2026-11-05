@@ -37,6 +37,10 @@ cargo bench -p scx-core --bench conversion -- stream_chunk_size   # one group
 - `h5_read.rs` — h5ad X decode throughput; guards the parallel-inflate path
   (`h5_chunk.rs`). A regression here means the deflate-only fast path broke or
   silently fell back to the single-threaded HDF5 read.
+- `perf.rs` — the release perf suite: BP-128 kernels, each X writer and the X
+  reader on seeded synthetic data (no fixture), at 1 and 8 threads. Recorded
+  per release with `bench/release/release_bench.py`; see
+  [docs/releasing.md](../docs/releasing.md#performance-record).
 
 Criterion stores baselines under `target/criterion/`. To compare a change:
 `cargo bench` on the base commit (saves a baseline), then on the change — it

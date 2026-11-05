@@ -112,3 +112,7 @@ harness = false
 [[bench]]
 name = "h5_read"
 harness = false
+
+[[bench]]
+name = "perf"
+harness = false
