@@ -79,7 +79,7 @@ jobs:
             apt_packages: "libhdf5-dev"
           # The PyO3 crate needs maturin's link flags on macOS; its wheel is
           # built and tested in python.yml instead.
-          - os: macos-14
+          - os: macos-15
             hdf5: vendored
             cargo_flags: "--workspace --exclude picklerick-py-native"
             apt_packages: ""
