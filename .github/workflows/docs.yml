@@ -57,7 +57,7 @@ jobs:
       PIP_CACHE_DIR: /opt/cache/runner/scx/pip
     steps:
       - uses: actions/checkout@v7
-      # ponytail: cleared wholesale past 40 GB; prune by age if that recurs often.
+      # TODO: cleared wholesale past 40 GB; prune by age if that recurs often.
       - name: Cap the kept build dir
         run: |
           if [ -d "$CARGO_TARGET_DIR" ] && [ "$(du -s --block-size=1G "$CARGO_TARGET_DIR" | cut -f1)" -gt 40 ]; then

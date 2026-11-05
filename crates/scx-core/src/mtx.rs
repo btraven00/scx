@@ -373,7 +373,7 @@ impl MtxScan {
                         let e = self.pending.take().unwrap();
                         row.push((e.gene, e.val));
                     }
-                    // ponytail: hard-error on unsorted input rather than silently
+                    // TODO: hard-error on unsorted input rather than silently
                     // mis-reading. Upgrade path if a real unsorted .mtx shows up:
                     // two-pass build (count per-cell nnz → indptr, then scatter),
                     // ~nnz*8 bytes resident vs. the full-COO blowup we're avoiding.
@@ -413,7 +413,7 @@ impl MtxScan {
     }
 }
 
-// ponytail: values buffered as f64 then cast — exact for integer counts up to
+// Values buffered as f64 then cast — exact for integer counts up to
 // 2^53, which covers any real single-cell matrix.
 fn typed_from_f64(dtype: DataType, v: Vec<f64>) -> TypedVec {
     match dtype {

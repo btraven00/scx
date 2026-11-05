@@ -498,7 +498,7 @@ fn bad(msg: String) -> ScxError {
 
 /// Forward-only X scan: per layer, `i` is buffered whole (it precedes `x` in
 /// the stream), then `x` is read chunk by chunk.
-// ponytail: `i` costs 4 bytes per nonzero of the largest layer; spill it to a
+// TODO: `i` costs 4 bytes per nonzero of the largest layer; spill it to a
 // temp file if that ever outgrows RAM at atlas scale.
 struct Scan {
     path: PathBuf,

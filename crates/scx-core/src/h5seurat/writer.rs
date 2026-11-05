@@ -461,7 +461,7 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
                     .collect(),
             )?;
         }
-        // ponytail: a missing string is written as "" (SeuratDisk has no NA for
+        // TODO: a missing string is written as "" (SeuratDisk has no NA for
         // plain character columns); write it as a factor if NA must survive.
         ColumnData::String(v) => {
             // The value at a missing position is a placeholder, not data.
@@ -858,7 +858,7 @@ impl DatasetWriter for H5SeuratWriter {
         let mut feed = |b: &[u8]| rows.feed(b);
         let check: Option<crate::h5_chunk::ChunkCheck> = (!checked_before).then_some(&mut feed);
         if !copy_chunks(&indices, &grp, &tmp("indices"), check)? {
-            // ponytail: the partial copy stays in the file as dead space (HDF5
+            // The partial copy stays in the file as dead space (HDF5
             // does not reclaim it); only input with unsorted rows pays it.
             if is_x {
                 grp.unlink(&tmp("indices"))?;

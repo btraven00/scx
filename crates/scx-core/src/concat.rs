@@ -725,7 +725,7 @@ fn col_str(c: &ColumnData) -> Vec<String> {
 // var columns + obsm
 // ---------------------------------------------------------------------------
 
-/// ponytail: a merged var column is taken whole from the first input that has
+/// A merged var column is taken whole from the first input that has
 /// it, so on an outer join the genes that input lacks are NA. Coalescing across
 /// inputs is the upgrade if outer-join gene metadata starts mattering.
 fn merge_var_columns(

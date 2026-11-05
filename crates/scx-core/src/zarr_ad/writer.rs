@@ -39,7 +39,7 @@ type Store = Arc<FilesystemStore>;
 type ZArray = Array<FilesystemStore>;
 
 /// Elements per chunk of the growable `data`/`indices` arrays (4 MiB of f32).
-// ponytail: unsharded; one file per chunk. Add the sharding codec when a store
+// TODO: unsharded; one file per chunk. Add the sharding codec when a store
 // has to live on object storage, where file count matters.
 const CHUNK_ELEMS: u64 = 1 << 20;
 /// zstd level 0 is the library default (3), which is what anndata writes.
