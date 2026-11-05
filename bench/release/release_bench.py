@@ -168,10 +168,25 @@ def cmd_compare(a):
                 d = n[metric] / o[metric] - 1
                 flag = ""
                 if abs(d) > a.threshold:
-                    flag = "  REGRESSION" if d > 0 else "  faster/leaner"
-                    worse |= d > 0
+                    if overlap(spread(o, metric), spread(n, metric)):
+                        flag = "  (within noise)"
+                    else:
+                        flag = "  REGRESSION" if d > 0 else "  faster/leaner"
+                        worse |= d > 0
                 print(f"{k + ' ' + metric:45} {o[metric]:12.2f} {n[metric]:12.2f}   {d:+6.1%}{flag}")
     sys.exit(1 if worse else 0)
+
+
+def spread(r, metric):
+    """A metric's run-to-run range: criterion's CI, or min..max of the e2e reps."""
+    if metric == "median_ms":
+        return r["ci_ms"]
+    vals = [run[0 if metric == "wall_s" else 1] for run in r["runs"]]
+    return [min(vals), max(vals)]
+
+
+def overlap(a, b):
+    return a[0] <= b[1] and b[0] <= a[1]
 
 
 def main():
