@@ -596,7 +596,7 @@ impl ChunkReader {
     /// Elements `[a, b)` as `T`, which must have the stored element size;
     /// values are taken bit for bit, so signedness may differ.
     pub(crate) fn read_typed<T: bytemuck::Pod>(&self, a: usize, b: usize) -> Result<Vec<T>> {
-        // ponytail: assumes a little-endian host, as `TypedVec::from_le_bytes` did.
+        // Assumes a little-endian host, as `TypedVec::from_le_bytes` did.
         let mut out = zeroed_vec_huge::<T>(b.saturating_sub(a));
         self.read_into(a, size_of::<T>(), bytemuck::cast_slice_mut(&mut out))?;
         Ok(out)

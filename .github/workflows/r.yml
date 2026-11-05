@@ -95,7 +95,7 @@ jobs:
       _R_CHECK_SYSTEM_CLOCK_: "FALSE"
     steps:
       - uses: actions/checkout@v7
-      # ponytail: cleared wholesale past 40 GB; prune by age if that recurs often.
+      # TODO: cleared wholesale past 40 GB; prune by age if that recurs often.
       - name: Cap the kept build dir
         run: |
           if [ -d "$PICKLERICK_TARGET_DIR" ] && [ "$(du -s --block-size=1G "$PICKLERICK_TARGET_DIR" | cut -f1)" -gt 40 ]; then

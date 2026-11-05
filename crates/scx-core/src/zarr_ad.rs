@@ -496,7 +496,7 @@ fn is_csc(store: &Store, path: &str) -> bool {
 
 /// Row chunks of the sparse group at `path`. A CSC group is read whole and
 /// transposed on the first chunk.
-// ponytail: same ceiling as h5ad's sparse_chunks: a CSC matrix costs its full
+// TODO: same ceiling as h5ad's sparse_chunks: a CSC matrix costs its full
 // size in memory while it streams.
 fn sparse_chunks<'a>(
     store: Store,
@@ -732,7 +732,7 @@ impl DatasetReader for ZarrAdReader {
         let Some(cell) = &self.indptr else {
             return &[];
         };
-        // ponytail: the trait can't return an error; streaming X reports it.
+        // The trait can't return an error; streaming X reports it.
         load_indptr(cell, || self.read_indptr(None)).unwrap_or_else(|e| {
             tracing::warn!("{}/indptr: {e}", self.x_path);
             &[]

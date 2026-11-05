@@ -277,7 +277,7 @@ impl DatasetReader for TenxH5Reader {
     }
 
     fn x_indptr(&self) -> &[u64] {
-        // ponytail: the trait can't return an error; streaming X reports it.
+        // The trait can't return an error; streaming X reports it.
         load_indptr(&self.indptr, || Self::load_indptr(&self.path)).unwrap_or_else(|e| {
             tracing::warn!("matrix/indptr: {e}");
             &[]

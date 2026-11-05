@@ -725,7 +725,7 @@ pub fn open_h5seurat<P: AsRef<Path>>(
 impl DatasetReader for H5SeuratReader {
     fn x_indptr(&self) -> &[u64] {
         match &self.x_backend {
-            // ponytail: the trait can't return an error; streaming X reports it.
+            // The trait can't return an error; streaming X reports it.
             XBackend::DgCMatrix { indptr, .. } => load_indptr(indptr, || self.read_indptr())
                 .unwrap_or_else(|e| {
                     tracing::warn!("{}/indptr: {e}", self.x_path);

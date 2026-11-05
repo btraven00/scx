@@ -614,7 +614,7 @@ fn is_csc(grp: &Group) -> bool {
 
 /// Row chunks of the layer or obsp matrix at `matrix`. A CSC matrix is read
 /// whole and transposed on the first chunk.
-// ponytail: a CSC matrix costs its full size in memory while it streams;
+// TODO: a CSC matrix costs its full size in memory while it streams;
 // read it column-block by column-block if CSC layers ever come at atlas scale.
 fn sparse_chunks<'a>(
     path: &'a Path,
@@ -659,7 +659,7 @@ fn sparse_chunks<'a>(
 #[async_trait]
 impl DatasetReader for H5AdReader {
     fn x_indptr(&self) -> &[u64] {
-        // ponytail: the trait can't return an error; streaming X reports it.
+        // The trait can't return an error; streaming X reports it.
         self.full_indptr().unwrap_or_else(|e| {
             tracing::warn!("{}/indptr: {e}", self.x_path);
             &[]

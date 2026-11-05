@@ -94,7 +94,7 @@ fn blake3_file(path: &Path) -> std::io::Result<blake3::Hash> {
     Ok(hasher.finalize())
 }
 
-// ponytail: no positional read in std off unix; Windows keeps the mmap path.
+// No positional read in std off unix; Windows keeps the mmap path.
 #[cfg(not(unix))]
 fn blake3_file(path: &Path) -> std::io::Result<blake3::Hash> {
     Ok(blake3::Hasher::new().update_mmap_rayon(path)?.finalize())
@@ -1724,7 +1724,7 @@ fn cat_levels_preview(data: &ColumnData) -> String {
 }
 
 /// Above this size inspect asks before downloading a URL in full.
-// ponytail: fixed threshold; make it a flag if 1 GB is wrong for someone.
+// TODO: fixed threshold; make it a flag if 1 GB is wrong for someone.
 #[cfg(feature = "net")]
 const ASK_ABOVE_BYTES: u64 = 1_000_000_000;
 
