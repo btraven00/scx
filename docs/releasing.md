@@ -65,9 +65,13 @@ It is never committed. `h5repack -f NONE` (from the pixi env's `hdf5`) makes the
 uncompressed copy, so both inputs hold the same values. Both are cached in
 `--data` (~24 GB). To use a hapiq binary that isn't on `PATH`, set `HAPIQ`.
 
-`compare` prints every metric and flags changes beyond 5% (`--threshold`). It
-exits 1 if anything got slower or used more memory. It warns when the two files
-come from different CPUs.
+`compare` prints every metric. It flags a change when it is beyond 5%
+(`--threshold`) and the two runs' ranges don't overlap (criterion's confidence
+interval, or the min..max of the end-to-end reps); a bigger change inside the
+ranges prints as "(within noise)". It exits 1 if a flagged change is slower or
+heavier, and warns when the two files come from different CPUs.
+`read_x/raw` is the noisiest group on omni: unchanged code has moved it by 15%
+between runs.
 
 To backfill a release recorded before this suite existed, point `run` at that
 release's binary and skip criterion:
