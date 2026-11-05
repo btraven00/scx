@@ -167,48 +167,75 @@ fn bench_write_x(c: &mut Criterion) {
     g.finish();
 }
 
+/// Stream every row of `path`'s X (`raw: false`) or raw/X (`raw: true`).
+fn stream_all(rt: &Runtime, path: &Path, raw: bool, total: u64) {
+    rt.block_on(async {
+        let mut r = H5AdReader::open(path, 5000).unwrap();
+        let meta = if raw {
+            r.raw_meta().await.unwrap()
+        } else {
+            None
+        };
+        let mut s = match &meta {
+            Some(m) => r.raw_stream(m, 5000),
+            None => r.x_stream(),
+        };
+        let mut n = 0u64;
+        while let Some(chunk) = s.next().await {
+            n += chunk.unwrap().data.indices.len() as u64;
+        }
+        assert_eq!(n, total);
+    })
+}
+
+/// X and raw/X of the same storage stream through different reader paths;
+/// `read_raw` matching `read_x` shows they keep the same chunk index.
 fn bench_read_x(c: &mut Criterion) {
     let chunks = synth_chunks();
     let total = nnz(&chunks);
     let rt = current_thread_rt();
     let dir = TempDir::new().unwrap();
 
-    let mut g = c.benchmark_group("read_x");
-    g.throughput(Throughput::Elements(total));
-    g.sample_size(10);
-    for (enc, level) in [("raw", None), ("gzip", Some(4))] {
-        // Written once, outside the timing loop.
-        let path = dir.path().join(format!("{enc}.h5ad"));
-        rt.block_on(async {
-            let (obs, var) = tables();
-            let mut w =
-                H5AdWriter::create_at(&path, N_CELLS, N_GENES, DataType::F32, level, "X").unwrap();
-            w.write_obs(&obs).await.unwrap();
-            w.write_var(&var).await.unwrap();
-            for chunk in &chunks {
-                w.write_x_chunk(chunk).await.unwrap();
-            }
-            w.finalize().await.unwrap();
-        });
-        for t in THREADS {
-            g.bench_function(BenchmarkId::new(enc, format!("t{t}")), |b| {
-                b.iter(|| {
-                    with_threads(t, || {
-                        rt.block_on(async {
-                            let mut r = H5AdReader::open(&path, 5000).unwrap();
-                            let mut s = r.x_stream();
-                            let mut n = 0u64;
-                            while let Some(chunk) = s.next().await {
-                                n += chunk.unwrap().data.indices.len() as u64;
-                            }
-                            assert_eq!(n, total);
-                        })
-                    })
-                })
+    // Written once, outside the timing loop; raw/X hard-links X's storage.
+    let files: Vec<_> = [("raw", None), ("gzip", Some(4))]
+        .into_iter()
+        .map(|(enc, level)| {
+            let path = dir.path().join(format!("{enc}.h5ad"));
+            rt.block_on(async {
+                let (obs, var) = tables();
+                let mut w =
+                    H5AdWriter::create_at(&path, N_CELLS, N_GENES, DataType::F32, level, "X")
+                        .unwrap();
+                w.write_obs(&obs).await.unwrap();
+                w.write_var(&var).await.unwrap();
+                for chunk in &chunks {
+                    w.write_x_chunk(chunk).await.unwrap();
+                }
+                w.finalize().await.unwrap();
             });
+            let f = hdf5::File::open_rw(&path).unwrap();
+            // A throwaway input file: its group timestamps never matter.
+            #[allow(clippy::disallowed_methods)]
+            f.create_group("raw").unwrap();
+            f.link_hard("X", "raw/X").unwrap();
+            f.link_hard("var", "raw/var").unwrap();
+            (enc, path)
+        })
+        .collect();
+
+    for (group, raw) in [("read_x", false), ("read_raw", true)] {
+        let mut g = c.benchmark_group(group);
+        g.throughput(Throughput::Elements(total));
+        g.sample_size(10);
+        for (enc, path) in &files {
+            for t in THREADS {
+                g.bench_function(BenchmarkId::new(*enc, format!("t{t}")), |b| {
+                    b.iter(|| with_threads(t, || stream_all(&rt, path, raw, total)))
+                });
+            }
         }
+        g.finish();
     }
-    g.finish();
 }
 
 criterion_group!(benches, bench_bp128, bench_write_x, bench_read_x);
