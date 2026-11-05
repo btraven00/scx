@@ -2,14 +2,15 @@
 //!
 //! Formats that need random access (HDF5, `.rds`'s second pass) can't read a
 //! network stream or a pipe, so the bytes go to a temporary file first. The
-//! SHA-256 is computed on the way through, for provenance, with no second read.
+//! hash ([`HashAlgo`]) is computed on the way through, for provenance, with no
+//! second read.
 
 use std::io::{BufWriter, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::provenance::{HashAlgo, Hasher};
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 
 use crate::dtype::DataType;
 use crate::error::Result;
@@ -19,7 +20,7 @@ use crate::stream::{ChunkStream, DatasetReader};
 /// A temporary copy of a source, deleted when dropped.
 pub struct Spool {
     path: PathBuf,
-    /// `"sha256:<hex>"` of the bytes, hashed as they were written.
+    /// `"<algo>:<hex>"` of the bytes, hashed as they were written.
     hash: String,
 }
 
@@ -29,15 +30,15 @@ impl Spool {
         &self.path
     }
 
-    /// `"sha256:<hex>"` of the copied bytes.
+    /// `"<algo>:<hex>"` of the copied bytes.
     pub fn hash(&self) -> &str {
         &self.hash
     }
 
     /// Copy everything `src` yields to a temporary file named after `name`
     /// (its extension is kept, for format detection).
-    pub fn from_reader(name: &str, mut src: impl Read) -> Result<Spool> {
-        let mut w = SpoolWriter::create(name)?;
+    pub fn from_reader(name: &str, mut src: impl Read, algo: HashAlgo) -> Result<Spool> {
+        let mut w = SpoolWriter::create(name, algo)?;
         std::io::copy(&mut src, &mut w)?;
         w.finish()
     }
@@ -54,11 +55,11 @@ impl Drop for Spool {
 struct SpoolWriter {
     spool: Spool,
     file: BufWriter<std::fs::File>,
-    hasher: Sha256,
+    hasher: Hasher,
 }
 
 impl SpoolWriter {
-    fn create(name: &str) -> Result<Self> {
+    fn create(name: &str, algo: HashAlgo) -> Result<Self> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
@@ -70,13 +71,13 @@ impl SpoolWriter {
                 hash: String::new(),
             },
             file,
-            hasher: Sha256::new(),
+            hasher: Hasher::new(algo),
         })
     }
 
     fn finish(mut self) -> Result<Spool> {
         self.flush()?;
-        self.spool.hash = format!("sha256:{}", crate::provenance::hex(self.hasher));
+        self.spool.hash = self.hasher.finish();
         Ok(self.spool)
     }
 }
@@ -96,13 +97,13 @@ impl Write for SpoolWriter {
 /// Download `url` (any object-store location) to a temporary file, deleted
 /// when the returned [`Spool`] is dropped.
 #[cfg(feature = "net")]
-pub async fn spool(url: &str) -> Result<Spool> {
+pub async fn spool(url: &str, algo: HashAlgo) -> Result<Spool> {
     use futures::StreamExt;
     use object_store::ObjectStoreExt;
 
     let (store, path) = crate::net::resolve_store(url)?;
     let name = path.filename().unwrap_or("download").to_string();
-    let mut w = SpoolWriter::create(&name)?;
+    let mut w = SpoolWriter::create(&name, algo)?;
     let net = |e: object_store::Error| crate::parquet::net_err(format!("download '{url}': {e}"));
     let mut body = store.get(&path).await.map_err(net)?.into_stream();
     while let Some(bytes) = body.next().await {
@@ -196,7 +197,7 @@ mod tests {
 
     #[test]
     fn spool_copies_hashes_and_cleans_up() {
-        let s = Spool::from_reader("x.h5ad", &b"abc"[..]).unwrap();
+        let s = Spool::from_reader("x.h5ad", &b"abc"[..], HashAlgo::Sha256).unwrap();
         assert_eq!(std::fs::read(s.path()).unwrap(), b"abc");
         assert!(s.path().to_string_lossy().ends_with("x.h5ad"));
         // sha256("abc")
@@ -216,7 +217,12 @@ mod tests {
         let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/tiny/tiny_raw.h5ad");
         let opts = crate::OpenOptions::default();
-        let spool = Spool::from_reader("x.h5ad", std::fs::File::open(&src).unwrap()).unwrap();
+        let spool = Spool::from_reader(
+            "x.h5ad",
+            std::fs::File::open(&src).unwrap(),
+            HashAlgo::default(),
+        )
+        .unwrap();
         let path = spool.path().to_str().unwrap().to_string();
         let mut s = Spooled::new(crate::open(&path, &opts).await.unwrap(), spool);
         let mut d = crate::open(src.to_str().unwrap(), &opts).await.unwrap();
@@ -228,7 +234,7 @@ mod tests {
 
         assert_eq!(s.shape(), d.shape());
         assert_eq!(s.dtype(), d.dtype());
-        assert!(s.source_hash().unwrap().starts_with("sha256:"));
+        assert!(s.source_hash().unwrap().starts_with("blake3:"));
         assert_eq!(dbg(&s.obs().await.unwrap()), dbg(&d.obs().await.unwrap()));
         assert_eq!(dbg(&s.var().await.unwrap()), dbg(&d.var().await.unwrap()));
         assert_eq!(dbg(&s.obsm().await.unwrap()), dbg(&d.obsm().await.unwrap()));

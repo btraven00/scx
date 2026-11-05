@@ -21,6 +21,7 @@ pub struct ExportArgs {
 
 pub async fn run_export(args: ExportArgs) -> anyhow::Result<()> {
     let opts = scx_core::OpenOptions {
+        source_hash: Default::default(),
         assay: Some(args.assay.clone()),
         layer: Some(args.layer.clone()),
         ..scx_core::OpenOptions::new(1)

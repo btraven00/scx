@@ -86,7 +86,7 @@ fn rds_url_records_source_hash() {
     };
     let local = hash(fixture().to_str().unwrap(), "local.h5ad");
     let remote = hash(&format!("file://{}", fixture().display()), "remote.h5ad");
-    assert!(local.starts_with("sha256:"), "{local}");
+    assert!(local.starts_with("blake3:"), "{local}");
     assert_eq!(remote, local);
 }
 

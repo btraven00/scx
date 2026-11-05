@@ -38,6 +38,7 @@ fn convert(input: &Path, out: &Path, extra: &[&str]) {
 fn slot(path: &Path, slot: &str) -> Vec<Vec<f64>> {
     futures::executor::block_on(async {
         let opts = scx_core::OpenOptions {
+            source_hash: Default::default(),
             layer: Some(slot.to_string()),
             ..scx_core::OpenOptions::new(100)
         };
@@ -147,7 +148,7 @@ fn dgcmatrix_streams_unsorted_rows() {
 }
 
 /// --output-hash picks the sidecar's `output.hash` algorithm (blake3 by
-/// default) or leaves it out; the source hash is always sha256.
+/// default) or leaves it out; the source hash stays blake3 (its default).
 #[test]
 fn output_hash_flag_picks_sidecar_hash() {
     let dir = tempfile::tempdir().unwrap();
@@ -171,7 +172,7 @@ fn output_hash_flag_picks_sidecar_hash() {
             side["source"]["hash"]
                 .as_str()
                 .unwrap()
-                .starts_with("sha256:"),
+                .starts_with("blake3:"),
             "{extra:?}: {side}"
         );
         // The hash is of the output file's bytes, in lowercase hex.

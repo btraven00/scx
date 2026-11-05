@@ -380,6 +380,7 @@ async fn h5seurat_v5_dgc_layers_matrix() {
 async fn h5seurat_second_assay() {
     let e = expected();
     let opts = scx_core::OpenOptions {
+        source_hash: Default::default(),
         assay: Some("ADT".into()),
         ..scx_core::OpenOptions::new(4)
     };

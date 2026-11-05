@@ -42,6 +42,7 @@ fn run(input: &Path, out: &Path, extra: &[&str]) -> Output {
 
 fn open(path: &Path, layer: &str) -> Box<dyn scx_core::stream::DatasetReader + Send> {
     let opts = scx_core::OpenOptions {
+        source_hash: Default::default(),
         layer: Some(layer.to_string()),
         ..scx_core::OpenOptions::new(2)
     };
