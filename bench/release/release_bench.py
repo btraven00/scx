@@ -107,7 +107,7 @@ def run_criterion():
     res = {}
     for est in glob.glob(f"{TARGET}/criterion/**/new/estimates.json", recursive=True):
         bench = json.load(open(Path(est).parent / "benchmark.json"))
-        if bench["group_id"] not in ("bp128", "write_x", "read_x"):
+        if bench["group_id"] not in ("bp128", "write_x", "read_x", "read_raw"):
             continue
         e = json.load(open(est))
         res[f"criterion/{bench['full_id']}"] = {
