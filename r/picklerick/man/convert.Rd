@@ -9,7 +9,7 @@ convert(
   output,
   chunk_size = 5000L,
   dtype = "f32",
-  assay = "RNA",
+  assay = NULL,
   layer = "counts",
   where = NULL
 )
@@ -24,7 +24,9 @@ convert(
 \item{dtype}{Output numeric type: \code{"f32"}, \code{"f64"}, \code{"i32"}, or \code{"u32"}.
 Default \code{"f32"}.}
 
-\item{assay}{Seurat assay to convert (H5Seurat inputs only). Default \code{"RNA"}.}
+\item{assay}{Seurat assay to convert. Default \code{NULL}: \code{"RNA"} for
+H5Seurat input, the object's active assay for a Seurat \code{.rds}; also the
+assay name of H5Seurat output (\code{"RNA"} when \code{NULL}).}
 
 \item{layer}{Seurat layer to convert (H5Seurat inputs only). Default \code{"counts"}.}
 
