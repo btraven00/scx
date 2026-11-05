@@ -216,6 +216,10 @@ pub fn write_bpcells_h5(
 /// Chunk size (elements) for the resizable encoded datasets.
 const BPCELLS_STREAM_CHUNK: usize = 1 << 16;
 
+/// Values per parallel BP-128 encode task in [`BpcellsStreamEncoder::flush`].
+/// Must be a multiple of 128 so piece boundaries fall on block boundaries.
+const ENCODE_PIECE: usize = 128 * 256;
+
 /// A borrowed 1-D array of one of the BPCells element types.
 pub(crate) enum Arr<'a> {
     U32(&'a [u32]),
@@ -256,7 +260,7 @@ fn append_1d<T: hdf5::H5Type + Clone>(ds: &Dataset, data: &[T]) -> Result<()> {
     let old = ds.shape()[0];
     let new = old + data.len();
     ds.resize(new)?;
-    ds.write_slice(&Array1::from_vec(data.to_vec()), s![old..new])?;
+    ds.write_slice(data, s![old..new])?;
     Ok(())
 }
 
@@ -520,16 +524,35 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
         if n == 0 {
             return Ok(());
         }
-        let (data, idx, starts) = encode_d1z(&self.buf_indices[..n])?;
-        let idx = self.index.push_piece(data.len(), &idx);
+        // BP-128 blocks are independent, so encode ENCODE_PIECE-value pieces in
+        // parallel, then rebase and concatenate them in order. Pieces are whole
+        // multiples of 128, so the bytes match a single serial encode.
+        use rayon::prelude::*;
+        let pieces: Vec<_> = self.buf_indices[..n]
+            .par_chunks(ENCODE_PIECE)
+            .map(encode_d1z)
+            .collect::<Result<_>>()?;
+        let (mut data, mut idx, mut starts) = (Vec::new(), Vec::new(), Vec::new());
+        for (d, i, s) in pieces {
+            idx.extend(self.index.push_piece(d.len(), &i));
+            data.extend_from_slice(&d);
+            starts.extend_from_slice(&s);
+        }
         self.sink.append("index_data", Arr::U32(&data))?;
         self.sink.append("index_idx", Arr::U32(&idx))?;
         self.sink.append("index_starts", Arr::U32(&starts))?;
         self.buf_indices.drain(..n);
 
         if self.val_kind == Some(DataType::U32) {
-            let (data, idx) = encode_for(&self.buf_u32[..n]);
-            let idx = self.val.push_piece(data.len(), &idx);
+            let pieces: Vec<_> = self.buf_u32[..n]
+                .par_chunks(ENCODE_PIECE)
+                .map(encode_for)
+                .collect();
+            let (mut data, mut idx) = (Vec::new(), Vec::new());
+            for (d, i) in pieces {
+                idx.extend(self.val.push_piece(d.len(), &i));
+                data.extend_from_slice(&d);
+            }
             self.sink.append("val_data", Arr::U32(&data))?;
             self.sink.append("val_idx", Arr::U32(&idx))?;
             self.buf_u32.drain(..n);
@@ -1157,7 +1180,22 @@ mod tests {
     /// don't align to the 128-column run boundary.
     #[test]
     fn stream_encoder_matches_buffered_uint() {
-        let (n_genes, n_cells) = (300usize, 1000usize);
+        assert_stream_matches_buffered_uint(300, 1000, &[1, 127, 128, 129, 256, 333, 1000]);
+    }
+
+    /// Regression: `flush` encodes in parallel ENCODE_PIECE-value pieces. With
+    /// ~120k nonzeros, one push of the whole matrix spans several pieces, so
+    /// rebasing and concatenating them must reproduce the serial encode.
+    #[test]
+    fn stream_encoder_matches_buffered_across_parallel_pieces() {
+        let n_cells = 30_000;
+        let (cg, _) = synth_cells(300, n_cells);
+        let nnz: usize = cg.iter().map(Vec::len).sum();
+        assert!(nnz > 3 * ENCODE_PIECE, "fixture too small: {nnz} nnz");
+        assert_stream_matches_buffered_uint(300, n_cells, &[n_cells, 5000, 333]);
+    }
+
+    fn assert_stream_matches_buffered_uint(n_genes: usize, n_cells: usize, chunk_sizes: &[usize]) {
         let (cg, cv) = synth_cells(n_genes, n_cells);
 
         // Oracle CSC arrays (cells as columns).
@@ -1191,7 +1229,7 @@ mod tests {
         drop(fa);
         let fa = File::open(&path_a).unwrap();
 
-        for &chunk_size in &[1usize, 127, 128, 129, 256, 333, 1000] {
+        for &chunk_size in chunk_sizes {
             let path_b = dir.path().join(format!("stream_{chunk_size}.h5"));
             let fb = File::create(&path_b).unwrap();
             let mut enc =
