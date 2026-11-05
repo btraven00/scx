@@ -26,12 +26,12 @@ system HDF5.
 
 | Function | Purpose |
 |---|---|
-| `pk.convert(src, dst, *, dtype="f32", assay="RNA", layer="counts", chunk_size=5000, where=None)` | Convert a file to `.h5ad`, `.h5seurat` or `.zarr` (AnnData Zarr v3). The output format is chosen from the extension of `dst`. `where={"cell_type": ["B", "T"]}` writes only the matching cells, still streaming. |
-| `pk.read(path, *, assay="RNA", layer="counts", dtype="f32", chunk_size=5000)` | Read any supported input into an in-memory `anndata.AnnData`. |
+| `pk.convert(src, dst, *, dtype="f32", assay=None, layer="counts", chunk_size=5000, where=None)` | Convert a file to `.h5ad`, `.h5seurat` or `.zarr` (AnnData Zarr v3). The output format is chosen from the extension of `dst`. `where={"cell_type": ["B", "T"]}` writes only the matching cells, still streaming. |
+| `pk.read(path, *, assay=None, layer="counts", dtype="f32", chunk_size=5000)` | Read any supported input into an in-memory `anndata.AnnData`. |
 | `pk.write_h5seurat(adata, path, *, assay="RNA", chunk_size=5000)` | Write an `AnnData` to H5Seurat, in the SeuratDisk layout. |
 | `pk.inspect(path)` | Return shape, columns, layers and nnz statistics without reading the matrix. |
-| `pk.open_stream(path, *, chunk_size=5000, assay="RNA", layer="counts", rows=None, where=None)` | Iterate over X as CSR row blocks (`pk.MatrixChunk`). `where={"CellLine": "A549"}` or `rows=` (mask, indices or ranges) selects rows; on h5ad and Zarr only those rows are read. |
-| `pk.open_dask(path, *, chunk_size=5000, assay="RNA", layer="counts")` | X as a lazy `dask.array` of CSR row blocks, for scanpy's dask code paths. Needs `dask[array]`. |
+| `pk.open_stream(path, *, chunk_size=5000, assay=None, layer="counts", rows=None, where=None)` | Iterate over X as CSR row blocks (`pk.MatrixChunk`). `where={"CellLine": "A549"}` or `rows=` (mask, indices or ranges) selects rows; on h5ad and Zarr only those rows are read. |
+| `pk.open_dask(path, *, chunk_size=5000, assay=None, layer="counts")` | X as a lazy `dask.array` of CSR row blocks, for scanpy's dask code paths. Needs `dask[array]`. |
 
 Supported inputs: H5AD, H5Seurat (dgCMatrix or BPCells-backed), BPCells
 directories, 10x HDF5, MatrixMarket, and AnnData Zarr. Engine errors are

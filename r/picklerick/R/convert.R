@@ -15,7 +15,9 @@
 #' @param chunk_size Number of cells per streaming chunk. Default `5000L`.
 #' @param dtype Output numeric type: `"f32"`, `"f64"`, `"i32"`, or `"u32"`.
 #'   Default `"f32"`.
-#' @param assay Seurat assay to convert (H5Seurat inputs only). Default `"RNA"`.
+#' @param assay Seurat assay to convert. Default `NULL`: `"RNA"` for
+#'   H5Seurat input, the object's active assay for a Seurat `.rds`; also the
+#'   assay name of H5Seurat output (`"RNA"` when `NULL`).
 #' @param layer Seurat layer to convert (H5Seurat inputs only). Default `"counts"`.
 #' @param where Keep only some cells: a named list mapping `obs` columns to
 #'   the values they may take, e.g. `list(cell_type = c("B", "T"), donor =
@@ -41,7 +43,7 @@
 convert <- function(input, output,
                     chunk_size = 5000L,
                     dtype      = "f32",
-                    assay      = "RNA",
+                    assay      = NULL,
                     layer      = "counts",
                     where      = NULL) {
   w <- .where_pairs(where)
@@ -51,7 +53,7 @@ convert <- function(input, output,
       output       = path.expand(output),
       chunk_size   = as.integer(chunk_size),
       dtype        = as.character(dtype),
-      assay        = as.character(assay),
+      assay        = if (is.null(assay)) "" else as.character(assay),
       layer        = as.character(layer),
       where_cols   = w$cols,
       where_values = w$values
@@ -97,7 +99,7 @@ convert <- function(input, output,
     input, output,
     "--chunk-size", as.character(chunk_size),
     "--dtype",      dtype,
-    "--assay",      assay,
+    if (!is.null(assay)) c("--assay", assay),
     "--layer",      layer,
     if (length(w$cols)) as.vector(rbind("--where", shQuote(paste0(w$cols, "=", w$values))))
   )

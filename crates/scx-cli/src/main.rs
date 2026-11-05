@@ -167,9 +167,9 @@ enum Cli {
         #[arg(long, default_value = "f32")]
         dtype: String,
 
-        /// Seurat assay to convert (H5Seurat only)
-        #[arg(long, default_value = "RNA")]
-        assay: String,
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        #[arg(long)]
+        assay: Option<String>,
 
         /// Seurat layer to convert (H5Seurat only)
         #[arg(long, default_value = "counts")]
@@ -291,9 +291,9 @@ enum Cli {
         /// Input file
         input: String,
 
-        /// Seurat assay (H5Seurat only)
-        #[arg(long, default_value = "RNA")]
-        assay: String,
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        #[arg(long)]
+        assay: Option<String>,
 
         /// Matrix layer to read: the Seurat layer (H5Seurat), or an H5AD
         /// `/layers/<name>` used in place of `/X`. Defaults to `/X` for H5AD
@@ -433,9 +433,9 @@ enum Cli {
         #[arg(long, default_value = "5000")]
         chunk_size: usize,
 
-        /// Seurat assay (H5Seurat only)
-        #[arg(long, default_value = "RNA")]
-        assay: String,
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        #[arg(long)]
+        assay: Option<String>,
 
         /// Seurat layer (H5Seurat only)
         #[arg(long, default_value = "counts")]
@@ -471,9 +471,9 @@ enum Cli {
         #[arg(long, short = 'o')]
         output: String,
 
-        /// Seurat assay (H5Seurat only)
-        #[arg(long, default_value = "RNA")]
-        assay: String,
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        #[arg(long)]
+        assay: Option<String>,
 
         /// Seurat layer (H5Seurat only)
         #[arg(long, default_value = "counts")]
@@ -839,7 +839,8 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Some(Format::H5Seurat) => {
                     let seurat_layer = layer.as_deref().unwrap_or("counts");
-                    let mut r = open_h5seurat(input_path, chunk, Some(&assay), Some(seurat_layer))?;
+                    let mut r =
+                        open_h5seurat(input_path, chunk, assay.as_deref(), Some(seurat_layer))?;
                     let fmt_name = if r.x_indptr().is_empty() {
                         "H5Seurat (BPCells)"
                     } else {
@@ -869,7 +870,7 @@ async fn run() -> anyhow::Result<()> {
                     match scx_core::rds::RdsSeuratReader::open(
                         input_path,
                         chunk,
-                        None,
+                        assay.as_deref(),
                         layer.as_deref(),
                     ) {
                         Ok(mut r) => inspect(&mut r, &input, "RDS (Seurat)").await?,
@@ -992,7 +993,7 @@ async fn run() -> anyhow::Result<()> {
             // Parquet; options irrelevant to the detected format are ignored.
             let opts = scx_core::OpenOptions {
                 chunk_size,
-                assay: Some(assay.clone()),
+                assay: assay.clone(),
                 layer: Some(layer.clone()),
                 metadata_only: false,
                 n_vars: n_vars_arg,
@@ -1050,7 +1051,7 @@ async fn run() -> anyhow::Result<()> {
                 &mut *reader,
                 &partial,
                 out_dtype,
-                &assay,
+                assay.as_deref().unwrap_or("RNA"),
                 &layer,
                 &x_slot,
                 &project,
@@ -1145,7 +1146,7 @@ async fn run() -> anyhow::Result<()> {
 
             let opts = scx_core::OpenOptions {
                 source_hash: Default::default(),
-                assay: Some(assay.clone()),
+                assay: assay.clone(),
                 layer: Some(layer.clone()),
                 ..scx_core::OpenOptions::new(chunk_size)
             };

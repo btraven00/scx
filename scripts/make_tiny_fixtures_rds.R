@@ -93,3 +93,10 @@ stopifnot(length(Layers(big5, search = "counts")) == 2)
 saveRDS(big5, file.path(dir, "big_v5_split.rds"))
 note <- "saved next to the object"
 save(note, big4, file = file.path(dir, "big_v4.rda"))
+
+# One assay, not called RNA (as SeuratData's spatial objects): with no
+# --assay the reader must take the object's active assay.
+spatial <- CreateSeuratObject(counts = counts, meta.data = meta, assay = "Spatial",
+                              min.cells = 0, min.features = 0)
+stopifnot(identical(DefaultAssay(spatial), "Spatial"), identical(Assays(spatial), "Spatial"))
+saveRDS(spatial, file.path(dir, "tiny_v5_spatial.rds"))
