@@ -233,12 +233,15 @@ pub fn copy_chunks(
     let dtype = src.dtype()?;
     let elem = dtype.size();
     let n = src.size();
+    // The source's extents, not a fixed `n`: anndata writes resizable
+    // datasets, which may be smaller than one chunk (9 values in a 65536
+    // chunk), and HDF5 refuses that chunk for a fixed-size dataset.
     let out = dst
         .new_dataset_builder()
         .empty_as(&dtype)
         .chunk(chunk)
         .set_filters(&filters)
-        .shape(n)
+        .shape(src.space()?.extents()?)
         .create(name)?;
     let file = std::fs::File::open(src.filename())?;
     let did = out.id();

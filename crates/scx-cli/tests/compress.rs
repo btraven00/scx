@@ -137,3 +137,31 @@ fn compress_is_ignored_and_warns_for_h5seurat_output() {
         "expected an ignore warning for .h5seurat output, got stdout:\n{logs}"
     );
 }
+
+/// A gzip h5ad whose X arrays are smaller than one chunk (6 cells, 9
+/// nonzeros in 65536-value chunks) converts to dgCMatrix H5Seurat. The
+/// chunk copy used to recreate them fixed-size and HDF5 refused the
+/// oversized chunk: "Chunk dimensions ([65536]) exceed data shape".
+#[test]
+fn gzip_h5ad_smaller_than_a_chunk_converts_to_h5seurat() {
+    let dir = tempfile::tempdir().unwrap();
+    let gz = dir.path().join("gz.h5ad");
+    let out = dir.path().join("out.h5seurat");
+    assert_ok(
+        &convert(&fixture_path("tiny/tiny.h5ad"), &gz, &["--compress"]),
+        "gzip convert",
+    );
+    assert_ok(&convert(&gz, &out, &["--dgcmatrix"]), "h5seurat convert");
+    let diff = Command::new(binary_path())
+        .arg("diff")
+        .arg(fixture_path("tiny/tiny.h5ad"))
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_ok(&diff, "scx diff");
+    assert!(
+        String::from_utf8_lossy(&diff.stdout).contains("slots the same"),
+        "{}",
+        String::from_utf8_lossy(&diff.stdout)
+    );
+}
