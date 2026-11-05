@@ -22,7 +22,7 @@ output bytes.
   "source": {
     "path": "pbmc3k.h5seurat",
     "url": "https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat",
-    "hash": "sha256:703a1b4a…"
+    "hash": "blake3:703a1b4a…"
   },
   "n_obs": 2700,
   "n_vars": 13714
@@ -33,9 +33,12 @@ output bytes.
 source's file name only (a URL input is kept whole), so converting the same
 file from a different directory or machine gives identical bytes, and no
 local directory layout leaks into shared files. Hashes are written as
-`"<algo>:<hex>"`; the source hash is always SHA-256, which is what
-repositories publish and `sha256sum` checks. Files written before this
-change have a bare-hex `source.sha256` instead.
+`"<algo>:<hex>"`. The source hash is blake3 by default (multithreaded,
+~0.15 s for a 3 GB file; check it with `b3sum`). `--source-hash sha256`
+records the SHA-256 that repositories publish and `sha256sum` checks, at
+~1.6 s per 3 GB on one core, and `--source-sha256` records one you already
+have. Files written by earlier versions carry a SHA-256, the oldest a
+bare-hex `source.sha256`.
 
 A URL source that is downloaded whole (anything but Parquet; see
 [network-readers.md](network-readers.md)) is hashed while it downloads, so it
@@ -58,7 +61,7 @@ artifact: the timestamp, the full paths as given, and the output's own hash:
   "source": {
     "path": "data/pbmc3k.h5seurat",
     "url": "https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat",
-    "hash": "sha256:703a1b4a…"
+    "hash": "blake3:703a1b4a…"
   },
   "output": {
     "path": "results/pbmc3k.h5ad",
@@ -75,6 +78,7 @@ artifact: the timestamp, the full paths as given, and the output's own hash:
 |------|-------------|
 | `--source-url <url>` | Canonical origin URL of the source file (optional) |
 | `--source-sha256 <hex>` | Pre-computed SHA-256 (64 hex chars, optionally prefixed `sha256:`). Skips rehashing — intended for pipelines (e.g. hapiq) that already hashed on download. |
+| `--source-hash <algo>` | `blake3` (default, multithreaded: ~0.15 s for 3 GB), `sha256` (~1.6 s on one core; what repositories publish) or `none`. Algorithm for `source.hash` when no `--source-sha256` is given; a downloaded or piped source is hashed with it on the way in. |
 | `--output-hash <algo>` | `blake3` (default, multithreaded: ~0.1 s for 3.5 GB), `sha256` (~1.7 s), or `none`. Algorithm for the sidecar's `output.hash`; check it with `b3sum` or `sha256sum`. Directory outputs are not hashed. |
 
 ### hapiq integration
@@ -95,7 +99,7 @@ scx convert data/pbmc3k.h5seurat results/pbmc3k.h5ad \
 Passing `--source-sha256` from the downloader avoids a second full read of
 the source file during conversion.
 
-The artifact then carries the full lineage: origin URL + source SHA256 +
+The artifact then carries the full lineage: origin URL + source hash +
 scx version. Anyone with the artifact can re-derive the source file
 independently.
 
@@ -109,7 +113,7 @@ provenance
   scx_version    0.1.0
   source.url     https://datasets.cellxgene.cziscience.com/pbmc3k.h5seurat
   source.path    pbmc3k.h5seurat
-  source.hash    sha256:703a1b4a…
+  source.hash    blake3:703a1b4a…
 ```
 
 Files converted without `--source-url` show `(none)` for the URL line.

@@ -34,6 +34,7 @@ fn open_reader(path: &str, opts: scx_core::OpenOptions) -> anyhow::Result<Box<dy
 
 fn stream_opts(chunk_size: usize, assay: &str, layer: &str) -> scx_core::OpenOptions {
     scx_core::OpenOptions {
+        source_hash: Default::default(),
         assay: Some(assay.to_string()),
         layer: Some(layer.to_string()),
         ..scx_core::OpenOptions::new(chunk_size)
@@ -235,6 +236,7 @@ fn nnz_stats<'py>(py: Python<'py>, indptr: &[u64]) -> PyResult<Bound<'py, PyDict
 fn scx_inspect(py: Python<'_>, input: &str, with_names: bool) -> PyResult<Py<PyAny>> {
     let fmt = detect::detect(Path::new(input));
     let opts = scx_core::OpenOptions {
+        source_hash: Default::default(),
         metadata_only: true,
         ..scx_core::OpenOptions::new(1)
     };

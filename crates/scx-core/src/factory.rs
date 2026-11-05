@@ -34,6 +34,9 @@ pub struct OpenOptions {
     pub n_vars: Option<usize>,
     /// Parquet gene dictionary — path or URL to `gene_metadata` (`net` feature).
     pub genes: Option<String>,
+    /// How a downloaded or piped source is hashed for
+    /// [`DatasetReader::source_hash`] (`net` feature, stdin).
+    pub source_hash: crate::provenance::HashAlgo,
 }
 
 impl OpenOptions {
@@ -46,6 +49,7 @@ impl OpenOptions {
             metadata_only: false,
             n_vars: None,
             genes: None,
+            source_hash: Default::default(),
         }
     }
 }
@@ -68,7 +72,7 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
         if crate::net::reads_by_range(input) {
             return open_parquet(input, opts).await;
         }
-        let spool = crate::spool::spool(input).await?;
+        let spool = crate::spool::spool(input, opts.source_hash).await?;
         let path = spool.path().to_string_lossy().into_owned();
         let inner = Box::pin(open(&path, opts)).await.map_err(|e| match e {
             ScxError::InvalidFormat(m) if m.starts_with("could not detect format") => {

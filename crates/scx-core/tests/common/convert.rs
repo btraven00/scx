@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 pub async fn open(path: &Path, layer: &str, chunk: usize) -> Box<dyn DatasetReader + Send> {
     let opts = scx_core::OpenOptions {
+        source_hash: Default::default(),
         layer: Some(layer.to_string()),
         ..scx_core::OpenOptions::new(chunk)
     };

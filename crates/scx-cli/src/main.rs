@@ -66,6 +66,24 @@ enum OutputHash {
     None,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SourceHashAlgo {
+    Blake3,
+    Sha256,
+    None,
+}
+
+impl SourceHashAlgo {
+    /// The algorithm for a source hashed inside scx-core (downloads, stdin);
+    /// `None` hashes with the default there and the result is dropped.
+    fn algo(self) -> provenance::HashAlgo {
+        match self {
+            Self::Sha256 => provenance::HashAlgo::Sha256,
+            Self::Blake3 | Self::None => provenance::HashAlgo::Blake3,
+        }
+    }
+}
+
 /// blake3 of a file's bytes, hashed across threads. Parallel `pread`s fill
 /// one 16 MiB buffer at a time, so peak RSS stays at the buffer: an mmap of
 /// the whole file (`update_mmap_rayon`) gives the same digest at the same
@@ -193,6 +211,14 @@ enum Cli {
         /// compute the hash on download.
         #[arg(long)]
         source_sha256: Option<String>,
+
+        /// Hash of the source recorded in the provenance records
+        /// (`source.hash`), computed while the conversion runs: `blake3`
+        /// (default, multithreaded: ~0.15 s for 3 GB), `sha256` (~1.6 s on
+        /// one core; what repositories publish) or `none`. `--source-sha256`
+        /// records a hash you already have instead.
+        #[arg(long, value_enum, default_value_t = SourceHashAlgo::Blake3)]
+        source_hash: SourceHashAlgo,
 
         /// Hash of the output recorded in the provenance sidecar
         /// (`output.hash`). Hashing reads the whole output once more after
@@ -599,6 +625,7 @@ async fn validate_file(
     let schema_parsed: ValidationSchema = serde_yaml::from_str(&schema_src)
         .map_err(|e| anyhow::anyhow!("invalid schema '{schema}': {e}"))?;
     let opts = scx_core::OpenOptions {
+        source_hash: Default::default(),
         metadata_only: true,
         ..scx_core::OpenOptions::new(1000)
     };
@@ -784,7 +811,7 @@ async fn run() -> anyhow::Result<()> {
                 && !scx_core::net::reads_by_range(&input)
             {
                 confirm_download(&input, yes).await?;
-                Some(scx_core::spool::spool(&input).await?)
+                Some(scx_core::spool::spool(&input, Default::default()).await?)
             } else {
                 None
             };
@@ -911,6 +938,7 @@ async fn run() -> anyhow::Result<()> {
             seuratdisk_compat,
             source_url,
             source_sha256: source_sha256_arg,
+            source_hash,
             output_hash,
             compress,
             gene_major,
@@ -946,11 +974,13 @@ async fn run() -> anyhow::Result<()> {
                     );
                 }
                 std::thread::spawn(move || Ok(Some(format!("sha256:{}", hex.to_ascii_lowercase()))))
-            } else if input != "-" && input_path.is_file() {
+            } else if input != "-" && input_path.is_file() && source_hash != SourceHashAlgo::None {
                 let (path, name) = (input_path.to_path_buf(), input.clone());
+                // Sequential, on this thread alone: the parallel `blake3_file`
+                // would take the pool from the conversion running beside it.
                 std::thread::spawn(move || {
-                    provenance::sha256_file(&path)
-                        .map(|h| Some(format!("sha256:{h}")))
+                    provenance::hash_file_with(source_hash.algo(), &path)
+                        .map(Some)
                         .map_err(|e| anyhow::anyhow!("hashing source '{name}': {e}"))
                 })
             } else {
@@ -967,12 +997,17 @@ async fn run() -> anyhow::Result<()> {
                 metadata_only: false,
                 n_vars: n_vars_arg,
                 genes: genes_arg.clone(),
+                source_hash: source_hash.algo(),
             };
             let mut reader = if input == "-" {
                 // Formats need random access, so stdin goes to a temporary
                 // file (hashed on the way) and is detected by content.
-                let spool = scx_core::spool::Spool::from_reader("stdin", std::io::stdin().lock())
-                    .map_err(|e| anyhow::anyhow!("reading stdin: {e}"))?;
+                let spool = scx_core::spool::Spool::from_reader(
+                    "stdin",
+                    std::io::stdin().lock(),
+                    source_hash.algo(),
+                )
+                .map_err(|e| anyhow::anyhow!("reading stdin: {e}"))?;
                 let path = spool.path().to_string_lossy().into_owned();
                 let inner = scx_core::open(&path, &opts).await.map_err(|e| {
                     anyhow::anyhow!(
@@ -1025,6 +1060,7 @@ async fn run() -> anyhow::Result<()> {
                 &input,
                 source_url.as_deref(),
                 source_sha256,
+                source_hash != SourceHashAlgo::None,
                 compress,
                 csc_mem,
                 &filter,
@@ -1108,6 +1144,7 @@ async fn run() -> anyhow::Result<()> {
             );
 
             let opts = scx_core::OpenOptions {
+                source_hash: Default::default(),
                 assay: Some(assay.clone()),
                 layer: Some(layer.clone()),
                 ..scx_core::OpenOptions::new(chunk_size)
@@ -1244,6 +1281,8 @@ async fn convert_with_reader(
     source_path: &str,
     source_url: Option<&str>,
     source_sha256: SourceHash,
+    // Record the hash a download or stdin spool computed on the way in.
+    reader_hash: bool,
     compress: Option<u8>,
     csc_mem: Option<usize>,
     filter: &SlotFilter,
@@ -1550,8 +1589,8 @@ async fn convert_with_reader(
     let source_sha256 = source_sha256
         .join()
         .map_err(|_| anyhow::anyhow!("source hashing thread panicked"))??
-        // A remote source was hashed by the reader as it downloaded.
-        .or_else(|| reader.source_hash());
+        // A remote or piped source was hashed by the reader on the way in.
+        .or_else(|| reader.source_hash().filter(|_| reader_hash));
     if write_uns {
         let mut prov = scx_core::provenance::det_record(
             source_path,
