@@ -13,8 +13,9 @@ pub struct ExportArgs {
     pub slot: String,
     /// Output path. Format inferred from extension (.csv or .parquet).
     pub output: String,
-    /// Seurat assay (H5Seurat only).
-    pub assay: String,
+    /// Seurat assay; `None` = the reader's default (RNA for H5Seurat, the
+    /// active assay for .rds).
+    pub assay: Option<String>,
     /// Seurat layer (H5Seurat only).
     pub layer: String,
 }
@@ -22,7 +23,7 @@ pub struct ExportArgs {
 pub async fn run_export(args: ExportArgs) -> anyhow::Result<()> {
     let opts = scx_core::OpenOptions {
         source_hash: Default::default(),
-        assay: Some(args.assay.clone()),
+        assay: args.assay.clone(),
         layer: Some(args.layer.clone()),
         ..scx_core::OpenOptions::new(1)
     };

@@ -75,7 +75,7 @@ def scx_convert(
     output: str,
     chunk_size: int,
     dtype: str,
-    assay: str,
+    assay: str | None,
     layer: str,
     x_slot: str = "X",
     transpose_mem: int | None = None,
@@ -85,7 +85,7 @@ def scx_inspect(input: str, with_names: bool = False) -> dict[str, Any]: ...
 def scx_open_stream(
     path: str,
     chunk_size: int,
-    assay: str,
+    assay: str | None,
     layer: str,
     rows: list[tuple[int, int]] | None = None,
     where: list[tuple[str, list[str]]] | None = None,

@@ -169,3 +169,15 @@ fn inspect_without_a_size_goes_straight_to_the_download() {
     assert!(!out.status.success());
     assert!(err.contains("download") && !err.contains("--yes"), "{err}");
 }
+
+/// A Seurat object whose only (and active) assay is not RNA converts with no
+/// --assay: the default is the object's active assay, not "RNA".
+#[test]
+fn converts_rds_whose_assay_is_not_rna() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.h5ad");
+    let input = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/tiny/tiny_v5_spatial.rds");
+    convert(input.to_str().unwrap(), &out);
+    assert_tiny(&out);
+}

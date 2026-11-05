@@ -165,7 +165,8 @@ async fn do_convert(
 /// @param output Path to the output file or store.
 /// @param chunk_size Number of cells per streaming chunk.
 /// @param dtype Output numeric type: "f32", "f64", "i32", "u32".
-/// @param assay Seurat assay name (H5Seurat only).
+/// @param assay Seurat assay name; `""` (R's `NULL`) leaves it to the
+///   reader: RNA for H5Seurat, the active assay for a Seurat `.rds`.
 /// @param layer Seurat layer name (H5Seurat only).
 /// @param where_cols,where_values `where` flattened to parallel vectors:
 ///   cell `i` is kept when, for every column, some pair names it and its
@@ -211,7 +212,7 @@ fn scx_convert_inner(
     let input_path = Path::new(input);
 
     let opts = scx_core::OpenOptions {
-        assay: Some(assay.to_string()),
+        assay: (!assay.is_empty()).then(|| assay.to_string()),
         layer: Some(layer.to_string()),
         ..scx_core::OpenOptions::new(chunk)
     };
@@ -221,7 +222,8 @@ fn scx_convert_inner(
         if !filters.is_empty() {
             r = Box::new(scx_core::subset::SubsetReader::new(r, &filters, chunk).await?);
         }
-        do_convert(&mut *r, Path::new(output), dtype, assay).await
+        let out_assay = if assay.is_empty() { "RNA" } else { assay };
+        do_convert(&mut *r, Path::new(output), dtype, out_assay).await
     });
 
     result.map_err(|e| Error::from(e.to_string()))

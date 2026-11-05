@@ -32,10 +32,12 @@ fn open_reader(path: &str, opts: scx_core::OpenOptions) -> anyhow::Result<Box<dy
     Ok(block_on(scx_core::open(path, &opts))?)
 }
 
-fn stream_opts(chunk_size: usize, assay: &str, layer: &str) -> scx_core::OpenOptions {
+/// `assay: None` leaves the choice to the reader: RNA for H5Seurat, the
+/// object's active assay for a Seurat `.rds`.
+fn stream_opts(chunk_size: usize, assay: Option<&str>, layer: &str) -> scx_core::OpenOptions {
     scx_core::OpenOptions {
         source_hash: Default::default(),
-        assay: Some(assay.to_string()),
+        assay: assay.map(str::to_string),
         layer: Some(layer.to_string()),
         ..scx_core::OpenOptions::new(chunk_size)
     }
@@ -154,7 +156,7 @@ fn scx_convert(
     output: &str,
     chunk_size: usize,
     dtype: &str,
-    assay: &str,
+    assay: Option<&str>,
     layer: &str,
     x_slot: &str,
     transpose_mem: Option<usize>,
@@ -194,7 +196,7 @@ fn scx_convert(
             Some(CountsSource::Raw(meta)) => Some(meta),
             _ => None,
         };
-        let mut writer = create_writer(output, n_obs, n_vars, dtype, assay, slot)?;
+        let mut writer = create_writer(output, n_obs, n_vars, dtype, assay.unwrap_or("RNA"), slot)?;
         // A source layer with the destination's name can't coexist with it.
         let skip = if is_seurat {
             Some(slot)
@@ -468,7 +470,7 @@ impl PyMatrixStream {
 fn scx_open_stream(
     path: &str,
     chunk_size: usize,
-    assay: &str,
+    assay: Option<&str>,
     layer: &str,
     rows: Option<Vec<(usize, usize)>>,
     r#where: Option<Vec<(String, Vec<String>)>>,

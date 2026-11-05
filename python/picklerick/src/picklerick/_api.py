@@ -30,7 +30,7 @@ def convert(
     output: Pathish,
     *,
     dtype: str = "f32",
-    assay: str = "RNA",
+    assay: str | None = None,
     layer: str = "counts",
     x_slot: str = "X",
     chunk_size: int = 5000,
@@ -53,8 +53,10 @@ def convert(
         Value type of the written matrix: ``"f32"``, ``"f64"``, ``"i32"``
         or ``"u32"``.
     assay, layer
-        Seurat assay and layer to read from H5Seurat input; ``assay`` is
-        also the assay name written to H5Seurat output.
+        Seurat assay and layer to read from Seurat input. ``assay=None``
+        reads ``"RNA"`` from H5Seurat and the object's active assay from a
+        ``.rds``. ``assay`` is also the assay name written to H5Seurat
+        output (``"RNA"`` when ``None``).
     x_slot
         Where the matrix goes in ``.h5ad`` output: ``"X"`` (default) or
         ``"layers/<name>"``, which writes it there and leaves ``X`` absent.
@@ -114,7 +116,7 @@ def _filters(where: Mapping[str, object] | None) -> list[tuple[str, list[str]]] 
 def read(
     path: Pathish,
     *,
-    assay: str = "RNA",
+    assay: str | None = None,
     layer: str = "counts",
     dtype: str = "f32",
     chunk_size: int = 5000,
@@ -130,7 +132,9 @@ def read(
     path
         File or directory in any format :func:`convert` reads.
     assay, layer
-        Seurat assay and layer to read from H5Seurat input.
+        Seurat assay and layer to read from Seurat input. ``assay=None``
+        reads ``"RNA"`` from H5Seurat and the object's active assay from a
+        ``.rds``.
     dtype
         Value type of the matrix: ``"f32"``, ``"f64"``, ``"i32"`` or
         ``"u32"``.
@@ -225,7 +229,7 @@ def open_stream(
     path: Pathish,
     *,
     chunk_size: int = 5000,
-    assay: str = "RNA",
+    assay: str | None = None,
     layer: str = "counts",
     rows: Rows | None = None,
     where: Mapping[str, object] | None = None,
@@ -261,7 +265,9 @@ def open_stream(
     chunk_size
         Maximum rows (cells) per chunk.
     assay, layer
-        Seurat assay and layer to read from H5Seurat input.
+        Seurat assay and layer to read from Seurat input. ``assay=None``
+        reads ``"RNA"`` from H5Seurat and the object's active assay from a
+        ``.rds``.
     rows
         A boolean mask over all rows, a sequence of row indices, or a
         sequence of ``(start, stop)`` half-open ranges.
@@ -307,7 +313,7 @@ def open_dask(
     path: Pathish,
     *,
     chunk_size: int = 5000,
-    assay: str = "RNA",
+    assay: str | None = None,
     layer: str = "counts",
 ):
     """X as a lazy :class:`dask.array.Array` of scipy CSR row blocks.
@@ -331,7 +337,9 @@ def open_dask(
     chunk_size
         Rows (cells) per block.
     assay, layer
-        Seurat assay and layer to read from H5Seurat input.
+        Seurat assay and layer to read from Seurat input. ``assay=None``
+        reads ``"RNA"`` from H5Seurat and the object's active assay from a
+        ``.rds``.
 
     Returns
     -------
