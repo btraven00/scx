@@ -92,6 +92,13 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
     }
 
     let path = Path::new(input);
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no such file or directory: '{input}'"),
+        )
+        .into());
+    }
     let fmt = detect::detect(path)
         .ok_or_else(|| ScxError::InvalidFormat(format!("could not detect format of '{input}'")))?;
     let cs = opts.chunk_size;
