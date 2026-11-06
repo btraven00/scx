@@ -208,35 +208,17 @@ fn read_raw_chunk(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, Vec<
     Ok((filter_mask, buf))
 }
 
-/// Sees a chunk's values, as raw little-endian bytes; false stops a copy.
-pub type ChunkCheck<'a> = &'a mut dyn FnMut(&[u8]) -> bool;
+/// Sees one chunk's values as raw little-endian bytes, called in parallel:
+/// `(index of its first element, the previous chunk's last element (empty for
+/// the first chunk), its values)`. False fails the check.
+pub type ChunkCheck<'a> = &'a (dyn Fn(usize, &[u8], &[u8]) -> bool + Sync);
 
-/// Copy the 1-D chunked dataset `src` to `dst/name` as stored: same type,
-/// chunking and filters, each chunk moved still compressed. The new dataset
-/// carries no timestamp, unlike an `H5Ocopy`, which keeps the source's.
-/// Copying stored chunks this way follows scConvert
-/// (<https://github.com/mianaz/scConvert>); this implementation is scx's own.
-///
-/// `check`, if given, sees each chunk's values in order, as raw little-endian
-/// bytes: unfiltered chunks as stored, deflate ones (optionally after shuffle)
-/// inflated in parallel a batch at a time. Once it returns false the copy
-/// stops and this returns `Ok(false)`, leaving `dst/name` partly written for
-/// the caller to unlink. Any other filter is an error when `check` is given.
-///
-/// A thread writes each batch of chunks while the next batch is read,
-/// inflated and checked.
-///
-/// Chunk bytes are read with `pread` at the address HDF5 reports, one lookup
-/// per chunk instead of `H5Dread_chunk`'s two; that address is only the file
-/// offset without a userblock, so a file with one is an error.
-pub fn copy_chunks(
-    src: &Dataset,
-    dst: &hdf5::Group,
-    name: &str,
-    mut check: Option<ChunkCheck>,
-) -> Result<bool> {
-    const BATCH: usize = 64;
+const BATCH: usize = 64;
 
+/// The chunk length of the 1-D chunked dataset `src`, or an error; and an
+/// error if its file has a userblock: chunks are read with `pread` at the
+/// address HDF5 reports, which is only the file offset without one.
+fn chunk_len(src: &Dataset) -> Result<usize> {
     let Some(chunk) = src.chunk().filter(|c| c.len() == 1).map(|c| c[0]) else {
         return Err(ScxError::InvalidFormat(format!(
             "{}: not a 1-D chunked dataset",
@@ -249,42 +231,24 @@ pub fn copy_chunks(
             src.filename()
         )));
     }
-    let filters = src.filters();
-    // Unfiltered chunks are checked as stored; a plan is for decoding.
-    let plan = chunk_plan(src).filter(|_| !filters.is_empty());
-    if check.is_some() && !filters.is_empty() && plan.is_none() {
-        return Err(ScxError::InvalidFormat(format!(
-            "{}: cannot decode {filters:?} to check it",
-            src.name()
-        )));
-    }
-    let dtype = src.dtype()?;
-    let elem = dtype.size();
-    let n = src.size();
-    // The source's extents, not a fixed `n`: anndata writes resizable
-    // datasets, which may be smaller than one chunk (9 values in a 65536
-    // chunk), and HDF5 refuses that chunk for a fixed-size dataset.
-    let out = dst
-        .new_dataset_builder()
-        .empty_as(&dtype)
-        .chunk(chunk)
-        .set_filters(&filters)
-        .shape(src.space()?.extents()?)
-        .create(name)?;
+    Ok(chunk)
+}
+
+/// `BATCH` chunks: the first element of each, their (filter mask, address,
+/// stored size), their stored bytes.
+type Batch<'a> = (&'a [usize], &'a [(u32, u64, usize)], Vec<Vec<u8>>);
+
+/// Each stored chunk's bytes, `BATCH` chunks at a time.
+fn stored_batches<'a>(
+    src: &Dataset,
+    starts: &'a [usize],
+    locs: &'a [(u32, u64, usize)],
+) -> Result<impl Iterator<Item = Result<Batch<'a>>> + 'a> {
     let file = std::fs::File::open(src.filename())?;
-    let did = out.id();
-    let starts: Vec<usize> = (0..n).step_by(chunk).collect();
-    let all_locs = chunk_locations(src, chunk, n)?;
-    let (tx, rx) =
-        std::sync::mpsc::sync_channel::<(&[usize], &[(u32, u64, usize)], Vec<Vec<u8>>)>(1);
-    std::thread::scope(|s| {
-        let writer = s.spawn(move || {
-            for (batch, locs, raw) in rx {
-                write_chunks(did, batch, locs, &raw, src)?;
-            }
-            Ok::<_, ScxError>(())
-        });
-        for (batch, locs) in starts.chunks(BATCH).zip(all_locs.chunks(BATCH)) {
+    Ok(starts
+        .chunks(BATCH)
+        .zip(locs.chunks(BATCH))
+        .map(move |(batch, locs)| {
             let raw = locs
                 .iter()
                 .map(|&(_, addr, size)| {
@@ -293,31 +257,114 @@ pub fn copy_chunks(
                     Ok(buf)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            if let Some(check) = check.as_mut() {
-                let decoded = plan
-                    .map(|p| {
-                        raw.par_iter()
-                            .zip(locs)
-                            .map(|(b, &(mask, ..))| decode_chunk(p, mask, b, elem))
-                            .collect::<Result<Vec<_>>>()
-                    })
-                    .transpose()?;
-                for (i, &start) in batch.iter().enumerate() {
-                    let bytes = decoded.as_ref().map_or(&raw[i], |d| &d[i]);
-                    // The last chunk is stored full size; only its first part is data.
-                    let valid = (chunk.min(n - start) * elem).min(bytes.len());
-                    if !check(&bytes[..valid]) {
-                        return Ok(false);
-                    }
-                }
+            Ok((batch, locs, raw))
+        }))
+}
+
+/// Show `check` each chunk of the 1-D chunked dataset `src`, in parallel a
+/// batch at a time: unfiltered chunks as stored, deflate ones (optionally
+/// after shuffle) inflated. `Ok(false)` once a chunk fails. Any other filter
+/// is an error. Reads with `pread` only, so it can run beside a
+/// [`copy_chunks`].
+pub fn check_chunks(src: &Dataset, check: ChunkCheck) -> Result<bool> {
+    let chunk = chunk_len(src)?;
+    let filters = src.filters();
+    // Unfiltered chunks are checked as stored; a plan is for decoding.
+    let plan = chunk_plan(src).filter(|_| !filters.is_empty());
+    if !filters.is_empty() && plan.is_none() {
+        return Err(ScxError::InvalidFormat(format!(
+            "{}: cannot decode {filters:?} to check it",
+            src.name()
+        )));
+    }
+    let elem = src.dtype()?.size();
+    let n = src.size();
+    let starts: Vec<usize> = (0..n).step_by(chunk).collect();
+    let locs = chunk_locations(src, chunk, n)?;
+    let mut tail = Vec::new();
+    for item in stored_batches(src, &starts, &locs)? {
+        let (batch, locs, raw) = item?;
+        let decoded = match plan {
+            Some(p) => raw
+                .par_iter()
+                .zip(locs)
+                .map(|(b, &(mask, ..))| decode_chunk(p, mask, b, elem))
+                .collect::<Result<Vec<_>>>()?,
+            None => raw,
+        };
+        // The last chunk is stored full size; only its first part is data.
+        let values = |i: usize| {
+            let valid = (chunk.min(n - batch[i]) * elem).min(decoded[i].len());
+            &decoded[i][..valid]
+        };
+        let last = |b: &[u8]| b[b.len().saturating_sub(elem)..].to_vec();
+        let ok = (0..batch.len()).into_par_iter().all(|i| {
+            let prev = if i == 0 {
+                tail.clone()
+            } else {
+                last(values(i - 1))
+            };
+            check(batch[i], &prev, values(i))
+        });
+        if !ok {
+            return Ok(false);
+        }
+        tail = last(values(batch.len() - 1));
+    }
+    Ok(true)
+}
+
+/// Copy the 1-D chunked dataset `src` to `dst/name` as stored: same type,
+/// chunking and filters, each chunk moved still compressed. The new dataset
+/// carries no timestamp, unlike an `H5Ocopy`, which keeps the source's.
+/// Copying stored chunks this way follows scConvert
+/// (<https://github.com/mianaz/scConvert>); this implementation is scx's own.
+///
+/// Once `stop` is set the copy stops between batches and this returns
+/// `Ok(false)`, leaving `dst/name` partly written for the caller to unlink.
+/// A thread writes each batch of chunks while the next batch is read.
+pub fn copy_chunks(
+    src: &Dataset,
+    dst: &hdf5::Group,
+    name: &str,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<bool> {
+    let chunk = chunk_len(src)?;
+    let dtype = src.dtype()?;
+    let n = src.size();
+    // The source's extents, not a fixed `n`: anndata writes resizable
+    // datasets, which may be smaller than one chunk (9 values in a 65536
+    // chunk), and HDF5 refuses that chunk for a fixed-size dataset.
+    let out = dst
+        .new_dataset_builder()
+        .empty_as(&dtype)
+        .chunk(chunk)
+        .set_filters(&src.filters())
+        .shape(src.space()?.extents()?)
+        .create(name)?;
+    let did = out.id();
+    let starts: Vec<usize> = (0..n).step_by(chunk).collect();
+    let all_locs = chunk_locations(src, chunk, n)?;
+    let stopped = || stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed));
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Batch>(1);
+    std::thread::scope(|s| {
+        let writer = s.spawn(move || {
+            for (batch, locs, raw) in rx {
+                write_chunks(did, batch, locs, &raw, src)?;
             }
-            if tx.send((batch, locs, raw)).is_err() {
+            Ok::<_, ScxError>(())
+        });
+        for item in stored_batches(src, &starts, &all_locs)? {
+            if stopped() {
+                return Ok(false);
+            }
+            if tx.send(item?).is_err() {
                 break; // the writer failed; join reports why
             }
         }
         drop(tx);
         writer.join().expect("chunk writer panicked")?;
-        Ok(true)
+        Ok(!stopped())
     })
 }
 
@@ -925,6 +972,35 @@ mod tests {
             b = b.shuffle();
         }
         b.deflate(6).create("data").unwrap().write(vals).unwrap();
+    }
+
+    /// Every chunk, across batches, is checked once with its own start and
+    /// the element before it, and one failing chunk fails the check.
+    #[test]
+    fn check_chunks_sees_each_chunk_with_its_predecessor() {
+        let p = tmp("check");
+        let n = 1024 * (2 * BATCH + 3) + 100; // three batches, a short last chunk
+        let vals = values(n);
+        write(&p, &vals, true);
+        let ds = File::open(&p).unwrap().dataset("data").unwrap();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let f64_at = |b: &[u8]| f64::from_le_bytes(b.try_into().unwrap());
+        let check = |start: usize, prev: &[u8], b: &[u8]| {
+            seen.lock().unwrap().push(start);
+            let ok_prev = if start == 0 {
+                prev.is_empty()
+            } else {
+                f64_at(prev) == vals[start - 1]
+            };
+            ok_prev && b.len() == 8 * 1024.min(n - start) && f64_at(&b[..8]) == vals[start]
+        };
+        assert!(check_chunks(&ds, &check).unwrap());
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort();
+        assert_eq!(seen, (0..n).step_by(1024).collect::<Vec<_>>());
+        let fail = |start: usize, _: &[u8], _: &[u8]| start != 1024 * (BATCH + 1);
+        assert!(!check_chunks(&ds, &fail).unwrap());
+        std::fs::remove_file(&p).ok();
     }
 
     /// The whole point: shuffle+deflate must decode to exactly what libhdf5
