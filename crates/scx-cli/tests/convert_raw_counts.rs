@@ -323,3 +323,51 @@ fn stdin_input_converts_like_the_file() {
         );
     }
 }
+
+/// raw.X of the AnnData at `path` (h5ad or Zarr), dense, cells x genes;
+/// `None` when the reader finds no raw beside X.
+fn raw(path: &Path) -> Option<Vec<Vec<f64>>> {
+    futures::executor::block_on(async {
+        let opts = scx_core::OpenOptions {
+            source_hash: Default::default(),
+            ..scx_core::OpenOptions::new(100)
+        };
+        let mut r = scx_core::open(path.to_str().unwrap(), &opts).await.unwrap();
+        let meta = r.raw_meta().await.unwrap()?;
+        let mut out = vec![vec![0.0; meta.shape.1]; meta.shape.0];
+        let mut stream = r.raw_stream(&meta, 4);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            let values = chunk.data.data.to_f64();
+            for row in 0..chunk.nrows {
+                let span = chunk.data.indptr[row] as usize..chunk.data.indptr[row + 1] as usize;
+                for k in span {
+                    out[chunk.row_offset + row][chunk.data.indices[k] as usize] = values[k];
+                }
+            }
+        }
+        Some(out)
+    })
+}
+
+/// Regression: h5ad -> h5ad and h5ad -> Zarr dropped `raw` without a word.
+/// It now stays raw, values and genes intact, and reads back from both;
+/// `--exclude raw` still drops it.
+#[test]
+fn h5ad_and_zarr_output_keep_raw() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture("tiny_raw.h5ad");
+    let want = Some(counts(5, 1.0));
+    for out in ["out.h5ad", "out.zarr"] {
+        let out = dir.path().join(out);
+        convert(&input, &out, &[]);
+        assert_eq!(raw(&out), want, "{}", out.display());
+    }
+    let back = dir.path().join("back.h5ad");
+    convert(&dir.path().join("out.zarr"), &back, &[]);
+    assert_eq!(raw(&back), want, "zarr -> h5ad");
+
+    let excluded = dir.path().join("excluded.h5ad");
+    convert(&input, &excluded, &["--exclude", "raw"]);
+    assert_eq!(raw(&excluded), None);
+}
