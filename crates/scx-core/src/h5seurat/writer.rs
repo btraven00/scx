@@ -858,28 +858,34 @@ impl DatasetWriter for H5SeuratWriter {
         let tmp = |name: &str| format!("{name}.copy");
         // A normalised X usually shares raw.X's rows: when it stores the same
         // indices under the same indptr, the check already made covers it.
+        // Deciding that reads both, so it runs beside the copy too.
         let indices = src.dataset("indices")?;
-        let checked_before = match &self.checked {
-            Some((p, g, ip)) if p == src_path && *ip == indptr => {
-                same_stored(&file.dataset(&format!("{g}/indices"))?, &indices)?
+        let same_as_checked = || -> Result<bool> {
+            match &self.checked {
+                Some((p, g, ip)) if p == src_path && *ip == indptr => {
+                    same_stored(&file.dataset(&format!("{g}/indices"))?, &indices)
+                }
+                _ => Ok(false),
             }
-            _ => false,
         };
         // The rows are checked on a thread of their own while the three
         // arrays are copied as stored; an unsorted row stops the copy.
         let stop = std::sync::atomic::AtomicBool::new(false);
-        let copied = std::thread::scope(|s| {
-            let checker = (!checked_before).then(|| {
-                s.spawn(|| {
+        let (copied, checked_before) = std::thread::scope(|s| {
+            let checker = s.spawn(|| {
+                let res = same_as_checked().and_then(|same| {
+                    if same {
+                        return Ok((true, true));
+                    }
                     let check = |start, prev: &[u8], b: &[u8]| {
                         RowCheck::at(&indptr, self.n_vars, start, prev).feed(b)
                     };
-                    let ok = check_chunks(&indices, &check);
-                    if !matches!(ok, Ok(true)) {
-                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    ok
-                })
+                    Ok((check_chunks(&indices, &check)?, false))
+                });
+                if !matches!(res, Ok((true, _))) {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                res
             });
             // CSR of cells x genes is, array for array, the CSC of genes x
             // cells that dgCMatrix stores; only `dims` is written fresh.
@@ -892,8 +898,8 @@ impl DatasetWriter for H5SeuratWriter {
                 Ok(true)
             };
             let copied = copy();
-            let checked = checker.map_or(Ok(true), |h| h.join().expect("row check panicked"));
-            Ok::<_, ScxError>(checked? && copied?)
+            let (checked, before) = checker.join().expect("row check panicked")?;
+            Ok::<_, ScxError>((checked && copied?, before))
         })?;
         if !copied {
             // The partial copy stays in the file as dead space (HDF5
