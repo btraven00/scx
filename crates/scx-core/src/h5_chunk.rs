@@ -208,9 +208,11 @@ fn read_raw_chunk(dsid: hdf5_sys::h5i::hid_t, start: usize) -> Result<(u32, Vec<
     Ok((filter_mask, buf))
 }
 
-/// Sees one chunk's values as raw little-endian bytes, called in parallel:
-/// `(index of its first element, the previous chunk's last element (empty for
-/// the first chunk), its values)`. False fails the check.
+/// Sees values of a dataset as raw little-endian bytes: `(index of the first
+/// value, the element just before it or empty, the values)`. Called in
+/// parallel once per chunk with an empty `prev`, then once per chunk
+/// boundary with the next chunk's first element and the previous chunk's
+/// last as `prev`. False fails the check.
 pub type ChunkCheck<'a> = &'a (dyn Fn(usize, &[u8], &[u8]) -> bool + Sync);
 
 const BATCH: usize = 64;
@@ -261,11 +263,12 @@ fn stored_batches<'a>(
         }))
 }
 
-/// Show `check` each chunk of the 1-D chunked dataset `src`, in parallel a
-/// batch at a time: unfiltered chunks as stored, deflate ones (optionally
-/// after shuffle) inflated. `Ok(false)` once a chunk fails. Any other filter
-/// is an error. Reads with `pread` only, so it can run beside a
-/// [`copy_chunks`].
+/// Show `check` each chunk of the 1-D chunked dataset `src`, all chunks in
+/// parallel, each read (`pread`) and inflated in its own task: unfiltered
+/// chunks as stored, deflate ones (optionally after shuffle) inflated. Then
+/// each chunk boundary. `Ok(false)` once a call fails. Any other filter is an
+/// error. Touches no HDF5 state after listing the chunks, so it can run
+/// beside a [`copy_chunks`].
 pub fn check_chunks(src: &Dataset, check: ChunkCheck) -> Result<bool> {
     let chunk = chunk_len(src)?;
     let filters = src.filters();
@@ -281,37 +284,30 @@ pub fn check_chunks(src: &Dataset, check: ChunkCheck) -> Result<bool> {
     let n = src.size();
     let starts: Vec<usize> = (0..n).step_by(chunk).collect();
     let locs = chunk_locations(src, chunk, n)?;
-    let mut tail = Vec::new();
-    for item in stored_batches(src, &starts, &locs)? {
-        let (batch, locs, raw) = item?;
-        let decoded = match plan {
-            Some(p) => raw
-                .par_iter()
-                .zip(locs)
-                .map(|(b, &(mask, ..))| decode_chunk(p, mask, b, elem))
-                .collect::<Result<Vec<_>>>()?,
-            None => raw,
-        };
-        // The last chunk is stored full size; only its first part is data.
-        let values = |i: usize| {
-            let valid = (chunk.min(n - batch[i]) * elem).min(decoded[i].len());
-            &decoded[i][..valid]
-        };
-        let last = |b: &[u8]| b[b.len().saturating_sub(elem)..].to_vec();
-        let ok = (0..batch.len()).into_par_iter().all(|i| {
-            let prev = if i == 0 {
-                tail.clone()
-            } else {
-                last(values(i - 1))
+    let file = std::fs::File::open(src.filename())?;
+    // Each chunk's (first, last) element, or None once a chunk fails.
+    let edges = starts
+        .par_iter()
+        .zip(&locs)
+        .map(|(&start, &(mask, addr, size))| {
+            let mut buf = vec![0u8; size];
+            read_at(&file, &mut buf, addr)?;
+            let vals = match plan {
+                Some(p) => decode_chunk(p, mask, &buf, elem)?,
+                None => buf,
             };
-            check(batch[i], &prev, values(i))
-        });
-        if !ok {
-            return Ok(false);
-        }
-        tail = last(values(batch.len() - 1));
-    }
-    Ok(true)
+            // The last chunk is stored full size; only its first part is data.
+            let v = &vals[..(chunk.min(n - start) * elem).min(vals.len())];
+            if v.len() < elem || !check(start, &[], v) {
+                return Ok(None);
+            }
+            Ok(Some((v[..elem].to_vec(), v[v.len() - elem..].to_vec())))
+        })
+        .collect::<Result<Option<Vec<_>>>>()?;
+    let Some(edges) = edges else {
+        return Ok(false);
+    };
+    Ok((1..edges.len()).all(|k| check(starts[k], &edges[k - 1].1, &edges[k].0)))
 }
 
 /// Copy the 1-D chunked dataset `src` to `dst/name` as stored: same type,
@@ -974,31 +970,35 @@ mod tests {
         b.deflate(6).create("data").unwrap().write(vals).unwrap();
     }
 
-    /// Every chunk, across batches, is checked once with its own start and
-    /// the element before it, and one failing chunk fails the check.
+    /// Every chunk is checked once, whole and with no predecessor, and every
+    /// boundary once, as the next chunk's first element after the previous
+    /// chunk's last; one failing chunk fails the check.
     #[test]
-    fn check_chunks_sees_each_chunk_with_its_predecessor() {
+    fn check_chunks_sees_each_chunk_and_boundary() {
         let p = tmp("check");
-        let n = 1024 * (2 * BATCH + 3) + 100; // three batches, a short last chunk
+        let n = 1024 * 70 + 100; // a short last chunk
         let vals = values(n);
         write(&p, &vals, true);
         let ds = File::open(&p).unwrap().dataset("data").unwrap();
-        let seen = std::sync::Mutex::new(Vec::new());
-        let f64_at = |b: &[u8]| f64::from_le_bytes(b.try_into().unwrap());
+        let (chunks, edges) = (std::sync::Mutex::new(vec![]), std::sync::Mutex::new(vec![]));
+        let f64_at = |b: &[u8]| f64::from_le_bytes(b[..8].try_into().unwrap());
         let check = |start: usize, prev: &[u8], b: &[u8]| {
-            seen.lock().unwrap().push(start);
-            let ok_prev = if start == 0 {
-                prev.is_empty()
+            let first_ok = f64_at(b) == vals[start];
+            if prev.is_empty() {
+                chunks.lock().unwrap().push(start);
+                first_ok && b.len() == 8 * 1024.min(n - start)
             } else {
-                f64_at(prev) == vals[start - 1]
-            };
-            ok_prev && b.len() == 8 * 1024.min(n - start) && f64_at(&b[..8]) == vals[start]
+                edges.lock().unwrap().push(start);
+                first_ok && b.len() == 8 && f64_at(prev) == vals[start - 1]
+            }
         };
         assert!(check_chunks(&ds, &check).unwrap());
-        let mut seen = seen.into_inner().unwrap();
-        seen.sort();
-        assert_eq!(seen, (0..n).step_by(1024).collect::<Vec<_>>());
-        let fail = |start: usize, _: &[u8], _: &[u8]| start != 1024 * (BATCH + 1);
+        let mut chunks = chunks.into_inner().unwrap();
+        chunks.sort();
+        let starts: Vec<usize> = (0..n).step_by(1024).collect();
+        assert_eq!(chunks, starts);
+        assert_eq!(edges.into_inner().unwrap(), starts[1..]);
+        let fail = |start: usize, _: &[u8], _: &[u8]| start != 1024 * 65;
         assert!(!check_chunks(&ds, &fail).unwrap());
         std::fs::remove_file(&p).ok();
     }
