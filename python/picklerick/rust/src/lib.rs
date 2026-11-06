@@ -94,7 +94,8 @@ async fn convert(
     csc_mem: Option<usize>,
 ) -> anyhow::Result<()> {
     writer.write_obs(&reader.obs().await?).await?;
-    writer.write_var(&reader.var().await?).await?;
+    let var = reader.var().await?;
+    writer.write_var(&var).await?;
     writer.write_obsm(&reader.obsm().await?).await?;
     writer.write_uns(&reader.uns().await?).await?;
     writer.write_varm(&reader.varm().await?).await?;
@@ -118,6 +119,9 @@ async fn convert(
             writer.write_sparse_chunk(&chunk?).await?;
         }
         writer.end_sparse().await?;
+    } else {
+        // Elsewhere raw stays raw, in formats that have it.
+        scx_core::stream::copy_raw(reader, writer, &var.index, chunk_size).await?;
     }
     for meta in &reader.obsp_metas().await? {
         writer.begin_sparse("obsp", &meta.name, meta).await?;

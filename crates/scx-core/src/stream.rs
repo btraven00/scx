@@ -371,6 +371,14 @@ pub trait DatasetWriter: Send {
         meta: &SparseMatrixMeta,
     ) -> Result<()>;
 
+    /// Begin writing AnnData's `raw`: `raw.var`, indexed by `var_index` with
+    /// no columns, and `raw.X`, whose chunks follow through
+    /// `write_sparse_chunk` and `end_sparse`. Returns `false`, having written
+    /// nothing, for a format with no `raw`. The default has none.
+    async fn begin_raw(&mut self, _meta: &SparseMatrixMeta, _var_index: &[String]) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Append a row-chunk to the currently open sparse matrix.
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()>;
 
@@ -406,6 +414,32 @@ pub trait DatasetWriter: Send {
     ) -> Result<bool> {
         Ok(false)
     }
+}
+
+/// Stream AnnData's `raw` from `reader` into `writer`'s `raw`, for a caller
+/// that did not already put raw.X elsewhere (H5Seurat's `counts`).
+/// `var_index` is X's: `raw_meta` only offers a raw with X's genes. A format
+/// with no `raw` gets a warning instead. Returns whether raw was written.
+pub async fn copy_raw(
+    reader: &mut dyn DatasetReader,
+    writer: &mut dyn DatasetWriter,
+    var_index: &[String],
+    chunk_size: usize,
+) -> Result<bool> {
+    let Some(meta) = reader.raw_meta().await? else {
+        return Ok(false);
+    };
+    if !writer.begin_raw(&meta, var_index).await? {
+        tracing::warn!("dropping raw: the output format has no raw");
+        return Ok(false);
+    }
+    tracing::info!(shape = ?meta.shape, "streaming raw.X");
+    let mut stream = reader.raw_stream(&meta, chunk_size);
+    while let Some(chunk) = stream.next().await {
+        writer.write_sparse_chunk(&chunk?).await?;
+    }
+    writer.end_sparse().await?;
+    Ok(true)
 }
 
 #[cfg(test)]

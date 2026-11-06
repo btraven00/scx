@@ -749,6 +749,14 @@ impl DatasetWriter for H5AdWriter {
         Ok(())
     }
 
+    async fn begin_raw(&mut self, meta: &SparseMatrixMeta, var_index: &[String]) -> Result<bool> {
+        let raw = crate::h5::create_group(&self.file, "raw")?;
+        write_encoding_on_group(&raw, "raw", "0.1.0")?;
+        write_dataframe(&self.file, "raw/var", var_index, &[], self.compression)?;
+        self.begin_sparse("raw", "X", meta).await?;
+        Ok(true)
+    }
+
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
         let state = self.sparse_state.as_mut().ok_or_else(|| {
             ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into())
