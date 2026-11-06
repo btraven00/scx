@@ -2,8 +2,9 @@
 
 Status: decided, won't fix (2026-11-05).
 
-scx reads Seurat `.rds` / `.rda` files (counts and meta.data, v3/v4 `Assay`
-and v5 `Assay5`). It does not write them, and a writer will not be added.
+scx reads Seurat `.rds` / `.rda` files (layers, cell and feature metadata,
+reductions and graphs; v3/v4 `Assay` and v5 `Assay5`). It does not write them,
+and a writer will not be added.
 This note explains why and lists the routes into Seurat that scx supports
 instead.
 
