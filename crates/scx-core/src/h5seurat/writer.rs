@@ -203,7 +203,7 @@ fn seurat_reduction_key(red_name: &str) -> String {
 /// can decode (unfiltered, as anndata writes by default, or deflate,
 /// optionally after shuffle), `want` as the value dtype when given, no
 /// userblock, and a well-formed indptr. `None` otherwise. Whether each row is
-/// sorted is checked during the copy, by [`RowCheck`].
+/// sorted is checked beside the copy, by [`RowCheck`].
 fn csr_copy_indptr(src: &Group, n_rows: usize, want: Option<DataType>) -> Result<Option<Vec<i64>>> {
     use crate::h5_chunk::chunk_plan;
     if crate::h5_str::read_str_attr(src, "encoding-type")
@@ -267,13 +267,25 @@ struct RowCheck<'a> {
 }
 
 impl<'a> RowCheck<'a> {
-    fn new(indptr: &'a [i64], n_cols: usize) -> Self {
+    /// Positioned at element `start`, which a chunk of indices begins at.
+    /// `prev` is the element before it, as little-endian int32 bytes (empty
+    /// at 0); it only counts when `start` falls inside a row.
+    fn at(indptr: &'a [i64], n_cols: usize, start: usize, prev: &[u8]) -> Self {
+        // The row holding `start`: the last one starting at or before it.
+        let row = indptr
+            .partition_point(|&p| p as usize <= start)
+            .saturating_sub(1)
+            .min(indptr.len() - 2);
+        let prev = match prev.try_into() {
+            Ok(b) if indptr[row] as usize != start => i32::from_le_bytes(b) as i64,
+            _ => -1,
+        };
         Self {
             indptr,
             n_cols: n_cols as i64,
-            row: 0,
-            pos: 0,
-            prev: -1,
+            row,
+            pos: start as i64,
+            prev,
         }
     }
 
@@ -822,7 +834,7 @@ impl DatasetWriter for H5SeuratWriter {
     }
 
     fn copy_csr_from_h5ad(&mut self, src_path: &Path, group: &str, slot: &str) -> Result<bool> {
-        use crate::h5_chunk::{copy_chunks, same_stored};
+        use crate::h5_chunk::{check_chunks, copy_chunks, same_stored};
         let Ok(file) = File::open(src_path) else {
             return Ok(false);
         };
@@ -853,24 +865,50 @@ impl DatasetWriter for H5SeuratWriter {
             }
             _ => false,
         };
-        // indices first, checked as they go; an unsorted row abandons the copy.
-        let mut rows = RowCheck::new(&indptr, self.n_vars);
-        let mut feed = |b: &[u8]| rows.feed(b);
-        let check: Option<crate::h5_chunk::ChunkCheck> = (!checked_before).then_some(&mut feed);
-        if !copy_chunks(&indices, &grp, &tmp("indices"), check)? {
+        // The rows are checked on a thread of their own while the three
+        // arrays are copied as stored; an unsorted row stops the copy.
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let copied = std::thread::scope(|s| {
+            let checker = (!checked_before).then(|| {
+                s.spawn(|| {
+                    let check = |start, prev: &[u8], b: &[u8]| {
+                        RowCheck::at(&indptr, self.n_vars, start, prev).feed(b)
+                    };
+                    let ok = check_chunks(&indices, &check);
+                    if !matches!(ok, Ok(true)) {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    ok
+                })
+            });
+            // CSR of cells x genes is, array for array, the CSC of genes x
+            // cells that dgCMatrix stores; only `dims` is written fresh.
+            let copy = || -> Result<bool> {
+                for name in ["indices", "data", "indptr"] {
+                    if !copy_chunks(&src.dataset(name)?, &grp, &tmp(name), Some(&stop))? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            };
+            let copied = copy();
+            let checked = checker.map_or(Ok(true), |h| h.join().expect("row check panicked"));
+            Ok::<_, ScxError>(checked? && copied?)
+        })?;
+        if !copied {
             // The partial copy stays in the file as dead space (HDF5
             // does not reclaim it); only input with unsorted rows pays it.
             if is_x {
-                grp.unlink(&tmp("indices"))?;
+                for name in ["indices", "data", "indptr"] {
+                    if grp.link_exists(&tmp(name)) {
+                        grp.unlink(&tmp(name))?;
+                    }
+                }
             } else {
                 self.file.unlink(&path)?;
             }
             return Ok(false);
         }
-        // CSR of cells x genes is, array for array, the CSC of genes x cells
-        // that dgCMatrix stores; only `dims` is written fresh.
-        copy_chunks(&src.dataset("data")?, &grp, &tmp("data"), None)?;
-        copy_chunks(&src.dataset("indptr")?, &grp, &tmp("indptr"), None)?;
         for name in ["data", "indices", "indptr"] {
             if grp.link_exists(name) {
                 grp.unlink(name)?;
@@ -919,14 +957,18 @@ mod row_check_tests {
         ];
         for (idx, want) in cases {
             let bytes: Vec<u8> = idx.iter().flat_map(|i| i.to_le_bytes()).collect();
+            // Pieces are checked independently, each given the element
+            // before it, as `check_chunks` calls them.
+            let piece = |start: usize, b: &[u8]| {
+                let prev = &bytes[(start * 4).saturating_sub(4)..start * 4];
+                RowCheck::at(&indptr, 5, start, prev).feed(b)
+            };
             for cut in 0..=idx.len() {
                 let (a, b) = bytes.split_at(cut * 4);
-                let mut rc = RowCheck::new(&indptr, 5);
-                assert_eq!(rc.feed(a) && rc.feed(b), want, "{idx:?} cut at {cut}");
+                assert_eq!(piece(0, a) && piece(cut, b), want, "{idx:?} cut at {cut}");
             }
-            let mut rc = RowCheck::new(&indptr, 5);
             assert_eq!(
-                bytes.chunks(4).all(|c| rc.feed(c)),
+                bytes.chunks(4).enumerate().all(|(i, c)| piece(i, c)),
                 want,
                 "{idx:?} one by one"
             );
