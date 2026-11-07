@@ -13,6 +13,71 @@ use crate::{
     ir::MatrixChunk,
 };
 
+/// One field of every element of the compound dataset `ds`, as `ty` in
+/// native layout: HDF5 converts from the stored type (endianness, widths).
+pub(crate) fn read_field(ds: &hdf5::Dataset, field: &str, ty: TypeDescriptor) -> Result<Vec<u8>> {
+    let size = ty.size();
+    let mem =
+        hdf5::Datatype::from_descriptor(&TypeDescriptor::Compound(hdf5::types::CompoundType {
+            fields: vec![hdf5::types::CompoundField {
+                name: field.to_string(),
+                ty,
+                offset: 0,
+                index: 0,
+            }],
+            size,
+        }))?;
+    let mut buf = vec![0u8; ds.size() * size];
+    if buf.is_empty() {
+        return Ok(buf);
+    }
+    // Raw hdf5-sys FFI: hold the process-global HDF5 lock (see h5_chunk.rs).
+    let rc = hdf5::sync::sync(|| unsafe {
+        hdf5_sys::h5d::H5Dread(
+            ds.id(),
+            mem.id(),
+            hdf5_sys::h5s::H5S_ALL,
+            hdf5_sys::h5s::H5S_ALL,
+            hdf5_sys::h5p::H5P_DEFAULT,
+            buf.as_mut_ptr().cast(),
+        )
+    });
+    if rc < 0 {
+        return Err(ScxError::InvalidFormat(format!(
+            "{}: reading field '{field}' failed",
+            ds.name()
+        )));
+    }
+    Ok(buf)
+}
+
+/// A variable-length string field of the compound dataset `ds` (h5py's
+/// `object` fields, as in anndata rec-arrays).
+pub(crate) fn read_vlen_str_field(
+    ds: &hdf5::Dataset,
+    field: &str,
+    ascii: bool,
+) -> Result<Vec<String>> {
+    use hdf5::types::{VarLenAscii, VarLenUnicode};
+    let ty = if ascii {
+        TypeDescriptor::VarLenAscii
+    } else {
+        TypeDescriptor::VarLenUnicode
+    };
+    let raw = read_field(ds, field, ty)?;
+    // Each element is a pointer HDF5 allocated; taking it as the owning type
+    // frees it on drop. The buffer started zeroed, so an unread one is null.
+    fn own<T>(raw: &[u8]) -> impl Iterator<Item = T> + '_ {
+        raw.chunks_exact(std::mem::size_of::<T>())
+            .map(|c| unsafe { std::ptr::read_unaligned(c.as_ptr().cast::<T>()) })
+    }
+    Ok(if ascii {
+        own::<VarLenAscii>(&raw).map(|s| s.to_string()).collect()
+    } else {
+        own::<VarLenUnicode>(&raw).map(|s| s.to_string()).collect()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Untimed object creation shared by the HDF5 writers
 // ---------------------------------------------------------------------------

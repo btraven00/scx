@@ -173,12 +173,125 @@ fn dataset_json(file: &Group, path: &str) -> Result<Value> {
             let v = crate::h5_str::read_str_1d(&ds)?;
             vec_or_scalar(scalar || v.len() == 1, v)
         }
-        // TODO: anndata rec-arrays (scanpy's rank_genes_groups) land here
-        // and are lost; carrying them needs a compound writer.
+        TypeDescriptor::Compound(ct) if ds.ndim() == 1 => rec_array_json(&ds, &ct)?,
         other => {
             let enc = crate::h5_str::read_str_attr(&ds, "encoding-type").unwrap_or_default();
             tracing::warn!("{path}: {enc} of type {other} has no JSON form; it is not carried");
             Value::Null
         }
     })
+}
+
+/// A 1-D compound dataset (an anndata rec-array, e.g. scanpy's
+/// rank_genes_groups `names`/`scores`) as `{field: [values]}`. It is written
+/// back as a dict of arrays: same values, but a dict rather than a rec-array.
+// TODO: keep the rec-array layout on h5ad output if scanpy code that reads
+// `.dtype.names` (rank_genes_groups plotting) needs it.
+fn rec_array_json(ds: &hdf5::Dataset, ct: &hdf5::types::CompoundType) -> Result<Value> {
+    use crate::h5::{read_field, read_vlen_str_field};
+    use hdf5::types::{FloatSize, IntSize};
+    let mut map = serde_json::Map::new();
+    for f in &ct.fields {
+        let name = f.name.as_str();
+        let v = match &f.ty {
+            TypeDescriptor::Float(_) => {
+                let raw = read_field(ds, name, TypeDescriptor::Float(FloatSize::U8))?;
+                serde_json::json!(raw
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from_ne_bytes(*b))
+                    .collect::<Vec<_>>())
+            }
+            TypeDescriptor::Boolean => {
+                let raw = read_field(ds, name, TypeDescriptor::Boolean)?;
+                serde_json::json!(raw.iter().map(|&b| b != 0).collect::<Vec<_>>())
+            }
+            TypeDescriptor::Integer(_) => {
+                let raw = read_field(ds, name, TypeDescriptor::Integer(IntSize::U8))?;
+                serde_json::json!(raw
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| i64::from_ne_bytes(*b))
+                    .collect::<Vec<_>>())
+            }
+            TypeDescriptor::Unsigned(_) => {
+                let raw = read_field(ds, name, TypeDescriptor::Unsigned(IntSize::U8))?;
+                serde_json::json!(raw
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| u64::from_ne_bytes(*b))
+                    .collect::<Vec<_>>())
+            }
+            TypeDescriptor::VarLenUnicode => {
+                serde_json::json!(read_vlen_str_field(ds, name, false)?)
+            }
+            TypeDescriptor::VarLenAscii => serde_json::json!(read_vlen_str_field(ds, name, true)?),
+            TypeDescriptor::FixedAscii(n) | TypeDescriptor::FixedUnicode(n) => {
+                let raw = read_field(ds, name, TypeDescriptor::FixedAscii(*n))?;
+                let v: Vec<String> = raw
+                    .chunks((*n).max(1))
+                    .map(|b| {
+                        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+                        String::from_utf8_lossy(&b[..end]).into_owned()
+                    })
+                    .collect();
+                serde_json::json!(v)
+            }
+            other => {
+                tracing::warn!(
+                    "{}: rec-array field '{name}' of type {other} is not carried",
+                    ds.name()
+                );
+                continue;
+            }
+        };
+        map.insert(name.to_string(), v);
+    }
+    Ok(Value::Object(map))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hdf5::types::VarLenUnicode;
+
+    #[derive(hdf5::H5Type, Clone)]
+    #[repr(C)]
+    struct Rec {
+        a: f32,
+        b: i16,
+        flag: bool,
+        name: VarLenUnicode,
+    }
+
+    /// Regression (CELLxGENE 5e787e2e): uns rec-arrays (scanpy's
+    /// rank_genes_groups) read as null and were dropped on write. They now
+    /// read as one array per field.
+    #[test]
+    fn rec_array_reads_as_dict_of_fields() {
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5").unwrap();
+        let f = hdf5::File::create(tmp.path()).unwrap();
+        let uns = f.create_group("uns").unwrap();
+        let rec = |a, b, flag, s: &str| Rec {
+            a,
+            b,
+            flag,
+            name: s.parse().unwrap(),
+        };
+        let rows = [rec(1.5, -2, true, "CD3E"), rec(0.25, 7, false, "MS4A1")];
+        uns.new_dataset_builder()
+            .with_data(&rows)
+            .create("names")
+            .unwrap();
+        let v = read_json(&f, "uns").unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"names": {
+                "a": [1.5, 0.25], "b": [-2, 7], "flag": [true, false], "name": ["CD3E", "MS4A1"]
+            }})
+        );
+    }
 }
