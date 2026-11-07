@@ -39,4 +39,15 @@ fn inspect_lists_modalities_and_reads_one() {
         out.contains("reading /mod/prot/X") && out.contains("6 obs × 2 vars"),
         "{out}"
     );
+
+    // A modality the file lacks is an error naming the ones it has.
+    let res = Command::new(env!("CARGO_BIN_EXE_scx"))
+        .args(["inspect", input, "--assay", "atac"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&res.stderr);
+    assert!(
+        !res.status.success() && err.contains("no modality 'atac' in /mod (rna, prot)"),
+        "{err}"
+    );
 }
