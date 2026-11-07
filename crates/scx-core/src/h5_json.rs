@@ -173,6 +173,12 @@ fn dataset_json(file: &Group, path: &str) -> Result<Value> {
             let v = crate::h5_str::read_str_1d(&ds)?;
             vec_or_scalar(scalar || v.len() == 1, v)
         }
-        _ => Value::Null,
+        // TODO: anndata rec-arrays (scanpy's rank_genes_groups) land here
+        // and are lost; carrying them needs a compound writer.
+        other => {
+            let enc = crate::h5_str::read_str_attr(&ds, "encoding-type").unwrap_or_default();
+            tracing::warn!("{path}: {enc} of type {other} has no JSON form; it is not carried");
+            Value::Null
+        }
     })
 }
