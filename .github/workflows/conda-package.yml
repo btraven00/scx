@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        recipe: [scx, picklerick-python, r-picklerick]
+        recipe: [scx, scx-capi, picklerick-python, r-picklerick]
         platform:
           - os: ubuntu-latest
             target: linux-64
