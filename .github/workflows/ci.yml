@@ -184,7 +184,7 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         # Strip the pyo3 bindings crate (exercised via Python, not the Rust
         # suite) so the lcov is just crates/.
-        run: cargo llvm-cov --all --no-default-features --features scx-cli/net,scx-cli/bixverse-parquet --ignore-filename-regex 'python/' --lcov --output-path lcov.info
+        run: cargo llvm-cov --all --no-default-features --features scx-cli/zarr,scx-cli/net,scx-cli/bixverse-parquet --ignore-filename-regex 'python/' --lcov --output-path lcov.info
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
