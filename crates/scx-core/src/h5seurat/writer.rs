@@ -404,6 +404,11 @@ pub(crate) fn seurat_write_meta_cols(grp: &Group, columns: &[Column]) -> Result<
 /// `X_pca`); SeuratDisk ignores it.
 pub(crate) const VARM_KEY_ATTR: &str = "scx_varm_key";
 
+/// Attribute on a reduction group naming the obsm key its embeddings came
+/// from (`X_scANVI`, `spatial`), so the reader gives the key back exactly
+/// rather than `X_` + the lowercased reduction name; SeuratDisk ignores it.
+pub(crate) const OBSM_KEY_ATTR: &str = "scx_obsm_key";
+
 /// R's NA for integers and factor codes.
 const NA_INTEGER: i32 = i32::MIN;
 
@@ -484,9 +489,14 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
                 .collect();
             write_strings(grp, name, &v)?;
         }
-        // SeuratDisk saves any factor as values + levels; `ordered` has no
-        // H5Seurat encoding and is dropped.
-        ColumnData::Categorical { codes, levels, .. } => {
+        // SeuratDisk saves any factor as values + levels, with no ordered
+        // flag; scConvert marks an ordered one with an int `ordered` = 1
+        // attribute, which SeuratDisk ignores. scx writes and reads that.
+        ColumnData::Categorical {
+            codes,
+            levels,
+            ordered,
+        } => {
             let col_grp = crate::h5::create_group(grp, name)?;
             // 1-based codes, NA_integer_ for missing.
             let values = codes
@@ -496,6 +506,12 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
                 .collect();
             write_i32(&col_grp, "values", values)?;
             write_strings(&col_grp, "levels", levels)?;
+            if *ordered {
+                col_grp
+                    .new_attr::<i32>()
+                    .create("ordered")?
+                    .write_scalar(&1)?;
+            }
         }
     }
     Ok(())
@@ -561,9 +577,10 @@ impl DatasetWriter for H5SeuratWriter {
         if obsm.map.is_empty() {
             return Ok(());
         }
-        for (red_name, _, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
+        for (red_name, key, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
             let red_grp = crate::h5::create_group(&reds_grp, red_name)?;
             self.attr_reduction(&red_grp, red_name)?;
+            crate::h5_str::write_str_attr(&red_grp, OBSM_KEY_ATTR, key)?;
 
             let (n_obs, n_comps) = mat.shape;
             // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs),
