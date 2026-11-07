@@ -602,8 +602,7 @@ fn read_column(arr: &ZArray) -> Result<ColumnData> {
         Ok(ColumnData::String(read_strings(arr)?))
     } else if is_float(arr) {
         Ok(ColumnData::Float(read_f64(arr, None)?))
-    } else if *dt == zdt::bool() || *dt == zdt::uint8() || *dt == zdt::int8() {
-        // 1-byte ints encode bools, as in h5ad.
+    } else if *dt == zdt::bool() {
         Ok(ColumnData::Bool(read_bools(arr)?))
     } else {
         Ok(read_ints(arr)?)
