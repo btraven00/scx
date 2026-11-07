@@ -29,6 +29,8 @@
                             compound obs/var/obsm/varm, an h5sparse CSR X,
                             categorical levels in uns/<col>_categories, the
                             graph in uns/neighbors
+    tiny.h5mu               MuData (written by mudata): modality rna (CSR
+                            counts) and prot (the ADT counts, dense)
 
 tiny_v4.h5seurat also carries a second assay (ADT, 2 features x 6 cells) that
 an RNA-only conversion drops.
@@ -370,6 +372,22 @@ def write_h5seurat():
         write_dgc(rna.create_group("layers/counts"), COUNTS, np.float64)
 
 
+def write_h5mu():
+    import mudata as md
+
+    rna = ad.AnnData(
+        X=sp.csr_matrix(COUNTS.astype(np.float32)),
+        obs=pd.DataFrame(index=CELLS),
+        var=pd.DataFrame(index=GENES),
+    )
+    prot = ad.AnnData(
+        X=ADT.T.astype(np.float32),
+        obs=pd.DataFrame(index=CELLS),
+        var=pd.DataFrame(index=ADT_FEATURES),
+    )
+    md.MuData({"rna": rna, "prot": prot}).write_h5mu(OUT / "tiny.h5mu")
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     write_expected()
@@ -378,6 +396,7 @@ def main():
     write_raw_gzip_h5ad()
     write_edge_h5ad()
     write_legacy_h5ad()
+    write_h5mu()
     write_10x()
     write_mtx()
     write_h5seurat()

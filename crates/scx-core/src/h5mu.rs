@@ -169,4 +169,29 @@ mod tests {
         let err = crate::open(input, &opts).await.err().unwrap().to_string();
         assert!(err.contains("prot, rna"), "{err}");
     }
+
+    /// Without `mod-order` the modalities come in storage order; a modality
+    /// group that declares another encoding than AnnData is refused.
+    #[test]
+    fn storage_order_and_non_anndata_modality() {
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5mu").unwrap();
+        write_h5mu(tmp.path());
+        {
+            let f = hdf5::File::open_rw(tmp.path()).unwrap();
+            f.group("mod").unwrap().delete_attr("mod-order").unwrap();
+            let rna = f.group("mod/rna").unwrap();
+            rna.delete_attr("encoding-type").unwrap();
+            write_str_attr(&rna, "encoding-type", "MuData").unwrap();
+        }
+        // Storage order is creation order here: rna, then prot.
+        assert_eq!(super::modalities(tmp.path()).unwrap(), ["rna", "prot"]);
+        let err = crate::h5ad::H5AdReader::open_modality(tmp.path(), 1, Some("rna"), None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("not AnnData: /mod/rna encoding-type = 'MuData'"),
+            "{err}"
+        );
+    }
 }
