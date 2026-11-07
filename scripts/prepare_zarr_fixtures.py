@@ -11,7 +11,8 @@
                                          `small` lacks (dense int X, CSC layer and
                                          obsp, dense layer, narrow and unsigned
                                          int columns, non-string categories,
-                                         int obsm, every uns value type)
+                                         int and sparse obsm, dense obsp, every
+                                         uns value type)
     tests/fixtures/zarr/nox_one{.h5ad,_v3.zarr}, nox_many{.h5ad,_v3.zarr}
                                          no X: one layer, or several without
                                          counts/X (the reader's fallback rules)
@@ -124,6 +125,10 @@ def write_varied():
     a.obsm["float32"] = rng.random((n, 2)).astype(np.float32)
     a.varm["float32"] = rng.random((m, 2)).astype(np.float32)
     a.obsp["dist_csc"] = sp.csc_matrix(sp.random(n, n, density=0.1, random_state=1, dtype=np.float64))
+    # Sparse obsm (read dense) and dense obsp; drawn last so earlier values stay put.
+    a.obsm["sparse_csr"] = sp.csr_matrix(rng.random((n, 4)) * (rng.random((n, 4)) < 0.3))
+    a.obsm["sparse_csc"] = sp.csc_matrix(rng.random((n, 3)) * (rng.random((n, 3)) < 0.3))
+    a.obsp["dense"] = rng.random((n, n)) * (rng.random((n, n)) < 0.2)
     a.uns["flag"] = True
     a.uns["ratio"] = 0.25
     a.uns["count"] = 7

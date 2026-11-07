@@ -530,11 +530,23 @@ fn write_csr_group(
     indices: &[i32],
     data: &[f32],
 ) {
+    write_sparse_group(parent, name, "csr_matrix", shape, indptr, indices, data)
+}
+
+fn write_sparse_group(
+    parent: &hdf5::Group,
+    name: &str,
+    enc: &str,
+    shape: (usize, usize),
+    indptr: &[i32],
+    indices: &[i32],
+    data: &[f32],
+) {
     let g = parent.create_group(name).unwrap();
     g.new_attr::<VarLenUnicode>()
         .create("encoding-type")
         .unwrap()
-        .write_scalar(&VarLenUnicode::from_str("csr_matrix").unwrap())
+        .write_scalar(&VarLenUnicode::from_str(enc).unwrap())
         .unwrap();
     let shape = ndarray::array![shape.0 as i64, shape.1 as i64];
     g.new_attr_builder()
@@ -1965,16 +1977,18 @@ async fn empty_float_column_order_means_no_columns() {
     assert!(obs.columns.is_empty());
 }
 
-/// obsm entries anndata stores as groups (dataframes, sparse matrices) have no
-/// dense representation here and are skipped on purpose; dense entries next
-/// to them still read. A dense entry that can't be read is an error.
+/// Sparse obsm entries are read dense; other groups (dataframes) are skipped
+/// on purpose and dense entries next to them still read. A dense entry that
+/// can't be read is an error.
 #[tokio::test]
-async fn obsm_groups_are_skipped_but_unreadable_arrays_error() {
+async fn obsm_dataframes_are_skipped_but_unreadable_arrays_error() {
     let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
     {
         let f = file_with_x(tmp.path());
         let obsm = f.create_group("obsm").unwrap();
         write_csr_group(&obsm, "sparse", (2, 2), &[0, 1, 2], &[0, 1], &[1.0, 2.0]);
+        let df = obsm.create_group("frame").unwrap();
+        crate::h5_str::write_str_attr(&df, "encoding-type", "dataframe").unwrap();
         obsm.new_dataset_builder()
             .with_data(&ndarray::array![[1.0f64, 2.0], [3.0, 4.0]])
             .create("X_pca")
@@ -1982,7 +1996,10 @@ async fn obsm_groups_are_skipped_but_unreadable_arrays_error() {
     }
     let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
     let obsm = r.obsm().await.unwrap();
-    assert_eq!(obsm.map.keys().collect::<Vec<_>>(), ["X_pca"]);
+    let mut keys: Vec<_> = obsm.map.keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["X_pca", "sparse"]);
+    assert_eq!(obsm.map["sparse"].data, [1.0, 0.0, 0.0, 2.0]);
 
     {
         let f = File::open_rw(tmp.path()).unwrap();
@@ -2419,4 +2436,71 @@ async fn one_byte_int_columns_stay_ints() {
     assert!(matches!(col("u"), ColumnData::Int(v) if v == [0, 1]));
     assert!(matches!(col("i"), ColumnData::Int(v) if v == [-1, 1]));
     assert!(matches!(col("b"), ColumnData::Bool(v) if v == [true, false]));
+}
+
+/// Regression (CELLxGENE corpus run, anndataR type files): a sparse obsm
+/// entry (CSR or CSC, NaN among the stored values) was dropped from every
+/// output, and a dense obsp matrix failed the whole conversion with
+/// `H5Gopen2(): ... not a group`. Now obsm comes back dense and dense obsp
+/// streams like a dense layer.
+#[tokio::test]
+async fn sparse_obsm_read_dense_and_dense_obsp_streams() {
+    let (n_obs, n_vars) = (3usize, 2usize);
+    // obsm 3 x 2: [[1, 0], [0, NaN], [3, 4]]
+    let want = [1.0, 0.0, 0.0, f64::NAN, 3.0, 4.0];
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = File::create(tmp.path()).unwrap();
+        write_csr_layer(&f, "X", n_obs, n_vars);
+        let obsm = f.create_group("obsm").unwrap();
+        let nan = f32::NAN;
+        write_sparse_group(
+            &obsm,
+            "csr",
+            "csr_matrix",
+            (3, 2),
+            &[0, 1, 2, 4],
+            &[0, 1, 0, 1],
+            &[1.0, nan, 3.0, 4.0],
+        );
+        write_sparse_group(
+            &obsm,
+            "csc",
+            "csc_matrix",
+            (3, 2),
+            &[0, 2, 4],
+            &[0, 2, 1, 2],
+            &[1.0, 3.0, nan, 4.0],
+        );
+        let obsp = f.create_group("obsp").unwrap();
+        let conn = ndarray::array![[0.0, 0.5, 0.0], [0.5, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        obsp.new_dataset_builder()
+            .with_data(&conn)
+            .create("conn")
+            .unwrap();
+    }
+    let mut r = H5AdReader::open(tmp.path(), 2).unwrap();
+
+    let obsm = r.obsm().await.unwrap().map;
+    for name in ["csr", "csc"] {
+        let m = &obsm[name];
+        assert_eq!(m.shape, (3, 2), "{name}");
+        for (got, want) in m.data.iter().zip(want) {
+            assert!(
+                got == &want || (got.is_nan() && want.is_nan()),
+                "{name}: {:?}",
+                m.data
+            );
+        }
+    }
+
+    let metas = r.obsp_metas().await.unwrap();
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].shape, (3, 3));
+    let mut vals = Vec::new();
+    let mut stream = r.obsp_stream(&metas[0], 2);
+    while let Some(c) = stream.next().await {
+        vals.extend(c.unwrap().data.data.to_f64());
+    }
+    assert_eq!(vals, [0.5, 0.5, 1.0]);
 }
