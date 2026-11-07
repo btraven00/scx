@@ -1457,9 +1457,6 @@ async fn convert_with_reader(
 
     writer.write_obs(&obs).await?;
     writer.write_var(&var).await?;
-    // raw.X has X's genes (raw_meta guarantees it), so raw.var is var's index.
-    let raw_var_index =
-        (counts_source.is_none() && filter.includes("raw")).then(|| var.index.clone());
     // Each frame is read, written and freed in turn, so that at most one of
     // them is in memory, and none while the matrices are copied or streamed.
     drop((obs, var));
@@ -1555,8 +1552,8 @@ async fn convert_with_reader(
     }
 
     // Elsewhere raw stays raw, in formats that have it.
-    if let Some(var_index) = &raw_var_index {
-        scx_core::stream::copy_raw(reader, writer.as_mut(), var_index, chunk_size).await?;
+    if counts_source.is_none() && filter.includes("raw") {
+        scx_core::stream::copy_raw(reader, writer.as_mut(), chunk_size).await?;
     }
 
     drop(layers_span);

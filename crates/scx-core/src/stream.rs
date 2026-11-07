@@ -230,6 +230,12 @@ pub trait DatasetReader: Send {
         Ok(None)
     }
 
+    /// AnnData's `raw.var`, the gene metadata of `raw.X`. `None` for formats
+    /// without `raw`.
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        Ok(None)
+    }
+
     /// Stream row-chunks of `raw.X`. `meta` must come from `raw_meta()`.
     fn raw_stream<'a>(
         &'a self,
@@ -371,11 +377,11 @@ pub trait DatasetWriter: Send {
         meta: &SparseMatrixMeta,
     ) -> Result<()>;
 
-    /// Begin writing AnnData's `raw`: `raw.var`, indexed by `var_index` with
-    /// no columns, and `raw.X`, whose chunks follow through
-    /// `write_sparse_chunk` and `end_sparse`. Returns `false`, having written
-    /// nothing, for a format with no `raw`. The default has none.
-    async fn begin_raw(&mut self, _meta: &SparseMatrixMeta, _var_index: &[String]) -> Result<bool> {
+    /// Begin writing AnnData's `raw`: `raw.var`, then `raw.X`, whose chunks
+    /// follow through `write_sparse_chunk` and `end_sparse`. Returns `false`,
+    /// having written nothing, for a format with no `raw`. The default has
+    /// none.
+    async fn begin_raw(&mut self, _meta: &SparseMatrixMeta, _var: &VarTable) -> Result<bool> {
         Ok(false)
     }
 
@@ -416,20 +422,19 @@ pub trait DatasetWriter: Send {
     }
 }
 
-/// Stream AnnData's `raw` from `reader` into `writer`'s `raw`, for a caller
-/// that did not already put raw.X elsewhere (H5Seurat's `counts`).
-/// `var_index` is X's: `raw_meta` only offers a raw with X's genes. A format
-/// with no `raw` gets a warning instead. Returns whether raw was written.
+/// Stream AnnData's `raw` (raw.var and raw.X) from `reader` into `writer`'s
+/// `raw`, for a caller that did not already put raw.X elsewhere (H5Seurat's
+/// `counts`). A format with no `raw` gets a warning instead. Returns whether
+/// raw was written.
 pub async fn copy_raw(
     reader: &mut dyn DatasetReader,
     writer: &mut dyn DatasetWriter,
-    var_index: &[String],
     chunk_size: usize,
 ) -> Result<bool> {
-    let Some(meta) = reader.raw_meta().await? else {
+    let (Some(meta), Some(var)) = (reader.raw_meta().await?, reader.raw_var().await?) else {
         return Ok(false);
     };
-    if !writer.begin_raw(&meta, var_index).await? {
+    if !writer.begin_raw(&meta, &var).await? {
         tracing::warn!("dropping raw: the output format has no raw");
         return Ok(false);
     }
@@ -621,11 +626,7 @@ mod tests {
         .unwrap();
         for (name, why) in [("tiny.h5ad", "no raw"), ("tiny_raw.h5ad", "no raw slot")] {
             let mut r = crate::h5ad::H5AdReader::open(tiny(name), 10).unwrap();
-            let genes = r.var().await.unwrap().index;
-            assert!(
-                !copy_raw(&mut r, &mut w, &genes, 10).await.unwrap(),
-                "{why}"
-            );
+            assert!(!copy_raw(&mut r, &mut w, 10).await.unwrap(), "{why}");
         }
     }
 }

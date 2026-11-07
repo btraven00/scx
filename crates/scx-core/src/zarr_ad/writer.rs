@@ -678,9 +678,9 @@ impl DatasetWriter for ZarrAdWriter {
         Ok(())
     }
 
-    async fn begin_raw(&mut self, meta: &SparseMatrixMeta, var_index: &[String]) -> Result<bool> {
+    async fn begin_raw(&mut self, meta: &SparseMatrixMeta, var: &VarTable) -> Result<bool> {
         create_group(&self.store, "raw", encoding("raw", "0.1.0"))?;
-        write_dataframe(&self.store, "raw/var", var_index, &[])?;
+        write_dataframe(&self.store, "raw/var", &var.index, &var.columns)?;
         self.begin_sparse("raw", "X", meta).await?;
         Ok(true)
     }

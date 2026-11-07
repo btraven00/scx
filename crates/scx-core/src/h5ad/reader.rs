@@ -856,6 +856,15 @@ impl DatasetReader for H5AdReader {
         Ok(Some(meta))
     }
 
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        let file = File::open(&self.path)?;
+        if file.group("raw/var").is_err() {
+            return Ok(None);
+        }
+        let (index, columns) = ad_read_dataframe(&file, "raw/var")?;
+        Ok(Some(VarTable { index, columns }))
+    }
+
     fn raw_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
         sparse_chunks(&self.path, "raw/X".to_string(), meta, chunk_size)
     }

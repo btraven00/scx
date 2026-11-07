@@ -901,6 +901,14 @@ impl DatasetReader for ZarrAdReader {
         Ok(Some(meta))
     }
 
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        if node(&self.store, "raw/var").is_none() {
+            return Ok(None);
+        }
+        let (index, columns) = read_dataframe(&self.store, "raw/var")?;
+        Ok(Some(VarTable { index, columns }))
+    }
+
     fn raw_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
         let store = self.store.clone();
         let (n_rows, n_cols) = meta.shape;
