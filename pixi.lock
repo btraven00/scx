@@ -268,6 +268,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/exceptiongroup-1.3.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/iniconfig-2.3.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/legacy-api-wrap-1.5-pyhd8ed1ab_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/mudata-0.4.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/natsort-8.4.0-pyhcf101f3_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pluggy-1.6.0-pyhf9edf01_1.conda
@@ -5603,6 +5604,23 @@ packages:
   license_family: GPL
   size: 20669511
   timestamp: 1771378139786
+- conda: https://conda.anaconda.org/conda-forge/noarch/mudata-0.4.1-pyhd8ed1ab_0.conda
+  sha256: c9d39ce227478fef04ea839d1b2f0744a2933d93da2f9fdb57ce66588b2f92fc
+  md5: b5cffe579ad4848a2a2d51d479026ee9
+  depends:
+  - anndata >=0.11
+  - h5py
+  - numpy
+  - pandas >=1.4
+  - python >=3.12
+  - scipy
+  - scverse-misc >=0.1.1
+  - session-info2
+  license: BSD-3-Clause
+  license_family: BSD
+  run_exports: {}
+  size: 44359
+  timestamp: 1787038276820
 - conda: https://conda.anaconda.org/conda-forge/noarch/natsort-8.4.0-pyhcf101f3_2.conda
   sha256: aeb1548eb72e4f198e72f19d242fb695b35add2ac7b2c00e0d83687052867680
   md5: e941e85e273121222580723010bd4fa2

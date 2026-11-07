@@ -869,7 +869,7 @@ async fn run() -> anyhow::Result<()> {
                         layer.as_deref(),
                     )?;
                     println!("reading /{}/{}", r.root(), r.x_source());
-                    inspect(&mut r, &input, "H5MU (MuData)").await?;
+                    inspect(&mut r, &input, Format::H5Mu.display_name()).await?;
                 }
                 None => anyhow::bail!("could not detect the format of '{input}'"),
                 Some(Format::TenxH5) => {
