@@ -16,7 +16,8 @@
 #' @param dtype Output numeric type: `"f32"`, `"f64"`, `"i32"`, or `"u32"`.
 #'   Default `"f32"`.
 #' @param assay Seurat assay to convert. Default `NULL`: `"RNA"` for
-#'   H5Seurat input, the object's active assay for a Seurat `.rds`; also the
+#'   H5Seurat input, the object's active assay for a Seurat `.rds`; for
+#'   MuData `.h5mu` input, the modality (the only one, else `"rna"`). Also the
 #'   assay name of H5Seurat output (`"RNA"` when `NULL`).
 #' @param layer Seurat layer to convert (H5Seurat inputs only). Default `"counts"`.
 #' @param where Keep only some cells: a named list mapping `obs` columns to

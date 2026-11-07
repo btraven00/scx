@@ -27,6 +27,7 @@ format: the format is detected from the file's content, not its extension.
 |---|---|:-:|:-:|
 | AnnData `.h5ad` | anndata, scanpy | yes | yes |
 | AnnData Zarr store (`.zarr` directory, v2 or v3) | `adata.write_zarr()` | yes | yes (v3) |
+| MuData `.h5mu` (one modality, picked with `assay =`) | mudata, muon | yes | |
 | H5Seurat (`.h5seurat`, dgCMatrix or BPCells-backed) | SeuratDisk, Seurat v5 | yes | yes |
 | 10x Genomics HDF5 (`.h5`) | Cell Ranger | yes | |
 | 10x MatrixMarket directory (`matrix.mtx.gz` + features + barcodes) | Cell Ranger | yes | |

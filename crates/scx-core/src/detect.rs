@@ -4,6 +4,7 @@
 //!
 //! | Format   | Fingerprint |
 //! |----------|-------------|
+//! | H5MU     | Root attr `encoding-type = "MuData"`, or a `/mod` group |
 //! | H5AD     | Root attr `encoding-type = "anndata"` |
 //! | H5Seurat | Root dataset `cell.names` + root attr `active.assay` |
 //! | TenxH5   | `/matrix` group with `/matrix/barcodes` + `/matrix/features` |
@@ -20,6 +21,8 @@ use hdf5::File;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     H5Ad,
+    /// MuData: one AnnData per modality under `/mod`.
+    H5Mu,
     H5Seurat,
     /// SCX internal HDF5 schema (golden test fixtures).
     /// NPY snapshot directory (contains `meta.json`).
@@ -46,6 +49,7 @@ impl Format {
     pub fn display_name(self) -> &'static str {
         match self {
             Format::H5Ad => "H5AD",
+            Format::H5Mu => "H5MU (MuData)",
             Format::H5Seurat => "H5Seurat",
             Format::NpyDir => "NpyDir",
             Format::BPCells => "BPCells",
@@ -76,6 +80,7 @@ pub fn detect(path: &Path) -> Option<Format> {
         .or_else(|| match path.extension().and_then(|e| e.to_str()) {
             Some("h5seurat") => Some(Format::H5Seurat),
             Some("h5ad") => Some(Format::H5Ad),
+            Some("h5mu") => Some(Format::H5Mu),
             Some("parquet") => Some(Format::Parquet),
             _ => None,
         })
@@ -171,6 +176,17 @@ pub fn sniff_dir(path: &Path) -> Option<Format> {
 /// in that case.
 pub fn sniff(path: &Path) -> Option<Format> {
     let file = File::open(path).ok()?;
+
+    // --- H5MU ---
+    // mudata tags the root `encoding-type = "MuData"`; the /mod group of
+    // AnnData modalities is the structural fallback.
+    let is_mudata = file
+        .attr("encoding-type")
+        .and_then(|a| a.read_scalar::<VarLenUnicode>())
+        .is_ok_and(|s| s.as_str() == "MuData");
+    if is_mudata || file.group("mod").is_ok() {
+        return Some(Format::H5Mu);
+    }
 
     // --- H5AD ---
     // Root group carries encoding-type = "anndata" written by AnnData ≥ 0.8.

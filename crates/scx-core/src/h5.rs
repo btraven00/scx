@@ -186,7 +186,7 @@ pub(crate) fn value_dtype(ds: &hdf5::Dataset) -> Result<DataType> {
 /// Rows `rows` of a compressed-sparse group (`{group}/indices`, `data`),
 /// given its full `indptr`, as a chunk with `n_cols` columns.
 pub(crate) fn read_csr_rows(
-    file: &File,
+    file: &hdf5::Group,
     group: &str,
     indptr: &[u64],
     rows: std::ops::Range<usize>,
@@ -210,7 +210,12 @@ pub(crate) struct CsrReader {
 impl CsrReader {
     /// `whole`: the stream will read every row, so list all chunk locations
     /// up front rather than per block.
-    pub(crate) fn open(file: &File, group: &str, dtype: DataType, whole: bool) -> Result<Self> {
+    pub(crate) fn open(
+        file: &hdf5::Group,
+        group: &str,
+        dtype: DataType,
+        whole: bool,
+    ) -> Result<Self> {
         let indices = file.dataset(&format!("{group}/indices"))?;
         let data = file.dataset(&format!("{group}/data"))?;
         check_filters(&indices)?;

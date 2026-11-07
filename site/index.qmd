@@ -67,6 +67,7 @@ convert("in.h5seurat", "out.h5ad")
 |---|:-:|:-:|
 | AnnData `.h5ad` | ✓ | ✓ |
 | AnnData Zarr (v2, v3; directory) | ✓ | ✓ (v3) |
+| MuData `.h5mu` (one modality per conversion, picked with `--assay`) | ✓ | |
 | Seurat `.h5seurat` (dgCMatrix or BPCells-backed) | ✓ | ✓ |
 | BPCells matrix directory | ✓ | ✓ X only |
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |

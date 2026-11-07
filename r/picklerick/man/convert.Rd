@@ -25,7 +25,8 @@ convert(
 Default \code{"f32"}.}
 
 \item{assay}{Seurat assay to convert. Default \code{NULL}: \code{"RNA"} for
-H5Seurat input, the object's active assay for a Seurat \code{.rds}; also the
+H5Seurat input, the object's active assay for a Seurat \code{.rds}; for
+MuData \code{.h5mu} input, the modality (the only one, else \code{"rna"}). Also the
 assay name of H5Seurat output (\code{"RNA"} when \code{NULL}).}
 
 \item{layer}{Seurat layer to convert (H5Seurat inputs only). Default \code{"counts"}.}

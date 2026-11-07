@@ -33,7 +33,8 @@ system HDF5.
 | `pk.open_stream(path, *, chunk_size=5000, assay=None, layer="counts", rows=None, where=None)` | Iterate over X as CSR row blocks (`pk.MatrixChunk`). `where={"CellLine": "A549"}` or `rows=` (mask, indices or ranges) selects rows; on h5ad and Zarr only those rows are read. |
 | `pk.open_dask(path, *, chunk_size=5000, assay=None, layer="counts")` | X as a lazy `dask.array` of CSR row blocks, for scanpy's dask code paths. Needs `dask[array]`. |
 
-Supported inputs: H5AD, H5Seurat (dgCMatrix or BPCells-backed), BPCells
+Supported inputs: H5AD, MuData `.h5mu` (one modality, chosen with `assay=`),
+H5Seurat (dgCMatrix or BPCells-backed), BPCells
 directories, 10x HDF5, MatrixMarket, and AnnData Zarr. Engine errors are
 raised as `pk.PickleRickError`.
 

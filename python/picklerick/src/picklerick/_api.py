@@ -55,7 +55,8 @@ def convert(
     assay, layer
         Seurat assay and layer to read from Seurat input. ``assay=None``
         reads ``"RNA"`` from H5Seurat and the object's active assay from a
-        ``.rds``. ``assay`` is also the assay name written to H5Seurat
+        ``.rds``. From MuData ``.h5mu`` ``assay`` names the modality
+        (default: the only one, else ``"rna"``). ``assay`` is also the assay name written to H5Seurat
         output (``"RNA"`` when ``None``).
     x_slot
         Where the matrix goes in ``.h5ad`` output: ``"X"`` (default) or
@@ -134,7 +135,8 @@ def read(
     assay, layer
         Seurat assay and layer to read from Seurat input. ``assay=None``
         reads ``"RNA"`` from H5Seurat and the object's active assay from a
-        ``.rds``.
+        ``.rds``. From MuData ``.h5mu`` ``assay`` names the modality
+        (default: the only one, else ``"rna"``).
     dtype
         Value type of the matrix: ``"f32"``, ``"f64"``, ``"i32"`` or
         ``"u32"``.
@@ -267,7 +269,8 @@ def open_stream(
     assay, layer
         Seurat assay and layer to read from Seurat input. ``assay=None``
         reads ``"RNA"`` from H5Seurat and the object's active assay from a
-        ``.rds``.
+        ``.rds``. From MuData ``.h5mu`` ``assay`` names the modality
+        (default: the only one, else ``"rna"``).
     rows
         A boolean mask over all rows, a sequence of row indices, or a
         sequence of ``(start, stop)`` half-open ranges.
@@ -339,7 +342,8 @@ def open_dask(
     assay, layer
         Seurat assay and layer to read from Seurat input. ``assay=None``
         reads ``"RNA"`` from H5Seurat and the object's active assay from a
-        ``.rds``.
+        ``.rds``. From MuData ``.h5mu`` ``assay`` names the modality
+        (default: the only one, else ``"rna"``).
 
     Returns
     -------

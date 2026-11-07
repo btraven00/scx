@@ -33,7 +33,7 @@ scx export merged.h5ad --slot obsm/X_pca --output pca.csv
 |------|---------|-------------|
 | `--slot <slot>` | `obs` | Slot to export: `obs`, `var`, or `obsm/<name>` |
 | `--output <path>` / `-o` | required | Output path; format from extension (`.csv` or `.parquet`) |
-| `--assay <name>` | `RNA` | Seurat assay (H5Seurat inputs only) |
+| `--assay <name>` | `RNA` | Seurat assay (H5Seurat, `.rds`); MuData modality (`.h5mu`) |
 | `--layer <name>` | `counts` | Seurat layer (H5Seurat inputs only) |
 
 ---
@@ -119,6 +119,7 @@ auto-detected by content.
 | Extension / content | Reader |
 |--------------------|--------|
 | `.h5ad` | H5AdReader |
+| `.h5mu` | H5AdReader on `/mod/<modality>` |
 | `.h5seurat` | H5SeuratReader |
 | BPCells directory | BpcellsDatasetReader |
 
