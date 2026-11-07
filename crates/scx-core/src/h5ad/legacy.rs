@@ -15,10 +15,11 @@
 
 use std::collections::HashMap;
 
-use hdf5::types::{CompoundField, CompoundType, FloatSize, IntSize, TypeDescriptor};
+use hdf5::types::{CompoundType, FloatSize, IntSize, TypeDescriptor};
 use hdf5::{Dataset, Group};
 
 use crate::error::{Result, ScxError};
+use crate::h5::read_field;
 use crate::h5_str::{read_str_attr, read_strings};
 use crate::ir::{Column, ColumnData, DenseMatrix};
 
@@ -39,43 +40,6 @@ pub(super) fn compound(file: &Group, path: &str) -> Option<(Dataset, CompoundTyp
 /// Whether `file` is in the pre-0.7 layout: obs and var as compound datasets.
 pub(super) fn is_legacy(file: &Group) -> bool {
     compound(file, "obs").is_some() && compound(file, "var").is_some()
-}
-
-/// One field of every element of the compound dataset `ds`, as `ty` in
-/// native layout: HDF5 converts from the stored type (endianness, widths).
-fn read_field(ds: &Dataset, field: &str, ty: TypeDescriptor) -> Result<Vec<u8>> {
-    let size = ty.size();
-    let mem = hdf5::Datatype::from_descriptor(&TypeDescriptor::Compound(CompoundType {
-        fields: vec![CompoundField {
-            name: field.to_string(),
-            ty,
-            offset: 0,
-            index: 0,
-        }],
-        size,
-    }))?;
-    let mut buf = vec![0u8; ds.size() * size];
-    if buf.is_empty() {
-        return Ok(buf);
-    }
-    // Raw hdf5-sys FFI: hold the process-global HDF5 lock (see h5_chunk.rs).
-    let rc = hdf5::sync::sync(|| unsafe {
-        hdf5_sys::h5d::H5Dread(
-            ds.id(),
-            mem.id(),
-            hdf5_sys::h5s::H5S_ALL,
-            hdf5_sys::h5s::H5S_ALL,
-            hdf5_sys::h5p::H5P_DEFAULT,
-            buf.as_mut_ptr().cast(),
-        )
-    });
-    if rc < 0 {
-        return Err(ScxError::InvalidFormat(format!(
-            "{}: reading field '{field}' failed",
-            ds.name()
-        )));
-    }
-    Ok(buf)
 }
 
 fn strings(ds: &Dataset, field: &str, len: usize) -> Result<Vec<String>> {
