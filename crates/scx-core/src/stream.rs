@@ -230,6 +230,12 @@ pub trait DatasetReader: Send {
         Ok(None)
     }
 
+    /// AnnData's `raw.var`, the gene metadata of `raw.X`. `None` for formats
+    /// without `raw`.
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        Ok(None)
+    }
+
     /// Stream row-chunks of `raw.X`. `meta` must come from `raw_meta()`.
     fn raw_stream<'a>(
         &'a self,
@@ -371,6 +377,14 @@ pub trait DatasetWriter: Send {
         meta: &SparseMatrixMeta,
     ) -> Result<()>;
 
+    /// Begin writing AnnData's `raw`: `raw.var`, then `raw.X`, whose chunks
+    /// follow through `write_sparse_chunk` and `end_sparse`. Returns `false`,
+    /// having written nothing, for a format with no `raw`. The default has
+    /// none.
+    async fn begin_raw(&mut self, _meta: &SparseMatrixMeta, _var: &VarTable) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Append a row-chunk to the currently open sparse matrix.
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()>;
 
@@ -406,6 +420,31 @@ pub trait DatasetWriter: Send {
     ) -> Result<bool> {
         Ok(false)
     }
+}
+
+/// Stream AnnData's `raw` (raw.var and raw.X) from `reader` into `writer`'s
+/// `raw`, for a caller that did not already put raw.X elsewhere (H5Seurat's
+/// `counts`). A format with no `raw` gets a warning instead. Returns whether
+/// raw was written.
+pub async fn copy_raw(
+    reader: &mut dyn DatasetReader,
+    writer: &mut dyn DatasetWriter,
+    chunk_size: usize,
+) -> Result<bool> {
+    let (Some(meta), Some(var)) = (reader.raw_meta().await?, reader.raw_var().await?) else {
+        return Ok(false);
+    };
+    if !writer.begin_raw(&meta, &var).await? {
+        tracing::warn!("dropping raw: the output format has no raw");
+        return Ok(false);
+    }
+    tracing::info!(shape = ?meta.shape, "streaming raw.X");
+    let mut stream = reader.raw_stream(&meta, chunk_size);
+    while let Some(chunk) = stream.next().await {
+        writer.write_sparse_chunk(&chunk?).await?;
+    }
+    writer.end_sparse().await?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -562,5 +601,32 @@ mod tests {
             err.to_string().contains("cannot store X by column"),
             "{err}"
         );
+    }
+
+    /// copy_raw writes nothing, and says so, when the input has no raw or
+    /// the output format has none (h5seurat keeps raw.X as counts instead).
+    #[tokio::test]
+    async fn copy_raw_skips_a_missing_raw_or_a_format_without_one() {
+        let tiny = |name: &str| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/tiny")
+                .join(name)
+        };
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let mut w = crate::h5seurat::H5SeuratWriter::create(
+            tmp.path(),
+            1,
+            1,
+            crate::dtype::DataType::F32,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        for (name, why) in [("tiny.h5ad", "no raw"), ("tiny_raw.h5ad", "no raw slot")] {
+            let mut r = crate::h5ad::H5AdReader::open(tiny(name), 10).unwrap();
+            assert!(!copy_raw(&mut r, &mut w, 10).await.unwrap(), "{why}");
+        }
     }
 }

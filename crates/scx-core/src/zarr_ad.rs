@@ -870,6 +870,56 @@ impl DatasetReader for ZarrAdReader {
         )
     }
 
+    async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {
+        let meta = match node(&self.store, "raw/X") {
+            None => return Ok(None),
+            // Dense: an empty indptr marks it for raw_stream.
+            Some(Node::Array(arr)) if arr.shape().len() == 2 => SparseMatrixMeta {
+                name: "raw".into(),
+                shape: (arr.shape()[0] as usize, arr.shape()[1] as usize),
+                indptr: Vec::new(),
+            },
+            Some(Node::Array(arr)) => {
+                return Err(zerr(
+                    "raw/X",
+                    format!("dense raw/X must be 2-D, has rank {}", arr.shape().len()),
+                ))
+            }
+            Some(Node::Group(_)) => sparse_meta(&self.store, "raw", "raw/X")?,
+        };
+        // As in h5ad: raw with other genes than X has no slot beside X.
+        let same_genes = meta.shape == (self.n_obs, self.n_vars)
+            && node(&self.store, "raw/var").is_some()
+            && read_dataframe(&self.store, "raw/var")?.0 == read_dataframe(&self.store, "var")?.0;
+        if !same_genes {
+            tracing::warn!(
+                shape = ?meta.shape,
+                "raw/X does not have X's cells and genes; it is not used"
+            );
+            return Ok(None);
+        }
+        Ok(Some(meta))
+    }
+
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        if node(&self.store, "raw/var").is_none() {
+            return Ok(None);
+        }
+        let (index, columns) = read_dataframe(&self.store, "raw/var")?;
+        Ok(Some(VarTable { index, columns }))
+    }
+
+    fn raw_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
+        let store = self.store.clone();
+        let (n_rows, n_cols) = meta.shape;
+        if !meta.indptr.is_empty() {
+            return sparse_chunks(store, "raw/X".to_string(), meta, chunk_size);
+        }
+        row_chunks(n_rows, chunk_size, move |rows| {
+            read_dense_chunk(&store, "raw/X", rows, n_cols, None)
+        })
+    }
+
     fn x_stream(&mut self) -> ChunkStream<'_> {
         self.x_stream_rows(vec![0..self.n_obs])
     }

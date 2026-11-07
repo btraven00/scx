@@ -1551,6 +1551,11 @@ async fn convert_with_reader(
         }
     }
 
+    // Elsewhere raw stays raw, in formats that have it.
+    if counts_source.is_none() && filter.includes("raw") {
+        scx_core::stream::copy_raw(reader, writer.as_mut(), chunk_size).await?;
+    }
+
     drop(layers_span);
 
     // Stream each obsp matrix.

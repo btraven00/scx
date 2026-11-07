@@ -118,6 +118,9 @@ async fn convert(
             writer.write_sparse_chunk(&chunk?).await?;
         }
         writer.end_sparse().await?;
+    } else {
+        // Elsewhere raw stays raw, in formats that have it.
+        scx_core::stream::copy_raw(reader, writer, chunk_size).await?;
     }
     for meta in &reader.obsp_metas().await? {
         writer.begin_sparse("obsp", &meta.name, meta).await?;

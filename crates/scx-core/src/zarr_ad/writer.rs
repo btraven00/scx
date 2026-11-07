@@ -678,6 +678,13 @@ impl DatasetWriter for ZarrAdWriter {
         Ok(())
     }
 
+    async fn begin_raw(&mut self, meta: &SparseMatrixMeta, var: &VarTable) -> Result<bool> {
+        create_group(&self.store, "raw", encoding("raw", "0.1.0"))?;
+        write_dataframe(&self.store, "raw/var", &var.index, &var.columns)?;
+        self.begin_sparse("raw", "X", meta).await?;
+        Ok(true)
+    }
+
     async fn write_sparse_chunk(&mut self, chunk: &MatrixChunk) -> Result<()> {
         let state = self.sparse.as_mut().ok_or_else(|| {
             ScxError::InvalidFormat("write_sparse_chunk called without begin_sparse".into())

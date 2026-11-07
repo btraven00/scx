@@ -162,6 +162,9 @@ impl DatasetReader for Spooled {
     async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {
         self.inner.raw_meta().await
     }
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        self.inner.raw_var().await
+    }
     fn raw_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk: usize) -> ChunkStream<'a> {
         self.inner.raw_stream(meta, chunk)
     }
@@ -241,6 +244,10 @@ mod tests {
         assert_eq!(dbg(&s.uns().await.unwrap()), dbg(&d.uns().await.unwrap()));
         assert_eq!(dbg(&s.varm().await.unwrap()), dbg(&d.varm().await.unwrap()));
         let raw = s.raw_meta().await.unwrap().expect("tiny_raw has raw");
+        assert_eq!(
+            dbg(&s.raw_var().await.unwrap()),
+            dbg(&d.raw_var().await.unwrap())
+        );
         assert_eq!(
             all(s.raw_stream(&raw, 3)).await,
             all(d.raw_stream(&raw, 3)).await

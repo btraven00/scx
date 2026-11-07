@@ -359,6 +359,10 @@ impl DatasetReader for SubsetReader {
         Ok(self.raw.as_ref().map(|m| self.sub_meta(m)))
     }
 
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        self.inner.raw_var().await
+    }
+
     fn raw_stream<'a>(&'a self, _meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
         match &self.raw {
             Some(src) => keep_rows(self.inner.raw_stream(src, chunk_size), &self.rows, None),
@@ -549,6 +553,12 @@ mod tests {
         assert_eq!(
             dense(sub.raw_stream(&sr, 2), 5, 2).await,
             pick(&rf, &[0, 2, 3, 5])
+        );
+        // raw.var is per gene: a cell subset keeps all of it.
+        let genes = |v: Option<VarTable>| v.unwrap().index;
+        assert_eq!(
+            genes(sub.raw_var().await.unwrap()),
+            genes(full.raw_var().await.unwrap())
         );
     }
 
