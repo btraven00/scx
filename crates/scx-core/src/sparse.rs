@@ -77,7 +77,7 @@ pub(crate) fn csc_to_csr(
 }
 
 /// Rows `rows` of an in-memory CSR matrix as a chunk.
-pub(crate) fn csr_rows(m: &SparseMatrixCSR, rows: Range<usize>) -> MatrixChunk {
+pub fn csr_rows(m: &SparseMatrixCSR, rows: Range<usize>) -> MatrixChunk {
     let nnz = m.indptr[rows.start] as usize..m.indptr[rows.end] as usize;
     csr_chunk(
         &m.indptr,

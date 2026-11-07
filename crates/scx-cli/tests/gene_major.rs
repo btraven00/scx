@@ -90,12 +90,67 @@ fn gene_major_from_bpcells_h5seurat_matches_plain_convert() {
     assert_eq!(t(&by_gene, n_vars, n_obs), want);
 }
 
-/// Regression: gene-major X used to fail only once X streamed, after the
-/// output was partly written; concat then left a corrupt h5ad behind.
-/// convert, concat and snapshot must refuse it up front, write nothing, and
-/// say how to fix the input.
+/// Gene-major X as input. convert keeps it gene-major into h5ad (copied by
+/// gene), transposes it in memory for outputs that take X by cell, with a
+/// warning, and refuses up front when that would pass --transpose-mem.
 #[test]
-fn gene_major_input_is_refused_before_anything_is_written() {
+fn gene_major_input_converts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = fixture("tiny.h5ad");
+    let genes = tmp.path().join("genes.h5ad");
+    assert!(scx(&["convert", s(&src), s(&genes), "--gene-major"])
+        .status
+        .success());
+    let mut want = H5AdReader::open(&src, 3).unwrap();
+    let (n_obs, n_vars) = want.shape();
+    let want = dense(want.x_stream(), n_obs, n_vars);
+
+    // h5ad: stays gene-major, no warning.
+    let back = tmp.path().join("back.h5ad");
+    let out = scx(&["convert", s(&genes), s(&back)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("warning"));
+    let mut got = H5AdReader::open(&back, 3).unwrap();
+    assert!(!got.x_col_ptr().is_empty(), "h5ad output is not gene-major");
+    let by_gene = dense(got.x_stream_cols(vec![0..n_vars]), n_vars, n_obs);
+    assert_eq!(t(&by_gene, n_vars, n_obs), want);
+
+    // zarr: by cell, after a warning.
+    let z = tmp.path().join("cells.zarr");
+    let out = scx(&["convert", s(&genes), s(&z)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("warning: X is gene-major"), "{err}");
+    let mut got = scx_core::zarr_ad::ZarrAdReader::open(&z, 3).unwrap();
+    assert_eq!(dense(got.x_stream(), n_obs, n_vars), want);
+    // diff reads the gene-major side by cell too.
+    let out = scx(&["diff", s(&genes), s(&z)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Over budget: refused, nothing written.
+    let big = tmp.path().join("big.h5seurat");
+    let out = scx(&["convert", s(&genes), s(&big), "--transpose-mem", "1e-12"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "over-budget transpose was accepted");
+    assert!(
+        err.contains("--transpose-mem") && err.contains("tocsr"),
+        "{err}"
+    );
+    assert!(!big.exists());
+}
+
+/// concat and snapshot still take X by cell only: they refuse gene-major
+/// input up front, write nothing, and say how to fix it.
+#[test]
+fn gene_major_input_is_refused_by_concat_and_snapshot() {
     let tmp = tempfile::tempdir().unwrap();
     let src = fixture("tiny.h5ad");
     let genes = tmp.path().join("genes.h5ad");
@@ -103,15 +158,9 @@ fn gene_major_input_is_refused_before_anything_is_written() {
         .status
         .success());
 
-    let back = tmp.path().join("back.h5ad");
     let cc = tmp.path().join("cc.h5ad");
     let snap = tmp.path().join("snap");
     let runs = [
-        (
-            "convert",
-            scx(&["convert", s(&genes), s(&back)]),
-            back.clone(),
-        ),
         (
             "concat",
             scx(&["concat", s(&src), s(&genes), "-o", s(&cc)]),

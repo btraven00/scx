@@ -15,6 +15,100 @@ use crate::h5ad::writer::cast;
 use crate::ir::SparseMatrixCSR;
 use crate::stream::{DatasetReader, DatasetWriter};
 
+/// Copy gene-major (CSC) X to `writer` by column, as stored: one by-gene
+/// pass, holding one reader chunk of genes at a time. Returns the number of
+/// chunks.
+pub async fn copy_x_csc(
+    reader: &mut dyn DatasetReader,
+    writer: &mut dyn DatasetWriter,
+) -> Result<usize> {
+    let (n_obs, n_vars) = reader.shape();
+    let dtype = reader.dtype();
+    let mut n = 0;
+    let mut stream = reader.x_stream_cols(vec![0..n_vars]);
+    while let Some(chunk) = stream.next().await {
+        writer.write_x_columns(&chunk?.data).await?;
+        n += 1;
+    }
+    if n == 0 {
+        // No genes: still mark X as CSC.
+        let empty = SparseMatrixCSR {
+            shape: (0, n_obs),
+            indptr: vec![0],
+            indices: Vec::new(),
+            data: TypedVec::empty(dtype),
+        };
+        writer.write_x_columns(&empty).await?;
+    }
+    Ok(n)
+}
+
+/// Bytes [`x_cell_major`] holds for the reader's gene-major X: its nonzeros
+/// (cell id + value) twice, as read and as transposed. 0 for cell-major X.
+pub fn cell_major_bytes(reader: &dyn DatasetReader) -> u64 {
+    let nnz = reader.x_col_ptr().last().copied().unwrap_or(0);
+    2 * nnz * (4 + reader.dtype().size() as u64)
+}
+
+/// Gene-major (CSC) X read whole and transposed to cell-major CSR, for
+/// writers that take X by cell. Holds [`cell_major_bytes`]; callers check it
+/// against a budget first.
+pub async fn x_cell_major<R: DatasetReader + ?Sized>(reader: &mut R) -> Result<SparseMatrixCSR> {
+    let (n_obs, n_vars) = reader.shape();
+    let col_ptr = reader.x_col_ptr().to_vec();
+    if col_ptr.is_empty() {
+        return Err(ScxError::InvalidFormat("X is not gene-major".into()));
+    }
+    let nnz = *col_ptr.last().unwrap() as usize;
+    let mut cells = Vec::with_capacity(nnz);
+    let mut data = TypedVec::empty(reader.dtype());
+    let mut stream = reader.x_stream_cols(vec![0..n_vars]);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        cells.extend_from_slice(&chunk.data.indices);
+        data.append(&chunk.data.data);
+    }
+    drop(stream);
+    if let Some(&c) = cells.iter().find(|&&c| c as usize >= n_obs) {
+        return Err(ScxError::InvalidFormat(format!(
+            "X: cell index {c} out of range for {n_obs} cells"
+        )));
+    }
+    if cells.len() != nnz {
+        return Err(ScxError::InvalidFormat(format!(
+            "X: read {} nonzeros by gene, column pointer says {nnz}",
+            cells.len()
+        )));
+    }
+    Ok(crate::sparse::csc_to_csr(
+        (n_obs, n_vars),
+        &col_ptr,
+        &cells,
+        &data,
+    ))
+}
+
+/// Gene-major X as row chunks of `chunk` cells, through [`x_cell_major`]:
+/// holds all of X, so callers that can should stream by gene instead.
+pub fn x_cell_major_stream<'r>(
+    reader: &'r mut (dyn DatasetReader + Send),
+    chunk: usize,
+) -> crate::stream::ChunkStream<'r> {
+    use futures::stream;
+    let (n_obs, chunk) = (reader.shape().0, chunk.max(1));
+    Box::pin(stream::once(x_cell_major(reader)).flat_map(move |res| {
+        match res {
+            Ok(m) => stream::iter(
+                (0..n_obs)
+                    .step_by(chunk)
+                    .map(move |s| Ok(crate::sparse::csr_rows(&m, s..(s + chunk).min(n_obs)))),
+            )
+            .left_stream(),
+            Err(e) => stream::iter([Err(e)]).right_stream(),
+        }
+    }))
+}
+
 /// Write the reader's X to `writer` by column (CSC), holding about
 /// `mem_bytes` of transposed nonzeros at a time. Returns the number of
 /// column blocks.
