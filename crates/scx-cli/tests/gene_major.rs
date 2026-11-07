@@ -124,20 +124,23 @@ fn gene_major_input_converts() {
     assert_eq!(t(&by_gene, n_vars, n_obs), want);
 
     // zarr: by cell, after a warning.
-    let z = tmp.path().join("cells.zarr");
-    let out = scx(&["convert", s(&genes), s(&z)]);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{err}");
-    assert!(err.contains("warning: X is gene-major"), "{err}");
-    let mut got = scx_core::zarr_ad::ZarrAdReader::open(&z, 3).unwrap();
-    assert_eq!(dense(got.x_stream(), n_obs, n_vars), want);
-    // diff reads the gene-major side by cell too.
-    let out = scx(&["diff", s(&genes), s(&z)]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    #[cfg(feature = "zarr")]
+    {
+        let z = tmp.path().join("cells.zarr");
+        let out = scx(&["convert", s(&genes), s(&z)]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{err}");
+        assert!(err.contains("warning: X is gene-major"), "{err}");
+        let mut got = scx_core::zarr_ad::ZarrAdReader::open(&z, 3).unwrap();
+        assert_eq!(dense(got.x_stream(), n_obs, n_vars), want);
+        // diff reads the gene-major side by cell too.
+        let out = scx(&["diff", s(&genes), s(&z)]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     // Over budget: refused, nothing written.
     let big = tmp.path().join("big.h5seurat");
