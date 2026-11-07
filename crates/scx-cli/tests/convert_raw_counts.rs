@@ -358,14 +358,18 @@ fn h5ad_and_zarr_output_keep_raw() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture("tiny_raw.h5ad");
     let want = Some(counts(5, 1.0));
-    for out in ["out.h5ad", "out.zarr"] {
-        let out = dir.path().join(out);
-        convert(&input, &out, &[]);
-        assert_eq!(raw(&out), want, "{}", out.display());
+    let out = dir.path().join("out.h5ad");
+    convert(&input, &out, &[]);
+    assert_eq!(raw(&out), want, "h5ad");
+    // The system-HDF5 CI job builds without Zarr.
+    if cfg!(feature = "zarr") {
+        let zarr = dir.path().join("out.zarr");
+        convert(&input, &zarr, &[]);
+        assert_eq!(raw(&zarr), want, "zarr");
+        let back = dir.path().join("back.h5ad");
+        convert(&zarr, &back, &[]);
+        assert_eq!(raw(&back), want, "zarr -> h5ad");
     }
-    let back = dir.path().join("back.h5ad");
-    convert(&dir.path().join("out.zarr"), &back, &[]);
-    assert_eq!(raw(&back), want, "zarr -> h5ad");
 
     let excluded = dir.path().join("excluded.h5ad");
     convert(&input, &excluded, &["--exclude", "raw"]);
