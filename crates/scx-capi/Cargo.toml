@@ -1,0 +1,24 @@
+[package]
+name = "scx-capi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+description = "C ABI over scx-core's chunked matrix stream (for Julia, via scx_capi_jll)"
+authors = ["btraven <ben.uzh@pm.me>"]
+license = "MIT"
+repository = "https://github.com/btraven00/scx"
+publish = false
+
+[lib]
+name = "scx_capi"
+crate-type = ["cdylib"]
+
+[features]
+# Self-contained local build. Yggdrasil builds with --no-default-features and
+# links HDF5_jll instead.
+default = ["vendored-hdf5"]
+vendored-hdf5 = ["scx-core/vendored-hdf5"]
+
+[dependencies]
+scx-core = { path = "../scx-core", default-features = false, features = ["zarr"] }
+futures = "0.3"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/scx-core", "crates/scx-cli", "python/picklerick"]
+members = ["crates/scx-core", "crates/scx-cli", "crates/scx-capi", "python/picklerick"]
 resolver = "2"
 
 [profile.release]
