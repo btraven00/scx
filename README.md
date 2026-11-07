@@ -1,8 +1,11 @@
 # SCX — Single-Cell format conversion
 
-<p align="center"><img src="docs/logo.png" alt="SCX logo" width="200"></p>
-
 [![codecov](https://codecov.io/github/btraven00/scx/graph/badge.svg?token=NSMO60CRF5)](https://codecov.io/github/btraven00/scx)
+[![PyPI](https://img.shields.io/pypi/v/scx-picklerick?label=PyPI%20scx-picklerick)](https://pypi.org/project/scx-picklerick/)
+[![r-universe](https://btraven00.r-universe.dev/badges/picklerick)](https://btraven00.r-universe.dev/picklerick)
+[![docs](https://img.shields.io/badge/docs-btraven00.github.io%2Fscx-blue)](https://btraven00.github.io/scx/)
+
+<p align="center"><img src="docs/logo.png" alt="SCX logo" width="200"></p>
 
 The swiss-army knife for single-cell format conversion.
 
