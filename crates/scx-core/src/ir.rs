@@ -106,6 +106,22 @@ pub enum ColumnData {
     },
 }
 
+/// A float category level as pandas spells it (`str(1.0)` is `1.0`, not `1`),
+/// so a float categorical reads back with the same labels.
+pub(crate) fn float_level(v: impl std::fmt::Display) -> String {
+    let s = v.to_string();
+    if s.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        s + ".0"
+    } else {
+        s
+    }
+}
+
+/// A bool category level as pandas spells it.
+pub(crate) fn bool_level(v: bool) -> String {
+    if v { "True" } else { "False" }.to_string()
+}
+
 impl ColumnData {
     pub fn len(&self) -> usize {
         match self {
@@ -131,6 +147,33 @@ impl ColumnData {
             ColumnData::String(_) => "string",
             ColumnData::Categorical { .. } => "categorical",
         }
+    }
+
+    /// A categorical read as a dataframe index (anndata allows that; CxG
+    /// files have one): one level name per row. A missing entry (`missing`)
+    /// or an out-of-range code is an error, since an index has no NA.
+    pub(crate) fn categorical_index(
+        self,
+        missing: &[bool],
+        path: &str,
+    ) -> Result<Vec<String>, ScxError> {
+        let bad =
+            |what: &str| ScxError::InvalidFormat(format!("categorical index at '{path}': {what}"));
+        let ColumnData::Categorical { codes, levels, .. } = self else {
+            return Err(bad("not categorical"));
+        };
+        if missing.iter().any(|&m| m) {
+            return Err(bad("has missing entries"));
+        }
+        codes
+            .iter()
+            .map(|&c| {
+                levels
+                    .get(c as usize)
+                    .cloned()
+                    .ok_or_else(|| bad("code out of range"))
+            })
+            .collect()
     }
 
     /// Value `i` as text, the way pandas' `astype(str)` spells it (bools as

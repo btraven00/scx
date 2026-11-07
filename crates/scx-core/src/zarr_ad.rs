@@ -34,8 +34,8 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        bool_level, float_level, Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk,
+        ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
     sparse::{csc_row_ptr, csc_to_csr, csr_chunk, csr_rows, csr_to_dense, dense_to_csr},
     stream::DatasetReader,
@@ -640,6 +640,10 @@ fn read_dataframe(store: &Store, path: &str) -> Result<(Vec<String>, Vec<Column>
 fn read_index(store: &Store, path: &str) -> Result<Vec<String>> {
     match node(store, path) {
         Some(Node::Array(arr)) => read_strings(&arr),
+        Some(Node::Group(_)) if node(store, &format!("{path}/codes")).is_some() => {
+            let (data, missing) = read_categorical(store, path)?;
+            data.categorical_index(&missing, path)
+        }
         Some(Node::Group(_)) => read_strings(&open_array(store, &format!("{path}/values"))?),
         None => Err(ScxError::InvalidFormat(format!("missing index '{path}'"))),
     }
@@ -683,10 +687,10 @@ fn read_categorical(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)
     } else if is_float(&cats) {
         read_f64(&cats, None)?
             .iter()
-            .map(|v| v.to_string())
+            .map(|&v| float_level(v))
             .collect()
     } else if *cats.data_type() == zdt::bool() {
-        read_bools(&cats)?.iter().map(|v| v.to_string()).collect()
+        read_bools(&cats)?.iter().map(|&v| bool_level(v)).collect()
     } else {
         read_i64(&cats, None)?
             .iter()

@@ -1,4 +1,4 @@
-use super::reader::ad_read_categorical;
+use super::reader::{ad_read_categorical, ad_read_index};
 use super::*;
 use crate::h5_str::{write_str_array_attr, write_str_attr, write_strings};
 use futures::StreamExt;
@@ -838,6 +838,41 @@ fn test_categorical_string_levels_unchanged() {
         }
         other => panic!("expected Categorical, got {:?}", other),
     }
+}
+
+/// Regression (CELLxGENE 46aada24): float levels 0.0/1.0 were spelled "0"/"1"
+/// where pandas says "0.0"/"1.0", so the column changed labels on write;
+/// bools were "true"/"false" where pandas says "True"/"False".
+#[test]
+fn float_and_bool_levels_are_spelled_like_pandas() {
+    let levels = |file: &File| match ad_read_categorical(file, "col").unwrap().0 {
+        ColumnData::Categorical { levels, .. } => levels,
+        other => panic!("expected Categorical, got {other:?}"),
+    };
+    let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+    let f = write_cat_group::<f64>(tmp.path(), &[0, 1], &[0.0, 1.0, 0.5, -2.0]);
+    assert_eq!(levels(&f), ["0.0", "1.0", "0.5", "-2.0"]);
+    let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+    let f = write_cat_group::<f32>(tmp.path(), &[0, 1], &[3.0, 0.1]);
+    assert_eq!(levels(&f), ["3.0", "0.1"]);
+    let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+    let f = write_cat_group::<bool>(tmp.path(), &[0, 1], &[true, false]);
+    assert_eq!(levels(&f), ["True", "False"]);
+}
+
+/// Regression (CELLxGENE a61926b3, 43c65fc1): an obs index stored as a
+/// categorical (`obs/sample_id` with codes + categories) failed the whole
+/// conversion. It reads as one level name per row; a missing code is an error.
+#[test]
+fn categorical_index_reads_as_names() {
+    let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+    let file = write_cat_group::<i64>(tmp.path(), &[2, 0, 1], &[10, 20, 30]);
+    assert_eq!(ad_read_index(&file, "col").unwrap(), ["30", "10", "20"]);
+
+    let tmp = NamedTempFile::with_suffix(".h5").unwrap();
+    let file = write_cat_group::<i64>(tmp.path(), &[0, -1], &[10, 20]);
+    let err = ad_read_index(&file, "col").unwrap_err().to_string();
+    assert!(err.contains("missing"), "{err}");
 }
 
 // --- Self-contained round-trips (no golden fixtures; run in CI) ---

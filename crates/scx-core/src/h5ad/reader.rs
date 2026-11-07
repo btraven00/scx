@@ -22,8 +22,8 @@ use crate::{
     dtype::DataType,
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        bool_level, float_level, Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk,
+        ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
     sparse::dense_to_csr,
     stream::DatasetReader,
@@ -359,7 +359,7 @@ fn ad_read_df_index(file: &Group, group_path: &str) -> Result<Vec<String>> {
 ///
 /// The mask is deliberately ignored: an index has no meaningful missing value,
 /// and a masked entry is an empty label either way.
-fn ad_read_index(file: &Group, path: &str) -> Result<Vec<String>> {
+pub(super) fn ad_read_index(file: &Group, path: &str) -> Result<Vec<String>> {
     if file.dataset(path).is_ok() {
         return read_strings(file, path);
     }
@@ -367,8 +367,12 @@ fn ad_read_index(file: &Group, path: &str) -> Result<Vec<String>> {
     if file.dataset(&values).is_ok() {
         return read_strings(file, &values);
     }
+    if file.dataset(&format!("{path}/codes")).is_ok() {
+        let (data, missing) = ad_read_categorical(file, path)?;
+        return data.categorical_index(&missing, path);
+    }
     Err(ScxError::InvalidFormat(format!(
-        "index at '{path}' is neither a string dataset nor a nullable-string-array group"
+        "index at '{path}' is neither a string dataset nor a nullable-string-array or categorical group"
     )))
 }
 
@@ -512,16 +516,20 @@ fn ad_read_levels(file: &Group, path: &str) -> Result<Vec<String>> {
         TypeDescriptor::Unsigned(_) => {
             Ok(ds.read_1d::<u32>()?.iter().map(|v| v.to_string()).collect())
         }
-        TypeDescriptor::Float(FloatSize::U4) => {
-            Ok(ds.read_1d::<f32>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Float(_) => {
-            Ok(ds.read_1d::<f64>()?.iter().map(|v| v.to_string()).collect())
-        }
+        TypeDescriptor::Float(FloatSize::U4) => Ok(ds
+            .read_1d::<f32>()?
+            .iter()
+            .map(|&v| float_level(v))
+            .collect()),
+        TypeDescriptor::Float(_) => Ok(ds
+            .read_1d::<f64>()?
+            .iter()
+            .map(|&v| float_level(v))
+            .collect()),
         TypeDescriptor::Boolean => Ok(ds
             .read_1d::<bool>()?
             .iter()
-            .map(|v| v.to_string())
+            .map(|&v| bool_level(v))
             .collect()),
         other => Err(ScxError::InvalidFormat(format!(
             "unsupported categorical level dtype {other:?} at '{path}'"
