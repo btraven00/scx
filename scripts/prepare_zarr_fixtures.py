@@ -148,8 +148,7 @@ def write_varied():
     write_three(nox, "nox_many", v2=False)
 
     c = ad.AnnData(X=sp.csc_matrix(X.astype(np.float32)), obs=obs[[]], var=var[[]])
-    ad.settings.zarr_write_format = 3
-    c.write_zarr(OUT / "csc_x_v3.zarr")
+    write_three(c, "csc_x", v2=False)
 
 
 def write_three(a, name, v2=True):
