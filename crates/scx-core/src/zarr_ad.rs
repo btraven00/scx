@@ -37,7 +37,7 @@ use crate::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
         SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
-    sparse::{csc_row_ptr, csc_to_csr, csr_chunk, csr_rows, dense_to_csr},
+    sparse::{csc_row_ptr, csc_to_csr, csr_chunk, csr_rows, csr_to_dense, dense_to_csr},
     stream::DatasetReader,
 };
 
@@ -449,6 +449,30 @@ fn read_dense_2d(store: &Store, path: &str) -> Result<DenseMatrix> {
     })
 }
 
+/// The obsm entry at `path` as dense: a sparse group is read dense, since
+/// writers have no sparse slot for it.
+// TODO: costs rows × cols f64; fine for embeddings, not for a wide sparse
+// obsm. Add a sparse embedding slot if one turns up.
+fn read_embedding(store: &Store, path: &str) -> Result<DenseMatrix> {
+    let Some(Node::Group(attrs)) = node(store, path) else {
+        return read_dense_2d(store, path);
+    };
+    let enc = attrs.get("encoding-type").and_then(Value::as_str);
+    if !matches!(enc, Some("csr_matrix" | "csc_matrix")) {
+        return Err(zerr(
+            path,
+            format!("{} entries are not supported", enc.unwrap_or("group")),
+        ));
+    }
+    let m = read_sparse_whole(store, path, shape_attr(&attrs, path)?)?;
+    let data = csr_to_dense(&m).ok_or_else(|| zerr(path, "column index out of range"))?;
+    tracing::info!("{path}: sparse entry stored dense");
+    Ok(DenseMatrix {
+        shape: m.shape,
+        data,
+    })
+}
+
 /// The shape and CSR indptr of the sparse group at `path`. For a CSC group
 /// the indptr is derived from its row ids; [`sparse_chunks`] then reads it
 /// transposed.
@@ -494,6 +518,50 @@ fn is_csc(store: &Store, path: &str) -> bool {
         if attrs.get("encoding-type").and_then(Value::as_str) == Some("csc_matrix"))
 }
 
+/// The whole sparse group at `path` (`shape` rows × cols) as CSR; a CSC group
+/// is transposed.
+fn read_sparse_whole(store: &Store, path: &str, shape: (usize, usize)) -> Result<SparseMatrixCSR> {
+    let csc = is_csc(store, path);
+    let ptr = read_u64(&open_array(store, &format!("{path}/indptr"))?, None)?;
+    let (n, what) = if csc {
+        (shape.1, "n_cols")
+    } else {
+        (shape.0, "n_rows")
+    };
+    if ptr.len() != n + 1 {
+        return Err(zerr(
+            path,
+            format!(
+                "indptr has {} entries, expected {what} + 1 = {}",
+                ptr.len(),
+                n + 1
+            ),
+        ));
+    }
+    let nnz = *ptr.last().unwrap();
+    if ptr.iter().any(|&p| p > nnz) {
+        return Err(zerr(path, format!("indptr exceeds nnz {nnz}")));
+    }
+    let idx = read_u64(&open_array(store, &format!("{path}/indices"))?, None)?;
+    let limit = if csc { shape.0 } else { shape.1 };
+    if idx.len() < nnz as usize || idx.iter().any(|&i| i as usize >= limit) {
+        return Err(zerr(path, "indices out of range"));
+    }
+    let idx: Vec<u32> = idx[..nnz as usize].iter().map(|&i| i as u32).collect();
+    let data_arr = open_array(store, &format!("{path}/data"))?;
+    let data = read_typed(&data_arr, 0..nnz as usize, detect_dtype(&data_arr))?;
+    Ok(if csc {
+        csc_to_csr(shape, &ptr, &idx, &data)
+    } else {
+        SparseMatrixCSR {
+            shape,
+            indptr: ptr,
+            indices: idx,
+            data,
+        }
+    })
+}
+
 /// Row chunks of the sparse group at `path`. A CSC group is read whole and
 /// transposed on the first chunk.
 // TODO: same ceiling as h5ad's sparse_chunks: a CSC matrix costs its full
@@ -507,26 +575,7 @@ fn sparse_chunks<'a>(
     let mut csc: Option<SparseMatrixCSR> = None;
     row_chunks(meta.shape.0, chunk_size, move |rows| {
         if csc.is_none() && is_csc(&store, &path) {
-            let col_ptr = read_u64(&open_array(&store, &format!("{path}/indptr"))?, None)?;
-            if col_ptr.len() != meta.shape.1 + 1 {
-                return Err(zerr(
-                    &path,
-                    format!(
-                        "indptr has {} entries, expected n_cols + 1 = {}",
-                        col_ptr.len(),
-                        meta.shape.1 + 1
-                    ),
-                ));
-            }
-            let nnz = *col_ptr.last().unwrap() as usize;
-            let row_ids: Vec<u32> =
-                read_u64(&open_array(&store, &format!("{path}/indices"))?, None)?
-                    .into_iter()
-                    .map(|r| r as u32)
-                    .collect();
-            let data_arr = open_array(&store, &format!("{path}/data"))?;
-            let data = read_typed(&data_arr, 0..nnz, detect_dtype(&data_arr))?;
-            csc = Some(csc_to_csr(meta.shape, &col_ptr, &row_ids, &data));
+            csc = Some(read_sparse_whole(&store, &path, meta.shape)?);
         }
         match &csc {
             Some(m) => Ok(csr_rows(m, rows)),
@@ -759,7 +808,7 @@ impl DatasetReader for ZarrAdReader {
     async fn obsm(&mut self) -> Result<Embeddings> {
         let mut map = HashMap::new();
         for name in children(&self.store, "obsm") {
-            match read_dense_2d(&self.store, &format!("obsm/{name}")) {
+            match read_embedding(&self.store, &format!("obsm/{name}")) {
                 Ok(m) => {
                     // Guard against transposed storage, as h5ad does.
                     let m = if m.shape.0 != self.n_obs && m.shape.1 == self.n_obs {
@@ -836,9 +885,18 @@ impl DatasetReader for ZarrAdReader {
     async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
         let mut metas = Vec::new();
         for name in children(&self.store, "obsp") {
-            match sparse_meta(&self.store, &name, &format!("obsp/{name}")) {
-                Ok(m) => metas.push(m),
-                Err(e) => tracing::warn!("skipping obsp['{name}']: {e}"),
+            let path = format!("obsp/{name}");
+            match node(&self.store, &path) {
+                // Dense: shape only; indptr stays empty (as layers).
+                Some(Node::Array(arr)) if arr.shape().len() == 2 => metas.push(SparseMatrixMeta {
+                    name,
+                    shape: (arr.shape()[0] as usize, arr.shape()[1] as usize),
+                    indptr: Vec::new(),
+                }),
+                _ => match sparse_meta(&self.store, &name, &path) {
+                    Ok(m) => metas.push(m),
+                    Err(e) => tracing::warn!("skipping obsp['{name}']: {e}"),
+                },
             }
         }
         Ok(metas)
@@ -861,12 +919,15 @@ impl DatasetReader for ZarrAdReader {
     }
 
     fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
-        sparse_chunks(
-            self.store.clone(),
-            format!("obsp/{}", meta.name),
-            meta,
-            chunk_size,
-        )
+        let store = self.store.clone();
+        let path = format!("obsp/{}", meta.name);
+        if !meta.indptr.is_empty() {
+            return sparse_chunks(store, path, meta, chunk_size);
+        }
+        let n_cols = meta.shape.1;
+        row_chunks(meta.shape.0, chunk_size, move |rows| {
+            read_dense_chunk(&store, &path, rows, n_cols, None)
+        })
     }
 
     async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {

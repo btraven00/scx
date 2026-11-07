@@ -13,7 +13,7 @@ use crate::h5::{
     read_csr_rows, read_u32_range, read_u64, read_u64_range, read_values, value_dtype, CsrReader,
 };
 use crate::h5_str::{read_str_array_attr, read_str_attr, read_strings};
-use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows};
+use crate::sparse::{csc_row_ptr, csc_to_csr, csr_rows, csr_to_dense};
 use crate::stream::{
     error_stream, load_indptr, normalize_ranges, read_block, row_chunks, row_range_chunks,
     stream_indptr, ChunkStream, GENE_MAJOR_X,
@@ -565,9 +565,9 @@ fn ad_read_nullable(file: &Group, grp_path: &str) -> Result<(ColumnData, Vec<boo
     Ok((data, missing))
 }
 
-/// The dense 2-D entries of the dict group `group` (obsm, varm). Entries
-/// stored as groups (dataframes, sparse matrices) have no dense form and are
-/// skipped with a warning. With `n_rows`, an entry stored transposed
+/// The dense 2-D entries of the dict group `group` (obsm, varm). A sparse
+/// entry is read dense (writers have no sparse slot for it); other groups
+/// (dataframes) are skipped with a warning. With `n_rows`, an entry stored transposed
 /// (k × n_rows, as some writers do) is turned back to n_rows × k.
 fn ad_read_dense_dict(
     file: &Group,
@@ -583,9 +583,27 @@ fn ad_read_dense_dict(
     let mut map = HashMap::new();
     for name in grp.member_names()? {
         let Ok(ds) = grp.dataset(&name) else {
+            let path = format!("{group}/{name}");
             let entry = grp.group(&name)?;
             let enc = read_str_attr(&entry, "encoding-type").unwrap_or_default();
-            tracing::warn!("skipping {group}['{name}']: {enc} entries are not supported");
+            if enc != "csr_matrix" && enc != "csc_matrix" {
+                tracing::warn!("skipping {path}: {enc} entries are not supported");
+                continue;
+            }
+            // TODO: costs rows × cols f64; fine for embeddings, not for a wide
+            // sparse obsm. Add a sparse embedding slot if one turns up.
+            let m = read_sparse_whole(file, &path, read_shape(&entry)?)?;
+            let data = csr_to_dense(&m).ok_or_else(|| {
+                ScxError::InvalidFormat(format!("{path}: column index out of range"))
+            })?;
+            tracing::info!("{path}: sparse entry stored dense");
+            map.insert(
+                name,
+                DenseMatrix {
+                    shape: m.shape,
+                    data,
+                },
+            );
             continue;
         };
         let arr = ds
@@ -648,6 +666,73 @@ fn ad_read_sparse_meta(file: &Group, name: &str, group_path: &str) -> Result<Spa
     })
 }
 
+/// The whole sparse group at `path` (`shape` rows × cols) as CSR; a CSC group
+/// is transposed.
+fn read_sparse_whole(file: &Group, path: &str, shape: (usize, usize)) -> Result<SparseMatrixCSR> {
+    let csc = is_csc(&file.group(path)?);
+    let ds = |n: &str| file.dataset(&format!("{path}/{n}"));
+    let ptr = read_u64(&ds("indptr")?)?;
+    let (n, what) = if csc {
+        (shape.1, "n_cols")
+    } else {
+        (shape.0, "n_rows")
+    };
+    if ptr.len() != n + 1 {
+        return Err(ScxError::InvalidFormat(format!(
+            "{path}/indptr has {} entries, expected {what} + 1 = {}",
+            ptr.len(),
+            n + 1
+        )));
+    }
+    let nnz = *ptr.last().unwrap();
+    if ptr.iter().any(|&p| p > nnz) {
+        return Err(ScxError::InvalidFormat(format!(
+            "{path}/indptr exceeds nnz {nnz}"
+        )));
+    }
+    let idx = read_u32_range(&ds("indices")?, 0..nnz as usize)?;
+    let data_ds = ds("data")?;
+    let data = read_values(&data_ds, value_dtype(&data_ds)?, 0..nnz as usize)?;
+    if csc {
+        if let Some(&r) = idx.iter().find(|&&r| r as usize >= shape.0) {
+            return Err(ScxError::InvalidFormat(format!(
+                "{path}: row index {r} out of range for {} rows",
+                shape.0
+            )));
+        }
+        return Ok(csc_to_csr(shape, &ptr, &idx, &data));
+    }
+    Ok(SparseMatrixCSR {
+        shape,
+        indptr: ptr,
+        indices: idx,
+        data,
+    })
+}
+
+/// The meta of `parent[name]` (a layer or obsp entry at `path`), dense or
+/// sparse. Dense: an empty indptr marks it for read_rows.
+fn ad_read_matrix_meta(
+    file: &Group,
+    parent: &Group,
+    name: &str,
+    path: &str,
+) -> Result<SparseMatrixMeta> {
+    let Ok(ds) = parent.dataset(name) else {
+        return ad_read_sparse_meta(file, name, path);
+    };
+    match ds.shape()[..] {
+        [rows, cols] => Ok(SparseMatrixMeta {
+            name: name.to_string(),
+            shape: (rows, cols),
+            indptr: Vec::new(),
+        }),
+        ref other => Err(ScxError::InvalidFormat(format!(
+            "dense {path} must be 2-D, has shape {other:?}"
+        ))),
+    }
+}
+
 fn is_csc(grp: &Group) -> bool {
     read_str_attr(grp, "encoding-type").is_ok_and(|enc| enc == "csc_matrix")
         || read_str_attr(grp, "h5sparse_format").is_ok_and(|f| f == "csc")
@@ -671,24 +756,8 @@ fn sparse_chunks<'a>(
     let mut csr: Option<CsrReader> = None;
     row_chunks(meta.shape.0, chunk_size, move |rows| {
         let file = open_once(&mut file, reader)?;
-        if csc.is_none() && !meta.indptr.is_empty() {
-            let grp = file.group(&matrix)?;
-            if is_csc(&grp) {
-                let ds = |n: &str| file.dataset(&format!("{matrix}/{n}"));
-                let col_ptr = read_u64(&ds("indptr")?)?;
-                if col_ptr.len() != meta.shape.1 + 1 {
-                    return Err(ScxError::InvalidFormat(format!(
-                        "{matrix}/indptr has {} entries, expected n_cols + 1 = {}",
-                        col_ptr.len(),
-                        meta.shape.1 + 1
-                    )));
-                }
-                let nnz = *col_ptr.last().unwrap() as usize;
-                let rows_ids = read_u32_range(&ds("indices")?, 0..nnz)?;
-                let data_ds = ds("data")?;
-                let data = read_values(&data_ds, value_dtype(&data_ds)?, 0..nnz)?;
-                csc = Some(csc_to_csr(meta.shape, &col_ptr, &rows_ids, &data));
-            }
+        if csc.is_none() && !meta.indptr.is_empty() && is_csc(&file.group(&matrix)?) {
+            csc = Some(read_sparse_whole(file, &matrix, meta.shape)?);
         }
         if let Some(m) = &csc {
             return Ok(csr_rows(m, rows));
@@ -788,22 +857,7 @@ impl DatasetReader for H5AdReader {
             if grp_path == self.x_path {
                 continue;
             }
-            match grp.dataset(&name) {
-                // Dense: an empty indptr marks it for read_rows.
-                Ok(ds) => match ds.shape()[..] {
-                    [rows, cols] => metas.push(SparseMatrixMeta {
-                        name,
-                        shape: (rows, cols),
-                        indptr: Vec::new(),
-                    }),
-                    ref other => {
-                        return Err(ScxError::InvalidFormat(format!(
-                            "dense {grp_path} must be 2-D, has shape {other:?}"
-                        )))
-                    }
-                },
-                Err(_) => metas.push(ad_read_sparse_meta(&file, &name, &grp_path)?),
-            }
+            metas.push(ad_read_matrix_meta(&file, &grp, &name, &grp_path)?);
         }
         Ok(metas)
     }
@@ -822,7 +876,7 @@ impl DatasetReader for H5AdReader {
             .into_iter()
             .map(|name| {
                 let grp_path = format!("obsp/{name}");
-                ad_read_sparse_meta(&file, &name, &grp_path)
+                ad_read_matrix_meta(&file, &grp, &name, &grp_path)
             })
             .collect()
     }

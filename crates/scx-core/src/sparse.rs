@@ -100,6 +100,23 @@ pub(crate) fn csc_row_ptr(n_rows: usize, indices: &[u32]) -> Vec<u64> {
     ptr
 }
 
+/// `m` as row-major dense f64 values; `None` when a column id is out of range.
+pub(crate) fn csr_to_dense(m: &SparseMatrixCSR) -> Option<Vec<f64>> {
+    let (rows, cols) = m.shape;
+    let vals = m.data.to_f64();
+    let mut out = vec![0.0; rows * cols];
+    for r in 0..rows {
+        let nnz = m.indptr[r] as usize..m.indptr[r + 1] as usize;
+        for (&c, &v) in m.indices[nnz.clone()].iter().zip(&vals[nnz]) {
+            if c as usize >= cols {
+                return None;
+            }
+            out[r * cols + c as usize] = v;
+        }
+    }
+    Some(out)
+}
+
 /// Row-major dense values (`n_cols` per row) as CSR, dropping exact zeros.
 pub(crate) fn dense_to_csr(values: &[f64], n_cols: usize, dtype: DataType) -> SparseMatrixCSR {
     let nrows = values.len().checked_div(n_cols).unwrap_or(0);
