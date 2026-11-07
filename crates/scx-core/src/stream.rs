@@ -230,6 +230,12 @@ pub trait DatasetReader: Send {
         Ok(None)
     }
 
+    /// AnnData's `raw.var`, the gene metadata of `raw.X`. `None` for formats
+    /// without `raw`.
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        Ok(None)
+    }
+
     /// Stream row-chunks of `raw.X`. `meta` must come from `raw_meta()`.
     fn raw_stream<'a>(
         &'a self,
@@ -360,6 +366,14 @@ pub trait DatasetWriter: Send {
 
     /// Write variable embedding matrices (e.g., gene loadings).
     async fn write_varm(&mut self, varm: &Varm) -> Result<()>;
+
+    /// Write AnnData's `raw.var`. Call before `raw.X`, which is written with
+    /// `begin_sparse("raw", "X", ..)`. Formats without `raw` refuse it.
+    async fn write_raw_var(&mut self, _var: &VarTable) -> Result<()> {
+        Err(ScxError::InvalidFormat(
+            "this output format has no raw slot".into(),
+        ))
+    }
 
     /// Begin writing a named sparse matrix (layer or obsp).
     /// `group_prefix` is e.g. "layers" or "obsp".

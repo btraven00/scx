@@ -323,3 +323,66 @@ fn stdin_input_converts_like_the_file() {
         );
     }
 }
+
+/// The `raw.X` matrix and `raw.var` index of an h5ad, read by scx.
+fn raw_of(path: &Path) -> (Vec<Vec<f64>>, Vec<String>) {
+    futures::executor::block_on(async {
+        let mut r = scx_core::open(path.to_str().unwrap(), &scx_core::OpenOptions::new(100))
+            .await
+            .unwrap();
+        let meta = r.raw_meta().await.unwrap().expect("raw.X");
+        let var = r.raw_var().await.unwrap().expect("raw.var");
+        let mut out = vec![vec![0.0; meta.shape.1]; meta.shape.0];
+        let mut stream = r.raw_stream(&meta, 100);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            let values = chunk.data.data.to_f64();
+            for row in 0..chunk.nrows {
+                let span = chunk.data.indptr[row] as usize..chunk.data.indptr[row + 1] as usize;
+                for k in span {
+                    out[chunk.row_offset + row][chunk.data.indices[k] as usize] = values[k];
+                }
+            }
+        }
+        (out, var.index)
+    })
+}
+
+/// Regression: h5ad and Zarr output dropped `raw` (raw.X and raw.var), so
+/// every CELLxGENE h5ad lost its counts on h5ad -> h5ad or Zarr. They are
+/// now written as raw, and `--exclude raw` still drops them.
+#[test]
+fn anndata_output_keeps_raw() {
+    let src = fixture("tiny_raw.h5ad");
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = dir.path().join("out.h5ad");
+    convert(&src, &out, &[]);
+    assert_eq!(raw_of(&out), raw_of(&src));
+
+    let zarr = dir.path().join("out.zarr");
+    convert(&src, &zarr, &[]);
+    for part in [
+        "raw/X/indptr",
+        "raw/X/indices",
+        "raw/X/data",
+        "raw/var/_index",
+    ] {
+        assert!(
+            zarr.join(part).exists(),
+            "{part} missing from the Zarr store"
+        );
+    }
+
+    let dropped = dir.path().join("dropped.h5ad");
+    convert(&src, &dropped, &["--exclude", "raw"]);
+    let r = futures::executor::block_on(async {
+        scx_core::open(dropped.to_str().unwrap(), &scx_core::OpenOptions::new(100))
+            .await
+            .unwrap()
+            .raw_meta()
+            .await
+            .unwrap()
+    });
+    assert!(r.is_none(), "--exclude raw still wrote raw");
+}

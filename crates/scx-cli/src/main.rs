@@ -248,14 +248,14 @@ enum Cli {
 
         /// Write only these comma-separated auxiliary slots (e.g.
         /// `--only obsp` or `--only obsm:X_pca,layers`). Applies to
-        /// obsm/varm/uns/layers/obsp; X/obs/var are always written.
+        /// obsm/varm/uns/layers/obsp/raw; X/obs/var are always written.
         /// Excluding obsm also skips reading it (lowers peak RAM).
         /// Mutually exclusive with --exclude.
         #[arg(long, conflicts_with = "exclude")]
         only: Option<String>,
 
         /// Drop these comma-separated auxiliary slots (e.g.
-        /// `--exclude obsp,obsm,uns`). Applies to obsm/varm/uns/layers/obsp;
+        /// `--exclude obsp,obsm,uns`). Applies to obsm/varm/uns/layers/obsp/raw;
         /// X/obs/var are always written. Mutually exclusive with --only.
         #[arg(long, conflicts_with = "only")]
         exclude: Option<String>,
@@ -1544,6 +1544,25 @@ async fn convert_with_reader(
             tracing::info!(shape = ?meta.shape, "streaming raw.X into 'counts'");
             writer.begin_sparse("layers", "counts", meta).await?;
             let mut stream = reader.raw_stream(meta, chunk_size);
+            while let Some(chunk) = stream.next().await {
+                writer.write_sparse_chunk(&chunk?).await?;
+            }
+            writer.end_sparse().await?;
+        }
+    }
+
+    // AnnData output keeps `raw` as raw: its var, then raw.X.
+    let keeps_raw = !is_h5seurat && out_ext != Some("bpcells") && filter.includes("raw");
+    if keeps_raw {
+        if let Some(meta) = reader.raw_meta().await? {
+            let raw_var = reader.raw_var().await?.ok_or_else(|| {
+                anyhow::anyhow!("the input has raw.X but no raw.var to write beside it")
+            })?;
+            writer.write_raw_var(&raw_var).await?;
+            drop(raw_var);
+            tracing::info!(shape = ?meta.shape, "streaming raw.X");
+            writer.begin_sparse("raw", "X", &meta).await?;
+            let mut stream = reader.raw_stream(&meta, chunk_size);
             while let Some(chunk) = stream.next().await {
                 writer.write_sparse_chunk(&chunk?).await?;
             }

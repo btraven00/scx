@@ -664,6 +664,11 @@ impl DatasetWriter for ZarrAdWriter {
         Ok(())
     }
 
+    async fn write_raw_var(&mut self, var: &VarTable) -> Result<()> {
+        create_group(&self.store, "raw", encoding("raw", "0.1.0"))?;
+        write_dataframe(&self.store, "raw/var", &var.index, &var.columns)
+    }
+
     async fn begin_sparse(
         &mut self,
         group_prefix: &str,

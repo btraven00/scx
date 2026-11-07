@@ -727,6 +727,18 @@ impl DatasetWriter for H5AdWriter {
         Ok(())
     }
 
+    async fn write_raw_var(&mut self, var: &VarTable) -> Result<()> {
+        let grp = crate::h5::create_group(&self.file, "raw")?;
+        write_encoding_on_group(&grp, "raw", "0.1.0")?;
+        write_dataframe(
+            &self.file,
+            "raw/var",
+            &var.index,
+            &var.columns,
+            self.compression,
+        )
+    }
+
     async fn begin_sparse(
         &mut self,
         group_prefix: &str,

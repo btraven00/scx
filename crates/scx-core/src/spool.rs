@@ -162,6 +162,9 @@ impl DatasetReader for Spooled {
     async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {
         self.inner.raw_meta().await
     }
+    async fn raw_var(&mut self) -> Result<Option<VarTable>> {
+        self.inner.raw_var().await
+    }
     fn raw_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk: usize) -> ChunkStream<'a> {
         self.inner.raw_stream(meta, chunk)
     }
