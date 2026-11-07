@@ -183,7 +183,7 @@ in [docs/provenance.md](https://github.com/btraven00/scx/blob/main/docs/provenan
 |---|---|---|---|---|
 | Cells per streamed chunk | `--chunk-size` | `chunk_size=` | `chunk_size =` | 5000 |
 | Output matrix type | `--dtype` | `dtype=` | `dtype =` | `f32` |
-| Seurat assay to read (H5Seurat input) | `--assay` | `assay=` | `assay =` | `RNA` |
+| Seurat assay (H5Seurat input) or MuData modality (`.h5mu`) to read | `--assay` | `assay=` | `assay =` | `RNA`; for `.h5mu` the only modality, else `rna` |
 | Seurat layer to read (H5Seurat input) | `--layer` | `layer=` | `layer =` | `counts` |
 | Keep only matching cells | `--where col=value` | `where={"col": v}` | `where = list(col = v)` | every cell |
 

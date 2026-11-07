@@ -24,7 +24,8 @@ pub struct OpenOptions {
     /// Cells per streaming chunk.
     pub chunk_size: usize,
     /// H5Seurat assay (default "RNA" when `None`); for a Seurat `.rds`, the
-    /// object's active assay when `None`.
+    /// object's active assay when `None`; for an `.h5mu`, the modality (see
+    /// [`crate::h5mu::resolve_modality`]).
     pub assay: Option<String>,
     /// H5Seurat layer (default "counts" when `None`).
     pub layer: Option<String>,
@@ -105,6 +106,13 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
 
     let reader: Box<dyn DatasetReader + Send> = match fmt {
         Format::H5Ad => Box::new(H5AdReader::open(path, cs)?),
+        // As for h5ad, `layer` (an H5Seurat default of "counts") is not used.
+        Format::H5Mu => Box::new(H5AdReader::open_modality(
+            path,
+            cs,
+            opts.assay.as_deref(),
+            None,
+        )?),
         Format::TenxH5 => Box::new(TenxH5Reader::open(path, cs)?),
         Format::Mtx => Box::new(crate::mtx::MtxReader::open(path, cs)?),
         Format::NpyDir => Box::new(NpyIrReader::open(path, cs)?),

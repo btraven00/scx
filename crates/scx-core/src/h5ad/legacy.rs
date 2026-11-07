@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use hdf5::types::{CompoundField, CompoundType, FloatSize, IntSize, TypeDescriptor};
-use hdf5::{Dataset, File};
+use hdf5::{Dataset, Group};
 
 use crate::error::{Result, ScxError};
 use crate::h5_str::{read_str_attr, read_strings};
@@ -28,7 +28,7 @@ const GRAPHS: [&str; 2] = ["connectivities", "distances"];
 
 /// The compound dataset at `path`, if `path` is one (a pre-0.7 dataframe or
 /// obsm/varm).
-pub(super) fn compound(file: &File, path: &str) -> Option<(Dataset, CompoundType)> {
+pub(super) fn compound(file: &Group, path: &str) -> Option<(Dataset, CompoundType)> {
     let ds = file.dataset(path).ok()?;
     match ds.dtype().ok()?.to_descriptor().ok()? {
         TypeDescriptor::Compound(c) => Some((ds, c)),
@@ -37,7 +37,7 @@ pub(super) fn compound(file: &File, path: &str) -> Option<(Dataset, CompoundType
 }
 
 /// Whether `file` is in the pre-0.7 layout: obs and var as compound datasets.
-pub(super) fn is_legacy(file: &File) -> bool {
+pub(super) fn is_legacy(file: &Group) -> bool {
     compound(file, "obs").is_some() && compound(file, "var").is_some()
 }
 
@@ -94,7 +94,7 @@ fn ne<const N: usize>(raw: &[u8]) -> impl Iterator<Item = [u8; N]> + '_ {
 }
 
 /// A pre-0.7 dataframe: its `index` field and the other fields as columns.
-pub(super) fn read_dataframe(file: &File, path: &str) -> Result<(Vec<String>, Vec<Column>)> {
+pub(super) fn read_dataframe(file: &Group, path: &str) -> Result<(Vec<String>, Vec<Column>)> {
     let (ds, ty) = compound(file, path)
         .ok_or_else(|| ScxError::InvalidFormat(format!("{path} is not a compound dataset")))?;
     let mut index = None;
@@ -175,7 +175,7 @@ pub(super) fn read_dataframe(file: &File, path: &str) -> Result<(Vec<String>, Ve
 
 /// A pre-0.7 obsm / varm: each `(n, k)` subarray field as an (n, k) matrix.
 pub(super) fn read_dense_dict(
-    file: &File,
+    file: &Group,
     path: &str,
 ) -> Result<Option<HashMap<String, DenseMatrix>>> {
     let Some((ds, ty)) = compound(file, path) else {
@@ -225,7 +225,7 @@ pub(super) fn read_dense_dict(
 
 /// The neighbor graphs a pre-0.7 file keeps in `uns/neighbors`, which are
 /// obsp today.
-pub(super) fn obsp_names(file: &File) -> Vec<String> {
+pub(super) fn obsp_names(file: &Group) -> Vec<String> {
     GRAPHS
         .iter()
         .filter(|g| {
@@ -239,7 +239,7 @@ pub(super) fn obsp_names(file: &File) -> Vec<String> {
 /// Drop from a pre-0.7 `uns` what the reader moved elsewhere: the
 /// `<column>_categories` levels (now in the categorical columns) and the
 /// neighbor graphs (now obsp).
-pub(super) fn trim_uns(file: &File, uns: &mut serde_json::Value) {
+pub(super) fn trim_uns(file: &Group, uns: &mut serde_json::Value) {
     let Some(obj) = uns.as_object_mut() else {
         return;
     };
