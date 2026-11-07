@@ -133,7 +133,7 @@ async fn do_convert(
         writer.end_sparse().await?;
     } else {
         // Elsewhere raw stays raw, in formats that have it.
-        scx_core::stream::copy_raw(reader, writer.as_mut(), &var.index, n_obs).await?;
+        scx_core::stream::copy_raw(reader, writer.as_mut(), n_obs).await?;
     }
 
     for meta in &obsp_metas {

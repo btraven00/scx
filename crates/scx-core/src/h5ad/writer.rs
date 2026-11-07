@@ -749,10 +749,16 @@ impl DatasetWriter for H5AdWriter {
         Ok(())
     }
 
-    async fn begin_raw(&mut self, meta: &SparseMatrixMeta, var_index: &[String]) -> Result<bool> {
+    async fn begin_raw(&mut self, meta: &SparseMatrixMeta, var: &VarTable) -> Result<bool> {
         let raw = crate::h5::create_group(&self.file, "raw")?;
         write_encoding_on_group(&raw, "raw", "0.1.0")?;
-        write_dataframe(&self.file, "raw/var", var_index, &[], self.compression)?;
+        write_dataframe(
+            &self.file,
+            "raw/var",
+            &var.index,
+            &var.columns,
+            self.compression,
+        )?;
         self.begin_sparse("raw", "X", meta).await?;
         Ok(true)
     }

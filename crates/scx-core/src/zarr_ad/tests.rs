@@ -664,9 +664,13 @@ async fn raw_with_x_genes_reads_like_x() {
     };
 
     assert!(raw_meta(&fixture("small_v3.zarr")).unwrap().is_none());
+    let mut plain = ZarrAdReader::open(fixture("small_v3.zarr"), CHUNK).unwrap();
+    assert!(plain.raw_var().await.unwrap().is_none());
     for (name, src) in [("sparse", "small_v3.zarr"), ("dense", "varied_v3.zarr")] {
         let mut z = ZarrAdReader::open(with_raw(name, src, "X"), CHUNK).unwrap();
         let meta = z.raw_meta().await.unwrap().expect(name);
+        let raw_var = format!("{:?}", z.raw_var().await.unwrap().unwrap());
+        assert_eq!(raw_var, format!("{:?}", z.var().await.unwrap()), "{name}");
         let raw = chunks(z.raw_stream(&meta, CHUNK)).await;
         assert_eq!(raw, chunks(z.x_stream()).await, "{name}");
     }
