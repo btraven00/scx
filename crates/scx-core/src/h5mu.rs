@@ -170,7 +170,7 @@ mod tests {
         assert!(err.contains("prot, rna"), "{err}");
     }
 
-    /// Without `mod-order` the modalities come in storage order; a modality
+    /// Without `mod-order` every modality is listed, in storage order; a modality
     /// group that declares another encoding than AnnData is refused.
     #[test]
     fn storage_order_and_non_anndata_modality() {
@@ -183,8 +183,10 @@ mod tests {
             rna.delete_attr("encoding-type").unwrap();
             write_str_attr(&rna, "encoding-type", "MuData").unwrap();
         }
-        // Storage order is creation order here: rna, then prot.
-        assert_eq!(super::modalities(tmp.path()).unwrap(), ["rna", "prot"]);
+        // Storage order depends on the HDF5 build (name or creation order).
+        let mut mods = super::modalities(tmp.path()).unwrap();
+        mods.sort();
+        assert_eq!(mods, ["prot", "rna"]);
         let err = crate::h5ad::H5AdReader::open_modality(tmp.path(), 1, Some("rna"), None)
             .err()
             .unwrap()
