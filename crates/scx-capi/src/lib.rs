@@ -73,7 +73,12 @@ pub unsafe extern "C" fn scx_open(path: *const c_char, chunk_size: usize) -> *mu
             }
         });
     });
-    Box::into_raw(Box::new(ScxStream { rx, n_obs, n_vars, cur: None }))
+    Box::into_raw(Box::new(ScxStream {
+        rx,
+        n_obs,
+        n_vars,
+        cur: None,
+    }))
 }
 
 /// # Safety
@@ -105,7 +110,10 @@ pub unsafe extern "C" fn scx_next(
             *nrows = chunk.nrows;
             *nnz = chunk.data.indices.len();
             if *nnz >= i32::MAX as usize {
-                set_error(format!("chunk has {} nonzeros, more than Int32 indices hold; use a smaller chunk size", *nnz));
+                set_error(format!(
+                    "chunk has {} nonzeros, more than Int32 indices hold; use a smaller chunk size",
+                    *nnz
+                ));
                 return -1;
             }
             h.cur = Some(chunk);
@@ -125,8 +133,17 @@ pub unsafe extern "C" fn scx_next(
 /// # Safety
 /// `h` must have a current chunk from `scx_next`; buffers must have the sizes above.
 #[no_mangle]
-pub unsafe extern "C" fn scx_copy(h: *const ScxStream, indptr: *mut i32, indices: *mut i32, data: *mut f32) {
-    let csr = &(*h).cur.as_ref().expect("scx_copy without a current chunk").data;
+pub unsafe extern "C" fn scx_copy(
+    h: *const ScxStream,
+    indptr: *mut i32,
+    indices: *mut i32,
+    data: *mut f32,
+) {
+    let csr = &(*h)
+        .cur
+        .as_ref()
+        .expect("scx_copy without a current chunk")
+        .data;
     let nnz = csr.indices.len();
     let indptr = std::slice::from_raw_parts_mut(indptr, csr.indptr.len());
     let base = csr.indptr[0];
@@ -169,13 +186,18 @@ pub unsafe extern "C" fn scx_close(h: *mut ScxStream) {
 pub unsafe extern "C" fn scx_names(path: *const c_char, which: i32) -> *mut c_char {
     let run = || -> Result<CString, String> {
         let path = CStr::from_ptr(path).to_str().map_err(|e| e.to_string())?;
-        let mut reader = block_on(scx_core::open(path, &scx_core::OpenOptions::new(1))).map_err(|e| e.to_string())?;
+        let mut reader = block_on(scx_core::open(path, &scx_core::OpenOptions::new(1)))
+            .map_err(|e| e.to_string())?;
         // ponytail: obs()/var() read the whole metadata table to get its index;
         // add an index-only reader to scx-core if a wide obs ever makes this slow.
         let names = match which {
             0 => block_on(reader.obs()).map_err(|e| e.to_string())?.index,
             1 => block_on(reader.var()).map_err(|e| e.to_string())?.index,
-            _ => return Err(format!("scx_names: which must be 0 (obs) or 1 (var), got {which}")),
+            _ => {
+                return Err(format!(
+                    "scx_names: which must be 0 (obs) or 1 (var), got {which}"
+                ))
+            }
         };
         if let Some(n) = names.iter().find(|n| n.contains('\n') || n.contains('\0')) {
             return Err(format!("name {n:?} contains a newline or NUL"));
