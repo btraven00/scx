@@ -158,24 +158,20 @@ prop_compose! {
 
 /// What `out` is documented to store for `ds`, as its readers give it back:
 /// h5seurat writes a missing string as "" (SeuratDisk has no NA for
-/// character columns) and has no encoding for a categorical's `ordered`.
+/// character columns).
 /// Float NA as NaN, int64 as int32 and the like are notes, not differences,
 /// to `scx diff`, so they need nothing here.
 fn expected(mut ds: Dataset, out: Out) -> Dataset {
     if matches!(out, Out::H5SeuratDgc | Out::H5SeuratBpcells) {
         for col in &mut ds.obs.columns {
-            match &mut col.data {
-                ColumnData::String(v) => {
-                    if let Some(mask) = col.mask.take() {
-                        for (x, present) in v.iter_mut().zip(mask) {
-                            if !present {
-                                x.clear();
-                            }
+            if let ColumnData::String(v) = &mut col.data {
+                if let Some(mask) = col.mask.take() {
+                    for (x, present) in v.iter_mut().zip(mask) {
+                        if !present {
+                            x.clear();
                         }
                     }
                 }
-                ColumnData::Categorical { ordered, .. } => *ordered = false,
-                _ => {}
             }
         }
     }
