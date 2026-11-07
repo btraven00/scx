@@ -168,7 +168,7 @@ enum Cli {
         #[arg(long, default_value = "f32")]
         dtype: String,
 
-        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]; for .h5mu, the modality [default: the only one, else rna]
         #[arg(long)]
         assay: Option<String>,
 
@@ -292,7 +292,7 @@ enum Cli {
         /// Input file
         input: String,
 
-        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]; for .h5mu, the modality [default: the only one, else rna]
         #[arg(long)]
         assay: Option<String>,
 
@@ -434,7 +434,7 @@ enum Cli {
         #[arg(long, default_value = "5000")]
         chunk_size: usize,
 
-        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]; for .h5mu, the modality [default: the only one, else rna]
         #[arg(long)]
         assay: Option<String>,
 
@@ -472,7 +472,7 @@ enum Cli {
         #[arg(long, short = 'o')]
         output: String,
 
-        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]
+        /// Seurat assay [default: RNA for H5Seurat; the object's active assay for .rds]; for .h5mu, the modality [default: the only one, else rna]
         #[arg(long)]
         assay: Option<String>,
 
@@ -858,6 +858,18 @@ async fn run() -> anyhow::Result<()> {
                         println!("matrix source: /{} (no /X)", r.x_source());
                     }
                     inspect(&mut r, &input, "H5AD").await?;
+                }
+                Some(Format::H5Mu) => {
+                    let mods = scx_core::h5mu::modalities(input_path)?;
+                    println!("modalities: {}", mods.join(", "));
+                    let mut r = H5AdReader::open_modality(
+                        input_path,
+                        chunk,
+                        assay.as_deref(),
+                        layer.as_deref(),
+                    )?;
+                    println!("reading /{}/{}", r.root(), r.x_source());
+                    inspect(&mut r, &input, Format::H5Mu.display_name()).await?;
                 }
                 None => anyhow::bail!("could not detect the format of '{input}'"),
                 Some(Format::TenxH5) => {

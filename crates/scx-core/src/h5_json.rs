@@ -5,7 +5,7 @@
 //! expects; Seurat's `misc` has none.
 
 use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
-use hdf5::{File, Group, H5Type, Location};
+use hdf5::{Group, H5Type, Location};
 use ndarray::Array1;
 use serde_json::Value;
 use std::str::FromStr;
@@ -119,7 +119,7 @@ pub(crate) fn write_json(parent: &Group, name: &str, value: &Value, enc: Encodin
 
 /// Read the group at `path` as a JSON object. A dataset of a type with no
 /// JSON form (compound, opaque, ...) becomes `null`.
-pub(crate) fn read_json(file: &File, path: &str) -> Result<Value> {
+pub(crate) fn read_json(file: &Group, path: &str) -> Result<Value> {
     let grp = file.group(path)?;
     let mut map = serde_json::Map::new();
     for name in grp.member_names()? {
@@ -134,7 +134,7 @@ pub(crate) fn read_json(file: &File, path: &str) -> Result<Value> {
     Ok(Value::Object(map))
 }
 
-fn dataset_json(file: &File, path: &str) -> Result<Value> {
+fn dataset_json(file: &Group, path: &str) -> Result<Value> {
     let ds = file.dataset(path)?;
     let scalar = ds.ndim() == 0;
     fn vec_or_scalar<T: serde::Serialize>(scalar: bool, v: Vec<T>) -> Value {

@@ -50,6 +50,9 @@ pub struct H5AdReader {
     /// Base HDF5 path the matrix is read from: `"X"`, or `"layers/<name>"` when
     /// X is absent (or a layer was requested explicitly).
     x_path: String,
+    /// HDF5 group holding the AnnData: `"/"` for `.h5ad`, `"mod/<name>"`
+    /// for one modality of a MuData `.h5mu`.
+    root: String,
 }
 
 impl H5AdReader {
@@ -66,17 +69,34 @@ impl H5AdReader {
         chunk_size: usize,
         layer: Option<&str>,
     ) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let file = File::open(&path)?;
+        Self::open_at(path.as_ref(), chunk_size, layer, "/")
+    }
+
+    /// Open one modality of a MuData `.h5mu`: the AnnData at `/mod/<name>`.
+    /// `modality` picks it (see [`crate::h5mu::resolve_modality`]); `layer`
+    /// is as for [`open_layer`](Self::open_layer).
+    pub fn open_modality<P: AsRef<Path>>(
+        path: P,
+        chunk_size: usize,
+        modality: Option<&str>,
+        layer: Option<&str>,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        let name = crate::h5mu::resolve_modality(&open_group(path, "/")?, modality)?;
+        Self::open_at(path, chunk_size, layer, &format!("mod/{name}"))
+    }
+
+    fn open_at(path: &Path, chunk_size: usize, layer: Option<&str>, root: &str) -> Result<Self> {
+        let path = path.to_path_buf();
+        let file = open_group(&path, root)?;
 
         // Optional root encoding check — tolerate files without it
-        if let Ok(root) = file.group("/") {
-            if let Ok(enc) = read_str_attr(&root, "encoding-type") {
-                if !enc.is_empty() && enc != "anndata" {
-                    return Err(ScxError::InvalidFormat(format!(
-                        "not an AnnData file: root encoding-type = '{enc}'"
-                    )));
-                }
+        if let Ok(enc) = read_str_attr(&file, "encoding-type") {
+            if !enc.is_empty() && enc != "anndata" {
+                return Err(ScxError::InvalidFormat(format!(
+                    "not AnnData: /{} encoding-type = '{enc}'",
+                    root.trim_start_matches('/')
+                )));
             }
         }
 
@@ -132,12 +152,23 @@ impl H5AdReader {
             chunk_size,
             dtype,
             x_path: base,
+            root: root.to_string(),
         })
     }
 
     /// The HDF5 path the matrix is read from — `"X"` or `"layers/<name>"`.
     pub fn x_source(&self) -> &str {
         &self.x_path
+    }
+
+    /// The group the AnnData is read from: `"/"`, or `"mod/<name>"` in an
+    /// `.h5mu`.
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    fn group(&self) -> Result<Group> {
+        open_group(&self.path, &self.root)
     }
 
     /// The whole CSR row pointer, read on the first call; empty when X is
@@ -150,7 +181,7 @@ impl H5AdReader {
     }
 
     fn read_indptr(&self) -> Result<Vec<u64>> {
-        read_u64(&File::open(&self.path)?.dataset(&format!("{}/indptr", self.x_path))?)
+        read_u64(&self.group()?.dataset(&format!("{}/indptr", self.x_path))?)
     }
 }
 
@@ -160,7 +191,7 @@ impl H5AdReader {
 /// - `None` with `/X` present → `"X"`.
 /// - `None` with `/X` absent → fall back to a layer: the sole layer if there's
 ///   exactly one, else one named `counts`/`X`, else an error listing choices.
-fn resolve_matrix_path(file: &File, layer: Option<&str>) -> Result<String> {
+fn resolve_matrix_path(file: &Group, layer: Option<&str>) -> Result<String> {
     if let Some(name) = layer {
         let p = format!("layers/{name}");
         if file.group(&p).is_err() && file.dataset(&p).is_err() {
@@ -202,11 +233,16 @@ fn resolve_matrix_path(file: &File, layer: Option<&str>) -> Result<String> {
 // Reader helpers
 // ---------------------------------------------------------------------------
 
-/// The file in `slot`, opening `path` into it on first use: a stream opens
+/// The group `root` of the file at `path`.
+fn open_group(path: &Path, root: &str) -> Result<Group> {
+    Ok(File::open(path)?.group(root)?)
+}
+
+/// The reader's root group in `slot`, opened on first use: a stream opens
 /// its file once, not once per block.
-fn open_once<'f>(slot: &'f mut Option<File>, path: &Path) -> Result<&'f File> {
+fn open_once<'f>(slot: &'f mut Option<Group>, reader: &H5AdReader) -> Result<&'f Group> {
     if slot.is_none() {
-        *slot = Some(File::open(path)?);
+        *slot = Some(reader.group()?);
     }
     Ok(slot.as_ref().expect("opened above"))
 }
@@ -215,7 +251,7 @@ fn open_once<'f>(slot: &'f mut Option<File>, path: &Path) -> Result<&'f File> {
 /// group, or a dense 2-D dataset when `indptr` is empty (dense rows become
 /// CSR, dropping zeros).
 fn read_rows(
-    file: &File,
+    file: &Group,
     matrix: &str,
     indptr: &[u64],
     rows: Range<usize>,
@@ -257,7 +293,7 @@ pub(super) fn read_shape(grp: &Group) -> Result<(usize, usize)> {
 
 /// Read a dataframe group at `group_path` (e.g. "obs" or "var").
 /// Returns (index, columns).
-fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<Column>)> {
+fn ad_read_dataframe(file: &Group, group_path: &str) -> Result<(Vec<String>, Vec<Column>)> {
     if legacy::compound(file, group_path).is_some() {
         return legacy::read_dataframe(file, group_path);
     }
@@ -305,7 +341,7 @@ fn ad_read_dataframe(file: &File, group_path: &str) -> Result<(Vec<String>, Vec<
 
 /// Read the index of the dataframe group at `group_path`, named by its
 /// `_index` attribute (default "index").
-fn ad_read_df_index(file: &File, group_path: &str) -> Result<Vec<String>> {
+fn ad_read_df_index(file: &Group, group_path: &str) -> Result<Vec<String>> {
     if legacy::compound(file, group_path).is_some() {
         return legacy::read_dataframe(file, group_path).map(|(index, _)| index);
     }
@@ -323,7 +359,7 @@ fn ad_read_df_index(file: &File, group_path: &str) -> Result<Vec<String>> {
 ///
 /// The mask is deliberately ignored: an index has no meaningful missing value,
 /// and a masked entry is an empty label either way.
-fn ad_read_index(file: &File, path: &str) -> Result<Vec<String>> {
+fn ad_read_index(file: &Group, path: &str) -> Result<Vec<String>> {
     if file.dataset(path).is_ok() {
         return read_strings(file, path);
     }
@@ -337,7 +373,7 @@ fn ad_read_index(file: &File, path: &str) -> Result<Vec<String>> {
 }
 
 /// Read a single array or string-array dataset as ColumnData.
-fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
+fn ad_read_column(file: &Group, path: &str) -> Result<ColumnData> {
     let ds = file.dataset(path)?;
     // Prefer encoding-type attr; fall back to HDF5 dtype inspection
     let enc = read_str_attr(&ds, "encoding-type").unwrap_or_default();
@@ -389,7 +425,7 @@ fn read_int_column(ds: &hdf5::Dataset) -> Result<ColumnData> {
 /// Read a categorical group: codes (i8 or i16) + categories (string-array),
 /// and the group's `ordered` attribute. Code -1 is NA: it becomes code 0 with
 /// `missing[i] == true`.
-pub(super) fn ad_read_categorical(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
+pub(super) fn ad_read_categorical(file: &Group, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
     let (mut data, missing) = ad_read_categorical_at(
         file,
         &format!("{grp_path}/codes"),
@@ -415,7 +451,7 @@ fn read_ordered_attr(grp: &Group) -> bool {
 /// [`ad_read_categorical`] with the codes and categories datasets named
 /// separately, for the legacy `__categories` layout.
 fn ad_read_categorical_at(
-    file: &File,
+    file: &Group,
     codes_path: &str,
     categories_path: &str,
 ) -> Result<(ColumnData, Vec<bool>)> {
@@ -456,7 +492,7 @@ fn ad_read_categorical_at(
 /// (e.g. cluster ids stored as small uints) are equally valid. We coerce any
 /// scalar level dtype to its string label so `ColumnData::Categorical` always
 /// carries `Vec<String>` levels.
-fn ad_read_levels(file: &File, path: &str) -> Result<Vec<String>> {
+fn ad_read_levels(file: &Group, path: &str) -> Result<Vec<String>> {
     let ds = file.dataset(path)?;
     match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => read_strings(file, path),
@@ -504,7 +540,7 @@ fn ad_read_levels(file: &File, path: &str) -> Result<Vec<String>> {
 /// Read a nullable column group (`values` + `mask`, mask true = NA), as
 /// written for pandas' nullable integer, boolean and string dtypes. Returns
 /// the values and the per-value missing flags.
-fn ad_read_nullable(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
+fn ad_read_nullable(file: &Group, grp_path: &str) -> Result<(ColumnData, Vec<bool>)> {
     let ds = file.dataset(&format!("{grp_path}/values"))?;
     let missing: Vec<bool> = match file.dataset(&format!("{grp_path}/mask")) {
         Ok(mds) => match mds.dtype()?.to_descriptor()? {
@@ -542,7 +578,7 @@ fn ad_read_nullable(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bool
 /// skipped with a warning. With `n_rows`, an entry stored transposed
 /// (k × n_rows, as some writers do) is turned back to n_rows × k.
 fn ad_read_dense_dict(
-    file: &File,
+    file: &Group,
     group: &str,
     n_rows: Option<usize>,
 ) -> Result<HashMap<String, DenseMatrix>> {
@@ -590,7 +626,7 @@ fn ad_read_dense_dict(
 /// The shape and CSR indptr of the sparse matrix group at `group_path`. For a
 /// CSC group the indptr is derived from its row ids; [`sparse_chunks`] then
 /// reads it transposed.
-fn ad_read_sparse_meta(file: &File, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
+fn ad_read_sparse_meta(file: &Group, name: &str, group_path: &str) -> Result<SparseMatrixMeta> {
     let grp = file.group(group_path)?;
     let shape = read_shape(&grp)?;
     let indptr = if is_csc(&grp) {
@@ -630,7 +666,7 @@ fn is_csc(grp: &Group) -> bool {
 // TODO: a CSC matrix costs its full size in memory while it streams;
 // read it column-block by column-block if CSC layers ever come at atlas scale.
 fn sparse_chunks<'a>(
-    path: &'a Path,
+    reader: &'a H5AdReader,
     matrix: String,
     meta: &'a SparseMatrixMeta,
     chunk_size: usize,
@@ -642,7 +678,7 @@ fn sparse_chunks<'a>(
     // under its global lock), which made raw/X ~60% slower than X.
     let mut csr: Option<CsrReader> = None;
     row_chunks(meta.shape.0, chunk_size, move |rows| {
-        let file = open_once(&mut file, path)?;
+        let file = open_once(&mut file, reader)?;
         if csc.is_none() && !meta.indptr.is_empty() {
             let grp = file.group(&matrix)?;
             if is_csc(&grp) {
@@ -706,25 +742,25 @@ impl DatasetReader for H5AdReader {
     }
 
     async fn obs(&mut self) -> Result<ObsTable> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         let (index, columns) = ad_read_dataframe(&file, "obs")?;
         Ok(ObsTable { index, columns })
     }
 
     async fn var(&mut self) -> Result<VarTable> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         let (index, columns) = ad_read_dataframe(&file, "var")?;
         Ok(VarTable { index, columns })
     }
 
     async fn obsm(&mut self) -> Result<Embeddings> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         let map = ad_read_dense_dict(&file, "obsm", Some(self.n_obs))?;
         Ok(Embeddings { map })
     }
 
     async fn uns(&mut self) -> Result<UnsTable> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         match file.group("uns") {
             Err(_) => Ok(UnsTable::default()),
             Ok(_) => {
@@ -748,7 +784,7 @@ impl DatasetReader for H5AdReader {
     }
 
     async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         let Ok(grp) = file.group("layers") else {
             return Ok(Vec::new());
         };
@@ -781,7 +817,7 @@ impl DatasetReader for H5AdReader {
     }
 
     async fn obsp_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         let Ok(grp) = file.group("obsp") else {
             return legacy::obsp_names(&file)
                 .into_iter()
@@ -804,26 +840,21 @@ impl DatasetReader for H5AdReader {
         meta: &'a SparseMatrixMeta,
         chunk_size: usize,
     ) -> ChunkStream<'a> {
-        sparse_chunks(
-            &self.path,
-            format!("layers/{}", meta.name),
-            meta,
-            chunk_size,
-        )
+        sparse_chunks(self, format!("layers/{}", meta.name), meta, chunk_size)
     }
 
     fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
-        let modern = File::open(&self.path).is_ok_and(|f| f.group("obsp").is_ok());
+        let modern = self.group().is_ok_and(|f| f.group("obsp").is_ok());
         let group = if modern {
             format!("obsp/{}", meta.name)
         } else {
             format!("{}/{}", legacy::NEIGHBORS, meta.name)
         };
-        sparse_chunks(&self.path, group, meta, chunk_size)
+        sparse_chunks(self, group, meta, chunk_size)
     }
 
     async fn raw_meta(&mut self) -> Result<Option<SparseMatrixMeta>> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         let meta = match file.dataset("raw/X") {
             Ok(ds) => match ds.shape()[..] {
                 // Dense: an empty indptr marks it for read_rows.
@@ -857,11 +888,11 @@ impl DatasetReader for H5AdReader {
     }
 
     fn raw_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
-        sparse_chunks(&self.path, "raw/X".to_string(), meta, chunk_size)
+        sparse_chunks(self, "raw/X".to_string(), meta, chunk_size)
     }
 
     async fn varm(&mut self) -> Result<Varm> {
-        let file = File::open(&self.path)?;
+        let file = self.group()?;
         let map = ad_read_dense_dict(&file, "varm", Some(self.n_vars))?;
         Ok(Varm { map })
     }
@@ -891,10 +922,10 @@ impl DatasetReader for H5AdReader {
         };
         // The file and, for CSR, its indptr and indices/data readers, opened
         // on the first block.
-        let mut open: Option<(File, Option<(hdf5::Dataset, CsrReader)>)> = None;
+        let mut open: Option<(Group, Option<(hdf5::Dataset, CsrReader)>)> = None;
         row_range_chunks(this.n_obs, ranges, this.chunk_size, move |rows| {
             if open.is_none() {
-                let file = File::open(&this.path)?;
+                let file = this.group()?;
                 let csr = match this.indptr {
                     Some(_) => Some((
                         file.dataset(&format!("{}/indptr", this.x_path))?,
@@ -927,7 +958,7 @@ impl DatasetReader for H5AdReader {
         // CSC on disk is the CSR of the transpose: read genes as its rows.
         let mut file = None;
         row_range_chunks(this.n_vars, ranges, this.chunk_size, move |cols| {
-            let file = open_once(&mut file, &this.path)?;
+            let file = open_once(&mut file, this)?;
             read_rows(file, &this.x_path, col_ptr, cols, this.n_obs)
         })
     }

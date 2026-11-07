@@ -26,6 +26,7 @@ mod h5_json;
 pub mod h5_str;
 pub mod h5ad;
 pub mod h5bpcells;
+pub mod h5mu;
 pub mod h5seurat;
 pub mod ir;
 pub mod merge;

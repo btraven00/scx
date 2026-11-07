@@ -34,6 +34,7 @@ build can opt out with `--no-default-features` — see
 |---|:-:|:-:|
 | AnnData `.h5ad` (also the pre-0.7 layout, read only) | ✓ | ✓ |
 | AnnData Zarr (v2, v3; directory) | ✓ | ✓ (v3) |
+| MuData `.h5mu` (one modality per conversion, picked with `--assay`) | ✓ | |
 | Seurat `.h5seurat` (dgCMatrix or BPCells-backed) | ✓ | ✓ |
 | BPCells matrix directory | ✓ | ✓ X only |
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
@@ -69,7 +70,7 @@ Common options:
 |------|---------|-------------|
 | `--chunk-size N` | 5000 | Cells per streaming chunk |
 | `--dtype` | f32 | Output matrix dtype (`f32`, `f64`, `i32`, `u32`) |
-| `--assay` | RNA | Seurat assay (H5Seurat input only) |
+| `--assay` | RNA | Seurat assay (H5Seurat, `.rds`); MuData modality (`.h5mu`: the only one, else `rna`) |
 
 ### Inspect
 

@@ -2,7 +2,7 @@
 
 R bindings to [SCX](https://github.com/btraven00/scx), a Rust engine that
 converts single-cell data between formats in bounded memory. Reads AnnData
-(`.h5ad` and Zarr), H5Seurat, 10x and BPCells files into
+(`.h5ad` and Zarr), MuData `.h5mu`, H5Seurat, 10x and BPCells files into
 `SingleCellExperiment` or `Seurat` objects, converts file to file, and
 inspects files without loading the matrix. No Python dependency.
 
@@ -42,6 +42,7 @@ One reader for every format, detected by content:
 |---|:-:|:-:|
 | AnnData `.h5ad` | ✓ | ✓ |
 | AnnData Zarr store (`.zarr` directory, v2 and v3) | ✓ | ✓ (v3) |
+| MuData `.h5mu` (one modality, picked with `assay =`) | ✓ | |
 | H5Seurat (dgCMatrix or BPCells-backed) | ✓ | ✓ |
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
 | 10x MatrixMarket directory | ✓ | |

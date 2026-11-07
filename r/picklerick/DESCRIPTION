@@ -7,9 +7,9 @@ Authors@R: c(
     person("Atreya", "Choudhury", role = "aut",
            email = "atreyachoudhury@hotmail.com"))
 Description: R bindings to the SCX streaming interop engine for single-cell
-    genomics. Reads AnnData (.h5ad and Zarr), H5Seurat, 10x HDF5, 10x
-    MatrixMarket and BPCells files into SingleCellExperiment or Seurat
-    objects, or wraps the matrix in a DelayedArray that reads cells on demand.
+    genomics. Reads AnnData (.h5ad and Zarr), MuData (.h5mu), H5Seurat,
+    10x HDF5, 10x MatrixMarket and BPCells files into SingleCellExperiment or
+    Seurat objects, or wraps the matrix in a DelayedArray that reads cells on demand.
     Converts between formats through a memory-bounded streaming pipeline and
     inspects file metadata without loading the matrix. No Python dependency.
 License: MIT + file LICENSE

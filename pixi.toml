@@ -107,6 +107,7 @@ scipy    = "*"
 pytest   = "*"
 pytest-cov = "*"
 maturin  = ">=1.9,<2"
+mudata = ">=0.4.1,<0.5"
 
 [feature.py.tasks]
 install-picklerick         = { cmd = "maturin develop --manifest-path python/picklerick/Cargo.toml", description = "Build the picklerick extension (debug) into the py env" }
