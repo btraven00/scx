@@ -116,7 +116,11 @@ fn gene_major_input_converts() {
     assert!(!String::from_utf8_lossy(&out.stderr).contains("warning"));
     let mut got = H5AdReader::open(&back, 3).unwrap();
     assert!(!got.x_col_ptr().is_empty(), "h5ad output is not gene-major");
-    let by_gene = dense(got.x_stream_cols(vec![0..n_vars]), n_vars, n_obs);
+    let by_gene = dense(
+        got.x_stream_cols(std::iter::once(0..n_vars).collect()),
+        n_vars,
+        n_obs,
+    );
     assert_eq!(t(&by_gene, n_vars, n_obs), want);
 
     // zarr: by cell, after a warning.
