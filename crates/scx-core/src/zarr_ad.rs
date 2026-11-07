@@ -738,8 +738,15 @@ fn walk_group(store: &Store, path: &str) -> Value {
         let child = format!("{path}/{name}");
         let value = match node(store, &child) {
             Some(Node::Group(_)) => walk_group(store, &child),
-            Some(Node::Array(arr)) => array_to_json(&arr).unwrap_or(Value::Null),
-            None => Value::Null,
+            Some(Node::Array(arr)) => match array_to_json(&arr) {
+                Ok(v) => v,
+                // Skipped rather than null: null is a NaN (see h5_json).
+                Err(e) => {
+                    tracing::warn!("{child}: {e}; it is not carried");
+                    continue;
+                }
+            },
+            None => continue,
         };
         map.insert(name, value);
     }
@@ -747,9 +754,9 @@ fn walk_group(store: &Store, path: &str) -> Value {
 }
 
 fn array_to_json(arr: &ZArray) -> Result<Value> {
-    // As h5_json::dataset_json: bools, ints, unsigned ints, floats and strings,
-    // any shape (flattened, row-major); a 0-D array is a scalar, and so is a
-    // one-element string array.
+    // As h5_json::dataset_json: bools, ints, unsigned ints, floats and strings;
+    // a 0-D array is a scalar, and so is a one-element string array; 2-D and
+    // up are nested rows.
     fn vec_or_scalar<T: serde::Serialize>(scalar: bool, v: Vec<T>) -> Value {
         if scalar {
             v.into_iter().next().map_or(Value::Null, |x| json!(x))
@@ -757,10 +764,11 @@ fn array_to_json(arr: &ZArray) -> Result<Value> {
             json!(v)
         }
     }
-    let scalar = arr.shape().is_empty();
+    let shape: Vec<usize> = arr.shape().iter().map(|&n| n as usize).collect();
+    let scalar = shape.is_empty();
     let dt = arr.data_type();
     let unsigned = [zdt::uint8(), zdt::uint16(), zdt::uint32(), zdt::uint64()].contains(dt);
-    Ok(if is_string(arr) {
+    let v = if is_string(arr) {
         let v = read_strings(arr)?;
         vec_or_scalar(scalar || v.len() == 1, v)
     } else if *dt == zdt::bool() {
@@ -771,6 +779,10 @@ fn array_to_json(arr: &ZArray) -> Result<Value> {
         vec_or_scalar(scalar, read_u64(arr, None)?)
     } else {
         vec_or_scalar(scalar, read_i64(arr, None)?)
+    };
+    Ok(match v {
+        Value::Array(flat) if shape.len() >= 2 => crate::h5_json::nest(flat, &shape),
+        v => v,
     })
 }
 

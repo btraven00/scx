@@ -141,6 +141,33 @@ fn write_f64s(store: &Store, path: &str, v: &[f64], attrs: Map<String, Value>) -
     write_1d(store, path, zdt::float64(), FillValue::from(0f64), v, attrs)
 }
 
+/// An uns array of `shape` (row-major `values`), one chunk: uns is small.
+fn write_nd<T: Element>(
+    store: &Store,
+    path: &str,
+    data_type: ZDataType,
+    fill: FillValue,
+    shape: &[u64],
+    values: &[T],
+) -> Result<()> {
+    let chunk: Vec<u64> = shape.iter().map(|&n| n.max(1)).collect();
+    let arr = create_array(
+        store,
+        path,
+        data_type,
+        fill,
+        shape.to_vec(),
+        chunk,
+        array_enc(),
+    )?;
+    if !values.is_empty() {
+        let all: Vec<_> = shape.iter().map(|&n| 0..n).collect();
+        arr.store_array_subset(&all, values)
+            .map_err(|e| zerr(path, e))?;
+    }
+    Ok(())
+}
+
 /// A 0-d array holding one value, as anndata stores uns scalars.
 fn write_scalar<T: Element>(
     store: &Store,
@@ -351,9 +378,36 @@ fn write_dense_dict(store: &Store, path: &str, map: &HashMap<String, DenseMatrix
 // ---------------------------------------------------------------------------
 
 fn write_json(store: &Store, path: &str, value: &Value) -> Result<()> {
+    use crate::h5_json::{numeric_array, Num};
     let scalar_enc = encoding("numeric-scalar", "0.2.0");
+    if let Value::Array(a) = value {
+        if let Some((shape, num)) = numeric_array(a) {
+            let shape: Vec<u64> = shape.iter().map(|&n| n as u64).collect();
+            return match num {
+                Num::I64(v) => {
+                    write_nd(store, path, zdt::int64(), FillValue::from(0i64), &shape, &v)
+                }
+                Num::F64(v) => write_nd(
+                    store,
+                    path,
+                    zdt::float64(),
+                    FillValue::from(0f64),
+                    &shape,
+                    &v,
+                ),
+            };
+        }
+    }
     match value {
-        Value::Null => Ok(()),
+        // The readers skip what they can't carry, so null is a NaN.
+        Value::Null => write_scalar(
+            store,
+            path,
+            zdt::float64(),
+            FillValue::from(0f64),
+            f64::NAN,
+            scalar_enc,
+        ),
         Value::Bool(b) => write_scalar(
             store,
             path,
@@ -399,21 +453,6 @@ fn write_json(store: &Store, path: &str, value: &Value) -> Result<()> {
         Value::Array(a) if a.iter().all(Value::is_boolean) && !a.is_empty() => {
             let v: Vec<bool> = a.iter().map(|v| v.as_bool() == Some(true)).collect();
             write_bools(store, path, &v, array_enc())
-        }
-        Value::Array(a) if a.iter().all(|v| v.as_i64().is_some()) && !a.is_empty() => {
-            let v: Vec<i64> = a.iter().filter_map(Value::as_i64).collect();
-            write_1d(
-                store,
-                path,
-                zdt::int64(),
-                FillValue::from(0i64),
-                &v,
-                array_enc(),
-            )
-        }
-        Value::Array(a) if a.iter().all(Value::is_number) => {
-            let v: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
-            write_f64s(store, path, &v, array_enc())
         }
         Value::Array(a) if a.iter().all(Value::is_string) => {
             let v: Vec<String> = a

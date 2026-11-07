@@ -139,6 +139,10 @@ def write_varied():
     a.uns["bools"] = np.array([True, False])
     a.uns["grid"] = np.arange(6).reshape(2, 3)
     a.uns["nested"] = {"k": 2, "deeper": {"name": "x"}}
+    # NaN (JSON has none) and matrices (kept 2-D, not flattened).
+    a.uns["nan_scalar"] = np.nan
+    a.uns["nan_vec"] = np.array([np.nan, 0.5, np.nan])
+    a.uns["nan_mat"] = np.array([[1.0, np.nan], [3.0, 4.0], [np.nan, 6.0]])
     write_three(a, "varied")
 
     nox = ad.AnnData(obs=obs[[]], var=var[[]])
