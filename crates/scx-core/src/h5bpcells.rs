@@ -748,11 +748,12 @@ impl DatasetWriter for BpcellsH5Writer {
 
     async fn write_obsm(&mut self, obsm: &Embeddings) -> Result<()> {
         let reds_grp = self.reductions_group()?;
-        for (red_name, _, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
+        for (red_name, obsm_key, mat) in crate::h5seurat::reductions(&obsm.map, "obsm")? {
             let red_grp = match reds_grp.group(red_name) {
                 Ok(g) => g,
                 Err(_) => crate::h5::create_group(&reds_grp, red_name)?,
             };
+            crate::h5_str::write_str_attr(&red_grp, crate::h5seurat::OBSM_KEY_ATTR, obsm_key)?;
 
             // IR: (n_obs, n_comps) row-major → H5Seurat: (n_comps, n_obs),
             // as SeuratDisk and the dgCMatrix writer store it; R then reads

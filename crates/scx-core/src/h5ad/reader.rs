@@ -354,16 +354,8 @@ fn ad_read_column(file: &File, path: &str) -> Result<ColumnData> {
         TypeDescriptor::Float(_) => Ok(ColumnData::Float(ds.read_1d::<f64>()?.to_vec())),
         // Native HDF5 boolean type (anndata >= 0.10 uses this for bool columns)
         TypeDescriptor::Boolean => Ok(ColumnData::Bool(ds.read_1d::<bool>()?.to_vec())),
-        // 1-byte ints encode bool columns: our writer emits unsigned u8 0/1;
-        // some sources use signed i8. (AnnData >= 0.10 uses native Boolean above.)
-        TypeDescriptor::Unsigned(IntSize::U1) => {
-            let v: Vec<u8> = ds.read_1d::<u8>()?.to_vec();
-            Ok(ColumnData::Bool(v.into_iter().map(|x| x != 0).collect()))
-        }
-        TypeDescriptor::Integer(IntSize::U1) => {
-            let v: Vec<i8> = ds.read_1d::<i8>()?.to_vec();
-            Ok(ColumnData::Bool(v.into_iter().map(|x| x != 0).collect()))
-        }
+        // A 1-byte int is an int: h5py writes numpy bool as the Boolean enum
+        // above, and a uint8 0/1 column read as bool changed its type.
         TypeDescriptor::Integer(_) | TypeDescriptor::Unsigned(_) => read_int_column(&ds),
         TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
             Ok(ColumnData::String(read_strings(file, path)?))

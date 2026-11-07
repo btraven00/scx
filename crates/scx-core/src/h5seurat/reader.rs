@@ -305,12 +305,18 @@ fn read_factor_column(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bo
         .iter()
         .map(|&v| if v < 1 { 0 } else { v as u32 - 1 })
         .collect();
-    // SeuratDisk writes no ordered flag.
+    // SeuratDisk writes no ordered flag; scConvert (and scx) an int
+    // `ordered` = 1 attribute on the factor group.
+    let ordered = file
+        .group(grp_path)?
+        .attr("ordered")
+        .and_then(|a| a.read_scalar::<i32>())
+        .is_ok_and(|v| v != 0);
     Ok((
         ColumnData::Categorical {
             codes,
             levels,
-            ordered: false,
+            ordered,
         },
         missing,
     ))
@@ -407,8 +413,13 @@ fn read_obsm_sync(path: &Path, n_obs: usize) -> Result<Embeddings> {
             );
             continue;
         };
-        // Map reduction name to AnnData obsm key convention
-        let obsm_key = format!("X_{}", red_name.to_lowercase());
+        // scx records the obsm key it wrote; otherwise map the reduction
+        // name to AnnData's convention.
+        let obsm_key = file
+            .group(&format!("reductions/{red_name}"))
+            .ok()
+            .and_then(|g| crate::h5_str::read_str_attr(&g, crate::h5seurat::OBSM_KEY_ATTR).ok())
+            .unwrap_or_else(|| format!("X_{}", red_name.to_lowercase()));
         let shape = (arr.shape()[0], arr.shape()[1]);
         map.insert(
             obsm_key,

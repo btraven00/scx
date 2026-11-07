@@ -2377,3 +2377,46 @@ async fn raw_stream_reuses_indexed_reader_across_blocks() {
         assert_eq!(a.data.data, b.data.data);
     }
 }
+
+/// Regression: a uint8 or int8 column (CELLxGENE `var/Selected`) was read as
+/// bool. Only HDF5's Boolean enum (h5py's numpy bool) is bool.
+#[tokio::test]
+async fn one_byte_int_columns_stay_ints() {
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    {
+        let f = file_with_x(tmp.path());
+        let obs = f.create_group("obs").unwrap();
+        write_str_attr(&obs, "encoding-type", "dataframe").unwrap();
+        write_str_attr(&obs, "_index", "_index").unwrap();
+        write_str_array_attr(&obs, "column-order", &["u", "i", "b"]).unwrap();
+        write_strings(&obs, "_index", &["a".to_string(), "b".to_string()]).unwrap();
+        obs.new_dataset_builder()
+            .with_data(&[0u8, 1])
+            .create("u")
+            .unwrap();
+        obs.new_dataset_builder()
+            .with_data(&[-1i8, 1])
+            .create("i")
+            .unwrap();
+        obs.new_dataset_builder()
+            .with_data(&[true, false])
+            .create("b")
+            .unwrap();
+    }
+    let obs = H5AdReader::open(tmp.path(), 2)
+        .unwrap()
+        .obs()
+        .await
+        .unwrap();
+    let col = |name: &str| {
+        obs.columns
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .data
+            .clone()
+    };
+    assert!(matches!(col("u"), ColumnData::Int(v) if v == [0, 1]));
+    assert!(matches!(col("i"), ColumnData::Int(v) if v == [-1, 1]));
+    assert!(matches!(col("b"), ColumnData::Bool(v) if v == [true, false]));
+}

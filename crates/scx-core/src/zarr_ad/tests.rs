@@ -12,7 +12,7 @@ use super::{ZarrAdReader, ZarrAdWriter};
 use crate::detect::{detect, Format};
 use crate::error::Result;
 use crate::h5ad::H5AdReader;
-use crate::ir::MatrixChunk;
+use crate::ir::{ColumnData, MatrixChunk};
 use crate::stream::DatasetReader;
 use crate::stream::DatasetWriter;
 
@@ -638,4 +638,47 @@ async fn malformed_stores_are_reported() {
     std::fs::remove_dir_all(p.join("obs")).unwrap();
     let e = z.obs().await.err().unwrap().to_string();
     assert!(e.contains("missing dataframe obs"), "{e}");
+}
+
+/// Regression: a uint8 or int8 column (CELLxGENE `var/Selected`) was read as
+/// bool. Only a bool array is bool.
+#[tokio::test]
+async fn one_byte_int_columns_stay_ints() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("s.zarr");
+    copy_dir(&fixture("small_v3.zarr"), &p);
+    let n = ZarrAdReader::open(&p, CHUNK).unwrap().shape().0;
+    for (name, dtype, byte) in [("u8col", "uint8", 1u8), ("i8col", "int8", 0xffu8)] {
+        let a = p.join("obs").join(name);
+        std::fs::create_dir_all(a.join("c")).unwrap();
+        let meta = json!({
+            "zarr_format": 3, "node_type": "array", "shape": [n], "data_type": dtype,
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}},
+            "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+            "fill_value": 0, "codecs": [{"name": "bytes"}],
+            "attributes": {"encoding-type": "array", "encoding-version": "0.2.0"}
+        });
+        std::fs::write(a.join("zarr.json"), meta.to_string()).unwrap();
+        std::fs::write(a.join("c/0"), vec![byte; n]).unwrap();
+    }
+    let f = p.join("obs/zarr.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+    let order = v["attributes"]["column-order"].as_array_mut().unwrap();
+    order.push(json!("u8col"));
+    order.push(json!("i8col"));
+    std::fs::write(&f, v.to_string()).unwrap();
+
+    let obs = ZarrAdReader::open(&p, CHUNK).unwrap().obs().await.unwrap();
+    let col = |name: &str| {
+        obs.columns
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .data
+            .clone()
+    };
+    assert!(matches!(col("u8col"), ColumnData::Int(v) if v == vec![1; n]));
+    assert!(matches!(col("i8col"), ColumnData::Int(v) if v == vec![-1; n]));
 }
