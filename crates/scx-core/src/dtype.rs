@@ -137,6 +137,20 @@ impl TypedVec {
         self.len() == 0
     }
 
+    /// Append `other`, converted to this vector's dtype when it differs.
+    pub fn append(&mut self, other: &TypedVec) {
+        match (self, other) {
+            (TypedVec::F32(a), TypedVec::F32(b)) => a.extend_from_slice(b),
+            (TypedVec::F64(a), TypedVec::F64(b)) => a.extend_from_slice(b),
+            (TypedVec::I32(a), TypedVec::I32(b)) => a.extend_from_slice(b),
+            (TypedVec::U32(a), TypedVec::U32(b)) => a.extend_from_slice(b),
+            (TypedVec::F32(a), b) => a.extend(b.to_f64().into_iter().map(|x| x as f32)),
+            (TypedVec::F64(a), b) => a.extend(b.to_f64()),
+            (TypedVec::I32(a), b) => a.extend(b.to_f64().into_iter().map(|x| x as i32)),
+            (TypedVec::U32(a), b) => a.extend(b.to_f64().into_iter().map(|x| x as u32)),
+        }
+    }
+
     /// Convert to f64 values (lossy for large integers).
     pub fn to_f64(&self) -> Vec<f64> {
         match self {

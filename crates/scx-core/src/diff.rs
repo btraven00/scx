@@ -708,6 +708,14 @@ impl Slot {
         chunk: usize,
     ) -> ChunkStream<'r> {
         match self {
+            // TODO: holds all of a gene-major X; compare by gene when both
+            // sides are gene-major if that ever matters at atlas scale.
+            Slot::X if !r.x_col_ptr().is_empty() => {
+                tracing::warn!(
+                    "X is gene-major (CSC): reading all of it into memory to compare by cell"
+                );
+                crate::transpose::x_cell_major_stream(r, chunk)
+            }
             Slot::X => r.x_stream(),
             Slot::Raw(m) => r.raw_stream(m, chunk),
             Slot::Layer(m) => r.layer_stream(m, chunk),

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use clap::Parser;
 use futures::StreamExt;
-use owo_colors::{OwoColorize, Stream::Stdout};
+use owo_colors::{OwoColorize, Stream::Stderr, Stream::Stdout};
 use scx_core::{
     bpcells::{BpcellsDatasetReader, BpcellsDirWriter},
     detect,
@@ -241,9 +241,11 @@ enum Cli {
         #[arg(long)]
         gene_major: bool,
 
-        /// Memory budget in GB for the transposed nonzeros --gene-major holds
-        /// at a time. Less memory means more reads of X.
-        #[arg(long, value_name = "GB", default_value = "4", requires = "gene_major")]
+        /// Memory budget in GB for transposing X: the nonzeros --gene-major
+        /// holds at a time (less means more reads of X), and the most a
+        /// gene-major (CSC) input may take to be read whole and written by
+        /// cell, for outputs other than `.h5ad` (which keep it gene-major).
+        #[arg(long, value_name = "GB", default_value = "4")]
         transpose_mem: f64,
 
         /// Write only these comma-separated auxiliary slots (e.g.
@@ -968,7 +970,7 @@ async fn run() -> anyhow::Result<()> {
             if transpose_mem.is_nan() || transpose_mem <= 0.0 {
                 anyhow::bail!("--transpose-mem must be a positive GB budget");
             }
-            let csc_mem = gene_major.then_some((transpose_mem * 1e9) as usize);
+            let transpose_mem = (transpose_mem * 1e9) as usize;
             let filter = match (only.as_deref(), exclude.as_deref()) {
                 (Some(o), _) => SlotFilter::from_only(o),
                 (_, Some(e)) => SlotFilter::from_exclude(e),
@@ -1081,7 +1083,8 @@ async fn run() -> anyhow::Result<()> {
                 source_sha256,
                 source_hash != SourceHashAlgo::None,
                 compress,
-                csc_mem,
+                gene_major,
+                transpose_mem,
                 &filter,
                 &filters,
             )
@@ -1305,7 +1308,8 @@ async fn convert_with_reader(
     // Record the hash a download or stdin spool computed on the way in.
     reader_hash: bool,
     compress: Option<u8>,
-    csc_mem: Option<usize>,
+    gene_major: bool,
+    transpose_mem: usize,
     filter: &SlotFilter,
     filters: &[(String, Vec<String>)],
 ) -> anyhow::Result<(usize, usize, Option<String>)> {
@@ -1314,15 +1318,45 @@ async fn convert_with_reader(
     let (n_obs, n_vars) = reader.shape();
 
     let is_h5seurat = output.extension().and_then(|e| e.to_str()) == Some("h5seurat");
-    if csc_mem.is_some()
-        && matches!(
-            output.extension().and_then(|e| e.to_str()),
-            Some("h5seurat" | "zarr" | "bpcells")
-        )
-    {
+    let out_ext = output.extension().and_then(|e| e.to_str());
+    if gene_major && matches!(out_ext, Some("h5seurat" | "zarr" | "bpcells")) {
         anyhow::bail!("--gene-major only applies to .h5ad output");
     }
-    scx_core::stream::require_cell_major(reader)?;
+    // Gene-major (CSC) X: into h5ad it stays gene-major, copied by gene with
+    // bounded memory. Every other output takes X by cell, so it is read
+    // whole and transposed, if that fits --transpose-mem. Decided before
+    // anything is written.
+    let csc_in = !reader.x_col_ptr().is_empty();
+    let copy_csc = csc_in && out_ext == Some("h5ad") && filters.is_empty();
+    if csc_in && !copy_csc {
+        let need = scx_core::transpose::cell_major_bytes(reader);
+        let gb = |b: f64| b / 1e9;
+        if need > transpose_mem as u64 {
+            anyhow::bail!(
+                "{}",
+                format!(
+                    "X is gene-major (CSC); {} output needs it by cell, which means \
+                     holding ~{:.2} GB in memory, over --transpose-mem {:.2} GB. Raise \
+                     --transpose-mem, write .h5ad (X stays gene-major), or {}",
+                    out_ext.unwrap_or("this"),
+                    gb(need as f64),
+                    gb(transpose_mem as f64),
+                    "convert X to CSR first: adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
+                )
+                .if_supports_color(Stderr, |t| t.red())
+            );
+        }
+        eprintln!(
+            "{}",
+            format!(
+                "warning: X is gene-major (CSC): reading all of it (~{:.2} GB) into memory \
+                 to write {} output by cell. Write .h5ad to keep it gene-major instead.",
+                gb(need as f64),
+                out_ext.unwrap_or("this")
+            )
+            .if_supports_color(Stderr, |t| t.red())
+        );
+    }
 
     if compress.is_some() && is_h5seurat {
         tracing::warn!("--compress only applies to .h5ad output; ignored for .h5seurat");
@@ -1590,8 +1624,24 @@ async fn convert_with_reader(
 
     let x_span = obkit::span("x");
     let t_x = std::time::Instant::now();
-    if let Some(mem) = csc_mem {
-        let blocks = scx_core::transpose::write_x_csc(reader, &mut *writer, mem).await?;
+    if copy_csc {
+        let chunks = scx_core::transpose::copy_x_csc(reader, &mut *writer).await?;
+        tracing::info!(
+            chunks,
+            "gene-major X copied by gene in {:.2?}",
+            t_x.elapsed()
+        );
+    } else if csc_in {
+        let x = scx_core::transpose::x_cell_major(reader).await?;
+        for start in (0..n_obs).step_by(chunk_size.max(1)) {
+            let rows = start..(start + chunk_size.max(1)).min(n_obs);
+            writer
+                .write_x_chunk(&scx_core::sparse::csr_rows(&x, rows))
+                .await?;
+        }
+        tracing::info!("gene-major X transposed in memory in {:.2?}", t_x.elapsed());
+    } else if gene_major {
+        let blocks = scx_core::transpose::write_x_csc(reader, &mut *writer, transpose_mem).await?;
         tracing::info!(
             blocks,
             reads = blocks + 1,

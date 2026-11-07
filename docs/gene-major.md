@@ -123,17 +123,22 @@ path:
 - **`axis="obs"` (the default) on CSC X:** an error. Reading the gene
   pointer as a row pointer would transpose the matrix silently.
 
-In Rust, step 2 is `DatasetReader::x_stream_cols(ranges)`. Only `H5AdReader`
-on CSC X implements it, and every other reader returns the error above.
+In Rust, step 2 is `DatasetReader::x_stream_cols(ranges)`. `H5AdReader` and
+`ZarrAdReader` on CSC X implement it, and every other reader returns the error
+above.
 
 ## Limits
 
-- Gene-axis streaming reads h5ad CSC X only. Zarr CSC X and the R binding
-  aren't wired; in R, HDF5Array already reads CSC h5ad by column.
+- Gene-axis streaming reads h5ad and Zarr CSC X. The R binding isn't wired;
+  in R, HDF5Array already reads CSC h5ad by column.
 - `.h5ad` output only. Zarr, h5seurat and BPCells output refuse `--gene-major`.
-- `scx convert`, `concat` and `snapshot` refuse a gene-major input up front,
-  before writing anything, because they stream X by cell. Convert it to CSR
-  with anndata first.
+- `scx convert` on a gene-major input keeps it gene-major in `.h5ad` output,
+  copied by gene with bounded memory. Other outputs take X by cell, so X is
+  read whole and transposed in memory, with a warning; when that would hold
+  more than `--transpose-mem` (default 4 GB) it refuses up front, before
+  writing anything. `scx diff` transposes a gene-major X the same way.
+- `concat` and `snapshot` refuse a gene-major input up front, because they
+  stream X by cell. Convert it to CSR with anndata first.
 - Every read in step 1 decodes all of X. A single-read alternative would
   spill per-block buckets to temporary files and read each one back. Add it
   if the number of reads ever dominates.
