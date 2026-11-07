@@ -597,4 +597,35 @@ mod tests {
             "{err}"
         );
     }
+
+    /// copy_raw writes nothing, and says so, when the input has no raw or
+    /// the output format has none (h5seurat keeps raw.X as counts instead).
+    #[tokio::test]
+    async fn copy_raw_skips_a_missing_raw_or_a_format_without_one() {
+        let tiny = |name: &str| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/tiny")
+                .join(name)
+        };
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+        let mut w = crate::h5seurat::H5SeuratWriter::create(
+            tmp.path(),
+            1,
+            1,
+            crate::dtype::DataType::F32,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        for (name, why) in [("tiny.h5ad", "no raw"), ("tiny_raw.h5ad", "no raw slot")] {
+            let mut r = crate::h5ad::H5AdReader::open(tiny(name), 10).unwrap();
+            let genes = r.var().await.unwrap().index;
+            assert!(
+                !copy_raw(&mut r, &mut w, &genes, 10).await.unwrap(),
+                "{why}"
+            );
+        }
+    }
 }

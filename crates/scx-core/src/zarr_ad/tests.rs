@@ -639,3 +639,44 @@ async fn malformed_stores_are_reported() {
     let e = z.obs().await.err().unwrap().to_string();
     assert!(e.contains("missing dataframe obs"), "{e}");
 }
+
+/// raw/X reads like X when it has X's cells and genes, sparse or dense;
+/// with other genes, or none written, there is no raw.
+#[tokio::test]
+async fn raw_with_x_genes_reads_like_x() {
+    let dir = tempfile::tempdir().unwrap();
+    // `src` with `x` copied to raw/X and var to raw/var.
+    let with_raw = |name: &str, src: &str, x: &str| {
+        let p = dir.path().join(name);
+        copy_dir(&fixture(src), &p);
+        std::fs::write(
+            p.join("raw/zarr.json"),
+            r#"{"zarr_format":3,"node_type":"group","attributes":{"encoding-type":"raw","encoding-version":"0.1.0"}}"#,
+        )
+        .unwrap();
+        copy_dir(&p.join(x), &p.join("raw/X"));
+        copy_dir(&p.join("var"), &p.join("raw/var"));
+        p
+    };
+    let raw_meta = |p: &Path| {
+        let mut z = ZarrAdReader::open(p, CHUNK).unwrap();
+        futures::executor::block_on(z.raw_meta())
+    };
+
+    assert!(raw_meta(&fixture("small_v3.zarr")).unwrap().is_none());
+    for (name, src) in [("sparse", "small_v3.zarr"), ("dense", "varied_v3.zarr")] {
+        let mut z = ZarrAdReader::open(with_raw(name, src, "X"), CHUNK).unwrap();
+        let meta = z.raw_meta().await.unwrap().expect(name);
+        let raw = chunks(z.raw_stream(&meta, CHUNK)).await;
+        assert_eq!(raw, chunks(z.x_stream()).await, "{name}");
+    }
+
+    let p = with_raw("other_genes", "small_v3.zarr", "X");
+    std::fs::remove_dir_all(p.join("raw/var")).unwrap();
+    assert!(raw_meta(&p).unwrap().is_none());
+
+    let e = raw_meta(&with_raw("rank1", "small_v3.zarr", "obs/score"))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("must be 2-D, has rank 1"), "{e}");
+}
