@@ -28,7 +28,7 @@ use zarrs::group::Group;
 use crate::stream::ChunkStream;
 use crate::stream::{
     error_stream, load_indptr, normalize_ranges, read_block, row_chunks, row_range_chunks,
-    stream_indptr,
+    stream_indptr, GENE_MAJOR_X,
 };
 use crate::{
     dtype::{DataType, TypedVec},
@@ -59,6 +59,9 @@ pub struct ZarrAdReader {
     /// CSR row pointer array (n_obs + 1 entries), read on first need: a
     /// row-range stream reads just its rows' part. None when X is dense.
     indptr: Option<OnceLock<Vec<u64>>>,
+    /// CSC column pointer (n_vars + 1 entries) when X is gene-major; X then
+    /// streams by gene only ([`DatasetReader::x_stream_cols`]).
+    col_ptr: Option<Vec<u64>>,
     chunk_size: usize,
     dtype: DataType,
     /// Node the matrix is read from: `"X"`, or `"layers/<name>"` when X is
@@ -96,6 +99,7 @@ impl ZarrAdReader {
         }
 
         let base = resolve_matrix_path(&store, layer)?;
+        let mut col_ptr = None;
         let (n_obs, n_vars, indptr, dtype) = match node(&store, &base) {
             Some(Node::Array(arr)) => {
                 let sh = arr.shape();
@@ -105,25 +109,33 @@ impl ZarrAdReader {
                 (sh[0] as usize, sh[1] as usize, None, detect_dtype(&arr))
             }
             Some(Node::Group(attrs)) => {
-                if attrs.get("encoding-type").and_then(Value::as_str) == Some("csc_matrix") {
-                    return Err(ScxError::InvalidFormat(format!(
-                        "{base} is stored as CSC. Convert to CSR first: \
-                         adata.X = adata.X.tocsr(); adata.write_zarr(path)"
-                    )));
-                }
                 let (n_obs, n_vars) = shape_attr(&attrs, &base)?;
-                let len = open_array(&store, &format!("{base}/indptr"))?
-                    .shape()
-                    .iter()
-                    .product::<u64>() as usize;
-                if len != n_obs + 1 {
-                    return Err(ScxError::InvalidFormat(format!(
-                        "{base}/indptr length {len} != n_obs+1 {}",
-                        n_obs + 1
-                    )));
-                }
                 let dtype = detect_dtype(&open_array(&store, &format!("{base}/data"))?);
-                (n_obs, n_vars, Some(OnceLock::new()), dtype)
+                if attrs.get("encoding-type").and_then(Value::as_str) == Some("csc_matrix") {
+                    // Gene-major: streams by gene only, as h5ad.
+                    let ptr = read_u64(&open_array(&store, &format!("{base}/indptr"))?, None)?;
+                    if ptr.len() != n_vars + 1 {
+                        return Err(ScxError::InvalidFormat(format!(
+                            "{base}/indptr length {} != n_vars+1 {}",
+                            ptr.len(),
+                            n_vars + 1
+                        )));
+                    }
+                    col_ptr = Some(ptr);
+                    (n_obs, n_vars, None, dtype)
+                } else {
+                    let len = open_array(&store, &format!("{base}/indptr"))?
+                        .shape()
+                        .iter()
+                        .product::<u64>() as usize;
+                    if len != n_obs + 1 {
+                        return Err(ScxError::InvalidFormat(format!(
+                            "{base}/indptr length {len} != n_obs+1 {}",
+                            n_obs + 1
+                        )));
+                    }
+                    (n_obs, n_vars, Some(OnceLock::new()), dtype)
+                }
             }
             None => return Err(ScxError::InvalidFormat(format!("missing {base}"))),
         };
@@ -133,6 +145,7 @@ impl ZarrAdReader {
             n_obs,
             n_vars,
             indptr,
+            col_ptr,
             chunk_size,
             dtype,
             x_path: base,
@@ -1001,10 +1014,32 @@ impl DatasetReader for ZarrAdReader {
     }
 
     fn reads_row_ranges(&self) -> bool {
-        true
+        self.col_ptr.is_none()
+    }
+
+    fn x_col_ptr(&self) -> &[u64] {
+        self.col_ptr.as_deref().unwrap_or(&[])
+    }
+
+    fn x_stream_cols(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
+        let this = &*self;
+        let Some(col_ptr) = this.col_ptr.as_deref() else {
+            return error_stream(format!(
+                "{} is stored by cell; write a gene-major copy with `scx convert --gene-major`",
+                this.x_path
+            ));
+        };
+        // CSC on disk is the CSR of the transpose: read genes as its rows.
+        let (store, base) = (this.store.clone(), this.x_path.clone());
+        row_range_chunks(this.n_vars, ranges, this.chunk_size, move |cols| {
+            read_csr_chunk(&store, &base, col_ptr, cols, this.n_obs, Some(this.dtype))
+        })
     }
 
     fn x_stream_rows(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
+        if self.col_ptr.is_some() {
+            return error_stream(GENE_MAJOR_X.into());
+        }
         let store = self.store.clone();
         let base = self.x_path.clone();
         let (n_obs, n_vars, dtype) = (self.n_obs, self.n_vars, self.dtype);

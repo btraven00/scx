@@ -563,14 +563,28 @@ async fn without_x_layers_resolve_like_h5ad() {
     assert!(H5AdReader::open(fixture("nox_many.h5ad"), CHUNK).is_err());
 }
 
-/// X stored as CSC is refused with the one-line fix, not misread as CSR.
-#[test]
-fn csc_x_is_refused() {
-    let e = ZarrAdReader::open(fixture("csc_x_v3.zarr"), CHUNK)
-        .err()
-        .unwrap()
-        .to_string();
-    assert!(e.contains("stored as CSC") && e.contains("tocsr()"), "{e}");
+/// X stored as CSC streams by gene exactly as h5ad's does, and by cell it
+/// refuses rather than being misread as CSR.
+#[tokio::test]
+async fn csc_x_streams_by_gene_like_h5ad() {
+    let mut z = ZarrAdReader::open(fixture("csc_x_v3.zarr"), CHUNK).unwrap();
+    let mut h = H5AdReader::open(fixture("csc_x.h5ad"), CHUNK).unwrap();
+    assert_eq!(z.shape(), h.shape());
+    assert_eq!(z.x_col_ptr(), h.x_col_ptr());
+    assert!(!z.x_col_ptr().is_empty());
+    let all = vec![0..z.shape().1];
+    assert_eq!(
+        chunks(z.x_stream_cols(all.clone())).await,
+        chunks(h.x_stream_cols(all)).await
+    );
+    let some = vec![2..5, 9..11];
+    assert_eq!(
+        chunks(z.x_stream_cols(some.clone())).await,
+        chunks(h.x_stream_cols(some)).await
+    );
+    // By cell it refuses, as h5ad does.
+    let e = format!("{:?}", z.x_stream().next().await.unwrap().unwrap_err());
+    assert!(e.contains("gene-major"), "{e}");
 }
 
 fn copy_dir(from: &Path, to: &Path) {
