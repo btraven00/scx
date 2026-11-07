@@ -6,7 +6,6 @@
 
 use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5::{Group, H5Type, Location};
-use ndarray::Array1;
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -45,9 +44,80 @@ fn array<T: H5Type>(
     enc: Encoding,
     kind: &str,
 ) -> Result<()> {
-    let ds = parent.new_dataset::<T>().shape(v.len()).create(name)?;
-    ds.write(&Array1::from_vec(v))?;
+    array_nd(parent, name, &[v.len()], v, enc, kind)
+}
+
+/// `v` (row-major) as a dataset of `shape`.
+fn array_nd<T: H5Type>(
+    parent: &Group,
+    name: &str,
+    shape: &[usize],
+    v: Vec<T>,
+    enc: Encoding,
+    kind: &str,
+) -> Result<()> {
+    let ds = parent.new_dataset::<T>().shape(shape).create(name)?;
+    ds.write_raw(&v)?;
     encode(&ds, enc, kind, "0.2.0")
+}
+
+/// Values of a numeric JSON array: integers, or floats once any value is
+/// fractional, large or NaN.
+pub(crate) enum Num {
+    I64(Vec<i64>),
+    F64(Vec<f64>),
+}
+
+/// A JSON array as an N-d numeric array: its shape and row-major values. A
+/// nested array is a dataset read row by row (see [`nest`]); `null` is NaN,
+/// since JSON has none. `None` unless every leaf is a number or `null` and
+/// every row has the same length.
+pub(crate) fn numeric_array(a: &[Value]) -> Option<(Vec<usize>, Num)> {
+    fn leaves<'a>(a: &'a [Value], shape: &[usize], out: &mut Vec<&'a Value>) -> bool {
+        if a.len() != shape[0] {
+            return false;
+        }
+        if shape.len() == 1 {
+            out.extend(a);
+            return a.iter().all(|v| v.is_number() || v.is_null());
+        }
+        a.iter()
+            .all(|v| matches!(v, Value::Array(row) if leaves(row, &shape[1..], out)))
+    }
+    let mut shape = vec![a.len()];
+    let mut first = a.first();
+    while let Some(Value::Array(row)) = first {
+        shape.push(row.len());
+        first = row.first();
+    }
+    let mut out = Vec::new();
+    if !leaves(a, &shape, &mut out) {
+        return None;
+    }
+    let num = if !out.is_empty() && out.iter().all(|v| v.as_i64().is_some()) {
+        Num::I64(out.iter().filter_map(|v| v.as_i64()).collect())
+    } else {
+        Num::F64(out.iter().map(|v| v.as_f64().unwrap_or(f64::NAN)).collect())
+    };
+    Some((shape, num))
+}
+
+/// Flat row-major `values` of an N-d dataset of `shape` as nested rows, so
+/// a matrix keeps its shape through JSON.
+pub(crate) fn nest(values: Vec<Value>, shape: &[usize]) -> Value {
+    if shape.len() <= 1 {
+        return Value::Array(values);
+    }
+    let row: usize = shape[1..].iter().product();
+    if row == 0 {
+        return Value::Array(vec![nest(Vec::new(), &shape[1..]); shape[0]]);
+    }
+    let mut it = values.into_iter();
+    Value::Array(
+        (0..shape[0])
+            .map(|_| nest(it.by_ref().take(row).collect(), &shape[1..]))
+            .collect(),
+    )
 }
 
 /// Write `value` as `parent/name`. `null` has no HDF5 form and is skipped.
@@ -55,8 +125,17 @@ fn array<T: H5Type>(
 /// objects) is written as a group keyed "0", "1", ... — the closest AnnData
 /// has to a list — and so reads back as an object.
 pub(crate) fn write_json(parent: &Group, name: &str, value: &Value, enc: Encoding) -> Result<()> {
+    if let Value::Array(a) = value {
+        if let Some((shape, num)) = numeric_array(a) {
+            return match num {
+                Num::I64(v) => array_nd(parent, name, &shape, v, enc, "array"),
+                Num::F64(v) => array_nd(parent, name, &shape, v, enc, "array"),
+            };
+        }
+    }
     match value {
-        Value::Null => Ok(()),
+        // The readers skip what they can't carry, so null is a NaN.
+        Value::Null => scalar(parent, name, f64::NAN, enc, "numeric-scalar"),
         Value::Bool(b) => scalar(parent, name, *b, enc, "numeric-scalar"),
         Value::Number(n) => match (n.as_i64(), n.as_u64()) {
             (Some(i), _) => scalar(parent, name, i, enc, "numeric-scalar"),
@@ -74,20 +153,6 @@ pub(crate) fn write_json(parent: &Group, name: &str, value: &Value, enc: Encodin
             parent,
             name,
             a.iter().map(|v| v.as_bool() == Some(true)).collect(),
-            enc,
-            "array",
-        ),
-        Value::Array(a) if a.iter().all(|v| v.as_i64().is_some()) && !a.is_empty() => array(
-            parent,
-            name,
-            a.iter().filter_map(Value::as_i64).collect(),
-            enc,
-            "array",
-        ),
-        Value::Array(a) if a.iter().all(Value::is_number) => array(
-            parent,
-            name,
-            a.iter().filter_map(Value::as_f64).collect(),
             enc,
             "array",
         ),
@@ -118,7 +183,7 @@ pub(crate) fn write_json(parent: &Group, name: &str, value: &Value, enc: Encodin
 }
 
 /// Read the group at `path` as a JSON object. A dataset of a type with no
-/// JSON form (compound, opaque, ...) becomes `null`.
+/// JSON form (opaque, ...) is skipped with a warning; a NaN reads as `null`.
 pub(crate) fn read_json(file: &Group, path: &str) -> Result<Value> {
     let grp = file.group(path)?;
     let mut map = serde_json::Map::new();
@@ -127,14 +192,16 @@ pub(crate) fn read_json(file: &Group, path: &str) -> Result<Value> {
         let value = if file.dataset(&child).is_ok() {
             dataset_json(file, &child)?
         } else {
-            read_json(file, &child)?
+            Some(read_json(file, &child)?)
         };
-        map.insert(name, value);
+        if let Some(value) = value {
+            map.insert(name, value);
+        }
     }
     Ok(Value::Object(map))
 }
 
-fn dataset_json(file: &Group, path: &str) -> Result<Value> {
+fn dataset_json(file: &Group, path: &str) -> Result<Option<Value>> {
     let ds = file.dataset(path)?;
     let scalar = ds.ndim() == 0;
     fn vec_or_scalar<T: serde::Serialize>(scalar: bool, v: Vec<T>) -> Value {
@@ -146,7 +213,7 @@ fn dataset_json(file: &Group, path: &str) -> Result<Value> {
             serde_json::json!(v)
         }
     }
-    Ok(match ds.dtype()?.to_descriptor()? {
+    let v = match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::Boolean => vec_or_scalar(scalar, ds.read_raw::<bool>()?),
         TypeDescriptor::Integer(_) => vec_or_scalar(scalar, ds.read_raw::<i64>()?),
         TypeDescriptor::Unsigned(_) => vec_or_scalar(scalar, ds.read_raw::<u64>()?),
@@ -177,9 +244,14 @@ fn dataset_json(file: &Group, path: &str) -> Result<Value> {
         other => {
             let enc = crate::h5_str::read_str_attr(&ds, "encoding-type").unwrap_or_default();
             tracing::warn!("{path}: {enc} of type {other} has no JSON form; it is not carried");
-            Value::Null
+            return Ok(None);
         }
-    })
+    };
+    // A matrix (or higher) keeps its shape as nested rows.
+    Ok(Some(match v {
+        Value::Array(flat) if ds.ndim() >= 2 => nest(flat, &ds.shape()),
+        v => v,
+    }))
 }
 
 /// A 1-D compound dataset (an anndata rec-array, e.g. scanpy's
@@ -293,5 +365,56 @@ mod tests {
                 "a": [1.5, 0.25], "b": [-2, 7], "flag": [true, false], "name": ["CD3E", "MS4A1"]
             }})
         );
+    }
+
+    /// Regression (anndataR uns *_with_nas): JSON has no NaN, so a NaN
+    /// scalar was dropped, a vector with NaN came back as a dict of its other
+    /// entries, and every matrix was flattened. Now NaN survives as null ->
+    /// NaN and N-d arrays keep their shape.
+    #[test]
+    fn uns_nan_and_matrices_round_trip() {
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5").unwrap();
+        let f = hdf5::File::create(tmp.path()).unwrap();
+        let uns = f.create_group("uns").unwrap();
+        let nan = f64::NAN;
+        uns.new_dataset_builder()
+            .with_data(&ndarray::arr0(nan))
+            .create("scalar")
+            .unwrap();
+        uns.new_dataset_builder()
+            .with_data(&[nan, 0.5, nan])
+            .create("vec")
+            .unwrap();
+        uns.new_dataset_builder()
+            .with_data(&ndarray::array![[1.0, nan, 3.0], [4.0, 5.0, 6.0]])
+            .create("mat")
+            .unwrap();
+        uns.new_dataset_builder()
+            .with_data(&ndarray::array![[1i64, 2], [3, 4], [5, 6]])
+            .create("imat")
+            .unwrap();
+
+        let v = read_json(&f, "uns").unwrap();
+        let want = serde_json::json!({
+            "scalar": null,
+            "vec": [null, 0.5, null],
+            "mat": [[1.0, null, 3.0], [4.0, 5.0, 6.0]],
+            "imat": [[1, 2], [3, 4], [5, 6]],
+        });
+        assert_eq!(v, want);
+
+        let out = f.create_group("out").unwrap();
+        for (k, x) in v.as_object().unwrap() {
+            write_json(&out, k, x, Encoding::AnnData).unwrap();
+        }
+        assert_eq!(out.dataset("mat").unwrap().shape(), [2, 3]);
+        assert_eq!(out.dataset("imat").unwrap().shape(), [3, 2]);
+        assert!(out
+            .dataset("scalar")
+            .unwrap()
+            .read_scalar::<f64>()
+            .unwrap()
+            .is_nan());
+        assert_eq!(read_json(&f, "out").unwrap(), want);
     }
 }
