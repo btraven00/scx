@@ -27,7 +27,7 @@ use scx_core::{
     h5ad::{H5AdReader, H5AdWriter},
     ir::{
         Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        SparseMatrixMeta, UnsArray, UnsData, UnsTable, VarTable, Varm, UNS_TYPED_MIN,
     },
     stream::{DatasetReader, DatasetWriter},
 };
@@ -262,11 +262,20 @@ fn make_h5ad_with_uns(path: &Path, n_obs: usize, n_vars: usize) {
             index: (0..n_vars).map(|i| format!("gene_{i}")).collect(),
             columns: vec![],
         };
+        // Large arrays are carried typed: one under a JSON entry, one alone.
+        let big = |v: f32| UnsArray {
+            shape: vec![UNS_TYPED_MIN],
+            data: UnsData::F32(vec![v; UNS_TYPED_MIN]),
+        };
         let uns = UnsTable {
             raw: serde_json::json!({
                 "neighbors": { "method": "umap", "n_neighbors": 15 }
             }),
-            ..Default::default()
+            arrays: [
+                ("neighbors/dist".to_string(), big(0.5)),
+                ("image".to_string(), big(2.0)),
+            ]
+            .into(),
         };
         let mut writer = H5AdWriter::create(path, n_obs, n_vars, DataType::F32).unwrap();
         writer.write_obs(&obs).await.unwrap();
@@ -500,6 +509,24 @@ fn test_merge_create_uns() {
                 neighbors.get("method").is_some(),
                 "nested uns key not preserved: {neighbors:?}"
             );
+            assert_eq!(uns.arrays["neighbors/dist"].data.at(0), 0.5);
+            assert!(!uns.arrays.contains_key("image"), "unpatched key copied");
+        });
+    });
+
+    // An entry that is only a typed array patches too.
+    assert_success(&scx(&[
+        "merge",
+        "--into",
+        out.to_str().unwrap(),
+        "--patch",
+        &format!("{}:uns/image", patch.display()),
+    ]));
+    with_hdf5(|| {
+        futures::executor::block_on(async {
+            let uns = H5AdReader::open(&out, 5).unwrap().uns().await.unwrap();
+            assert_eq!(uns.arrays["image"].shape, [UNS_TYPED_MIN]);
+            assert_eq!(uns.arrays["image"].data.at(7), 2.0);
         });
     });
 }

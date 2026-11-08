@@ -1401,5 +1401,26 @@ mod tests {
             d.details,
             ["spatial/img: 1 values differ, first at 5: 5 vs 6"]
         );
+
+        let mut other = typed.clone();
+        let img = other.arrays.remove("spatial/img").unwrap();
+        other.arrays.insert(
+            "spatial/img".into(),
+            UnsArray {
+                shape: vec![UNS_TYPED_MIN],
+                ..img.clone()
+            },
+        );
+        other.arrays.insert("extra".into(), img);
+        let d = compare_uns(&typed, &other, &o);
+        assert_eq!(
+            d.details,
+            [
+                "extra: only in B".to_string(),
+                format!("spatial/img: shape [16384, 4] vs [{UNS_TYPED_MIN}]"),
+            ]
+        );
+        let d = compare_uns(&other, &typed, &o);
+        assert_eq!(d.details[0], "extra: only in A");
     }
 }

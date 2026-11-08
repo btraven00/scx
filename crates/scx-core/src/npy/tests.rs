@@ -307,3 +307,41 @@ async fn test_dataset_reader_stream() {
     let total_nnz: usize = chunks.iter().map(|c| c.data.indices.len()).sum();
     assert_eq!(total_nnz, ds.x.indices.len());
 }
+
+/// Typed uns arrays go into uns.json as nested JSON on both write paths, and
+/// read back with the same values once split out again.
+#[test]
+fn typed_uns_arrays_survive_a_snapshot() {
+    use crate::ir::{UnsArray, UnsData, UNS_TYPED_MIN as N};
+    let mut ds = synthetic_dataset();
+    ds.uns = UnsTable {
+        raw: serde_json::json!({"k": 1}),
+        arrays: [(
+            "spatial/img".to_string(),
+            UnsArray {
+                shape: vec![N / 2, 2],
+                data: UnsData::U8((0..N).map(|i| i as u8).collect()),
+            },
+        )]
+        .into(),
+    };
+    let want: Vec<i64> = (0..N).map(|i| i as u8 as i64).collect();
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    NpyIrWriter::write(a.path(), &ds, &SlotFilter::all()).unwrap();
+    let mut reader = NpyIrReader::open(a.path(), 1000).unwrap();
+    futures::executor::block_on(NpyIrWriter::stream(
+        b.path(),
+        &mut reader,
+        &SlotFilter::all(),
+        1000,
+    ))
+    .unwrap();
+    for dir in [a.path(), b.path()] {
+        let mut uns = NpyIrReader::open(dir, 1000).unwrap().into_dataset().uns;
+        uns.split_large();
+        assert_eq!(uns.raw, serde_json::json!({"k": 1, "spatial": {}}));
+        let img = &uns.arrays["spatial/img"];
+        assert_eq!(img.shape, [N / 2, 2]);
+        assert_eq!(img.data, UnsData::I64(want.clone()));
+    }
+}
