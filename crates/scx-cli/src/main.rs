@@ -880,6 +880,10 @@ async fn run() -> anyhow::Result<()> {
                     let summary = read_tenx_summary(input_path)?;
                     print_tenx_summary(&summary);
                 }
+                Some(Format::Visium) => {
+                    let mut r = TenxH5Reader::open_visium(input_path, chunk)?;
+                    inspect(&mut r, &input, "10x Visium").await?;
+                }
                 Some(Format::Mtx) => {
                     let mut r = scx_core::mtx::MtxReader::open(input_path, chunk)?;
                     inspect(&mut r, &input, "MatrixMarket").await?;

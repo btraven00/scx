@@ -32,18 +32,24 @@ use crate::error::{Result, ScxError};
 /// asking for strings from an integer dataset has a bug, and silence is how the
 /// original defect stayed invisible.
 pub fn read_str_1d(ds: &hdf5::Dataset) -> Result<Vec<String>> {
+    read_strs(ds, &ds.name())
+}
+
+/// The strings of a dataset or attribute (any rank, flattened); `what` names
+/// it in errors.
+fn read_strs(ds: &hdf5::Container, what: &str) -> Result<Vec<String>> {
     if ds.size() == 0 {
         return Ok(Vec::new());
     }
     let desc = ds.dtype()?.to_descriptor()?;
     Ok(match desc {
         TypeDescriptor::VarLenUnicode => ds
-            .read_1d::<VarLenUnicode>()?
+            .read_raw::<VarLenUnicode>()?
             .into_iter()
             .map(|s| s.to_string())
             .collect(),
         TypeDescriptor::VarLenAscii => ds
-            .read_1d::<VarLenAscii>()?
+            .read_raw::<VarLenAscii>()?
             .into_iter()
             .map(|s| s.to_string())
             .collect(),
@@ -65,24 +71,23 @@ pub fn read_str_1d(ds: &hdf5::Dataset) -> Result<Vec<String>> {
         },
         other => {
             return Err(ScxError::InvalidFormat(format!(
-                "expected a string dataset at '{}', found {other:?}",
-                ds.name()
+                "expected strings at '{what}', found {other:?}"
             )))
         }
     })
 }
 
-fn fixed_ascii<const N: usize>(ds: &hdf5::Dataset) -> Result<Vec<String>> {
+fn fixed_ascii<const N: usize>(ds: &hdf5::Container) -> Result<Vec<String>> {
     Ok(ds
-        .read_1d::<FixedAscii<N>>()?
+        .read_raw::<FixedAscii<N>>()?
         .into_iter()
         .map(|s| s.trim_end_matches('\0').to_string())
         .collect())
 }
 
-fn fixed_unicode<const N: usize>(ds: &hdf5::Dataset) -> Result<Vec<String>> {
+fn fixed_unicode<const N: usize>(ds: &hdf5::Container) -> Result<Vec<String>> {
     Ok(ds
-        .read_1d::<FixedUnicode<N>>()?
+        .read_raw::<FixedUnicode<N>>()?
         .into_iter()
         .map(|s| s.trim_end_matches('\0').to_string())
         .collect())
@@ -120,29 +125,15 @@ pub(crate) fn write_strings(
     Ok(grp.new_dataset_builder().with_data(&vals).create(name)?)
 }
 
-/// A string attribute: scalar or the first element of a 1-D array, UTF-8 or
-/// ASCII (BPCells writes scalars, some tools length-1 arrays).
+/// A string attribute: scalar or the first element of an array, variable- or
+/// fixed-length (BPCells writes scalars, some tools length-1 arrays, Space
+/// Ranger fixed-length bytes).
 pub(crate) fn read_str_attr(loc: &hdf5::Location, name: &str) -> Result<String> {
     let attr = loc.attr(name)?;
-    if let Ok(s) = attr.read_scalar::<VarLenUnicode>() {
-        return Ok(s.to_string());
-    }
-    if let Ok(s) = attr.read_scalar::<VarLenAscii>() {
-        return Ok(s.to_string());
-    }
-    if let Ok(a) = attr.read_1d::<VarLenUnicode>() {
-        if let Some(s) = a.first() {
-            return Ok(s.to_string());
-        }
-    }
-    if let Ok(a) = attr.read_1d::<VarLenAscii>() {
-        if let Some(s) = a.first() {
-            return Ok(s.to_string());
-        }
-    }
-    Err(ScxError::InvalidFormat(format!(
-        "attribute '{name}' is not a string"
-    )))
+    read_strs(&attr, name)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .ok_or_else(|| ScxError::InvalidFormat(format!("attribute '{name}' is not a string")))
 }
 
 /// A 1-D string-array attribute, UTF-8 or ASCII. An empty attribute of any
@@ -152,15 +143,8 @@ pub(crate) fn read_str_array_attr(loc: &hdf5::Location, name: &str) -> Result<Ve
     if attr.size() == 0 {
         return Ok(Vec::new());
     }
-    if let Ok(a) = attr.read_raw::<VarLenUnicode>() {
-        return Ok(a.iter().map(|s| s.to_string()).collect());
-    }
-    if let Ok(a) = attr.read_raw::<VarLenAscii>() {
-        return Ok(a.iter().map(|s| s.to_string()).collect());
-    }
-    Err(ScxError::InvalidFormat(format!(
-        "attribute '{name}' is not a string array"
-    )))
+    read_strs(&attr, name)
+        .map_err(|_| ScxError::InvalidFormat(format!("attribute '{name}' is not a string array")))
 }
 
 /// Set the scalar string attribute `name`, replacing an existing one.

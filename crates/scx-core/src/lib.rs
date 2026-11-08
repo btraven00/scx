@@ -45,6 +45,7 @@ pub mod subset;
 pub mod tenx;
 pub mod transpose;
 pub mod validate;
+pub mod visium;
 #[cfg(feature = "zarr")]
 pub mod zarr_ad;
 

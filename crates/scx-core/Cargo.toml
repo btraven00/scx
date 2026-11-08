@@ -66,6 +66,8 @@ hdf5-sys = { package = "hdf5-metno-sys", version = "0.12" }
 # no C library, so the R staticlib links as before.
 flate2 = { version = "1", features = ["zlib-rs"] }
 memmap2 = "0.9"
+# Visium tissue images (spatial/tissue_*_image.png).
+png = "0.18"
 ndarray = "0.17"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }

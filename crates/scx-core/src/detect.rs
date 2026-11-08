@@ -8,6 +8,7 @@
 //! | H5AD     | Root attr `encoding-type = "anndata"` |
 //! | H5Seurat | Root dataset `cell.names` + root attr `active.assay` |
 //! | TenxH5   | `/matrix` group with `/matrix/barcodes` + `/matrix/features` |
+//! | Visium   | Directory with `filtered_feature_bc_matrix.h5` + `spatial/` |
 //! | Bixverse | File (or `counts_cells.bin` in a directory) starting with the magic `SCRNASEQ` |
 //! | ZarrAd   | Directory with `.zgroup` (Zarr v2) or `zarr.json` (Zarr v3)      |
 //! | PlainH5  | Any valid HDF5 file not matching the above |
@@ -31,6 +32,8 @@ pub enum Format {
     BPCells,
     /// 10x Genomics HDF5 feature-barcode matrix (Cell Ranger output).
     TenxH5,
+    /// 10x Visium: a Space Ranger `outs/` directory (filtered matrix + `spatial/`).
+    Visium,
     /// Parquet (one cell per row, sparse list columns) — local or object-store.
     Parquet,
     /// MatrixMarket sparse matrix: a `.mtx[.gz]` file or a 10x MEX directory.
@@ -54,6 +57,7 @@ impl Format {
             Format::NpyDir => "NpyDir",
             Format::BPCells => "BPCells",
             Format::TenxH5 => "10x HDF5",
+            Format::Visium => "10x Visium",
             Format::Parquet => "Parquet",
             Format::Mtx => "MatrixMarket",
             Format::ZarrAd => "Zarr (AnnData)",
@@ -151,6 +155,9 @@ pub fn sniff_dir(path: &Path) -> Option<Format> {
     }
     if path.join("meta.json").exists() {
         return Some(Format::NpyDir);
+    }
+    if crate::visium::is_outs_dir(path) {
+        return Some(Format::Visium);
     }
     if path.join("version").exists() && path.join("storage_order").exists() {
         return Some(Format::BPCells);

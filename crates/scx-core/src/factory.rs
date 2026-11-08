@@ -114,6 +114,7 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
             None,
         )?),
         Format::TenxH5 => Box::new(TenxH5Reader::open(path, cs)?),
+        Format::Visium => Box::new(TenxH5Reader::open_visium(path, cs)?),
         Format::Mtx => Box::new(crate::mtx::MtxReader::open(path, cs)?),
         Format::NpyDir => Box::new(NpyIrReader::open(path, cs)?),
         Format::BPCells if opts.metadata_only => {

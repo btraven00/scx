@@ -10,7 +10,7 @@ use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::h5::{read_u64, read_u64_range, read_vec};
 use crate::h5_str::read_strings;
-use crate::ir::{Column, ColumnData, MatrixChunk, ObsTable, VarTable};
+use crate::ir::{Column, ColumnData, Embeddings, MatrixChunk, ObsTable, UnsTable, VarTable};
 use crate::stream::{
     load_indptr, normalize_ranges, read_block, row_range_chunks, stream_indptr, ChunkStream,
     DatasetReader,
@@ -116,9 +116,20 @@ pub struct TenxH5Reader {
     indptr: OnceLock<Vec<u64>>,
     chunk_size: usize,
     dtype: DataType,
+    /// Space Ranger `spatial/` folder, for a Visium `outs/` directory.
+    spatial: Option<PathBuf>,
 }
 
 impl TenxH5Reader {
+    /// A Space Ranger `outs/` directory: its filtered matrix plus `spatial/`
+    /// (see [`crate::visium`]).
+    pub fn open_visium<P: AsRef<Path>>(outs: P, chunk_size: usize) -> Result<Self> {
+        let outs = outs.as_ref();
+        let mut r = Self::open(outs.join(crate::visium::MATRIX), chunk_size)?;
+        r.spatial = Some(outs.join("spatial"));
+        Ok(r)
+    }
+
     pub fn open<P: AsRef<Path>>(path: P, chunk_size: usize) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
@@ -169,6 +180,7 @@ impl TenxH5Reader {
             indptr: OnceLock::new(),
             chunk_size,
             dtype,
+            spatial: None,
         })
     }
 
@@ -287,10 +299,29 @@ impl DatasetReader for TenxH5Reader {
     async fn obs(&mut self) -> Result<ObsTable> {
         let file = File::open(&self.path)?;
         let index = read_strings(&file, "matrix/barcodes")?;
-        Ok(ObsTable {
-            index,
-            columns: Vec::new(),
-        })
+        let columns = match &self.spatial {
+            Some(sp) => crate::visium::obs_and_spatial(sp, &index)?.0,
+            None => Vec::new(),
+        };
+        Ok(ObsTable { index, columns })
+    }
+
+    async fn obsm(&mut self) -> Result<Embeddings> {
+        let mut obsm = Embeddings::default();
+        if let Some(sp) = &self.spatial {
+            let file = File::open(&self.path)?;
+            let index = read_strings(&file, "matrix/barcodes")?;
+            let xy = crate::visium::obs_and_spatial(sp, &index)?.1;
+            obsm.map.insert("spatial".into(), xy);
+        }
+        Ok(obsm)
+    }
+
+    async fn uns(&mut self) -> Result<UnsTable> {
+        match &self.spatial {
+            Some(sp) => crate::visium::uns(sp, &self.path),
+            None => Ok(UnsTable::default()),
+        }
     }
 
     async fn var(&mut self) -> Result<VarTable> {
@@ -493,6 +524,88 @@ mod tests {
     }
 
     // ── tests ────────────────────────────────────────────────────────────────
+
+    /// A Space Ranger `outs/` directory reads as the matrix plus its spatial
+    /// metadata, with Space Ranger's fixed-length byte-string attributes.
+    #[test]
+    fn visium_outs_dir_adds_positions_and_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let outs = dir.path();
+        let h5 = outs.join(crate::visium::MATRIX);
+        write_standard(&h5);
+        let f = File::open_rw(&h5).unwrap();
+        f.new_attr::<FixedAscii<8>>()
+            .shape(1)
+            .create("library_ids")
+            .unwrap()
+            .write(&[FixedAscii::<8>::from_ascii("lib1").unwrap()])
+            .unwrap();
+        f.new_attr::<FixedAscii<16>>()
+            .create("chemistry_description")
+            .unwrap()
+            .write_scalar(&FixedAscii::<16>::from_ascii("Spatial 3' v1").unwrap())
+            .unwrap();
+        drop(f);
+        let sp = outs.join("spatial");
+        std::fs::create_dir(&sp).unwrap();
+        // Rows out of order, one spot (ACGT) off tissue and not in the matrix.
+        std::fs::write(
+            sp.join("tissue_positions.csv"),
+            "barcode,in_tissue,array_row,array_col,pxl_row_in_fullres,pxl_col_in_fullres\n\
+             TTT,1,3,13,300,1300\nACGT,0,9,9,9,9\nAAA,1,0,10,0,1000\n\
+             GGG,1,2,12,200,1200\nCCC,1,1,11,100,1100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sp.join("scalefactors_json.json"),
+            r#"{"spot_diameter_fullres": 89.4, "tissue_hires_scalef": 0.17}"#,
+        )
+        .unwrap();
+        // A 2x3 RGB image: pixel k has value k in every channel.
+        let png = sp.join("tissue_hires_image.png");
+        let mut enc = png::Encoder::new(std::fs::File::create(&png).unwrap(), 3, 2);
+        enc.set_color(png::ColorType::Rgb);
+        let px: Vec<u8> = (0..6u8).flat_map(|k| [k; 3]).collect();
+        enc.write_header().unwrap().write_image_data(&px).unwrap();
+
+        assert_eq!(
+            crate::detect::detect(outs),
+            Some(crate::detect::Format::Visium)
+        );
+        let mut r = TenxH5Reader::open_visium(outs, 2).unwrap();
+        let obs = block_on(r.obs()).unwrap();
+        let col = |n: &str| match &obs.columns.iter().find(|c| c.name == n).unwrap().data {
+            ColumnData::Int64(v) => v.clone(),
+            other => panic!("{n}: {other:?}"),
+        };
+        assert_eq!(col("in_tissue"), [1, 1, 1, 1]);
+        assert_eq!(col("array_row"), [0, 1, 2, 3]);
+        assert_eq!(col("array_col"), [10, 11, 12, 13]);
+        let xy = &block_on(r.obsm()).unwrap().map["spatial"];
+        assert_eq!(xy.shape, (4, 2));
+        assert_eq!(xy.data, [1000., 0., 1100., 100., 1200., 200., 1300., 300.]);
+
+        let uns = block_on(r.uns()).unwrap();
+        let lib = &uns.raw["spatial"]["lib1"];
+        assert_eq!(lib["scalefactors"]["tissue_hires_scalef"], 0.17);
+        assert_eq!(lib["metadata"]["chemistry_description"], "Spatial 3' v1");
+        let img = &uns.arrays["spatial/lib1/images/hires"];
+        assert_eq!(img.shape, [2, 3, 3]);
+        assert_eq!(img.data, crate::ir::UnsData::U8(px));
+        assert!(!uns.arrays.contains_key("spatial/lib1/images/lowres"));
+    }
+
+    #[test]
+    fn visium_barcode_missing_from_positions_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_standard(&dir.path().join(crate::visium::MATRIX));
+        let sp = dir.path().join("spatial");
+        std::fs::create_dir(&sp).unwrap();
+        std::fs::write(sp.join("tissue_positions_list.csv"), "AAA,1,0,0,0,0\n").unwrap();
+        let mut r = TenxH5Reader::open_visium(dir.path(), 2).unwrap();
+        let e = block_on(r.obs()).unwrap_err().to_string();
+        assert!(e.contains("barcode CCC not in"), "{e}");
+    }
 
     #[test]
     fn open_reads_shape_dtype_indptr() {
