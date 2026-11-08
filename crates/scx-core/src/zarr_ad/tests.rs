@@ -891,3 +891,54 @@ async fn typed_uns_arrays_round_trip_in_every_format() {
         assert_eq!(got.keys(), uns.keys(), "{name}");
     }
 }
+
+/// X streamed in chunks that straddle zarr chunk boundaries and fill more
+/// than one buffered store (8 zarr chunks) reads back exactly.
+#[tokio::test]
+async fn writer_x_across_buffered_chunk_stores() {
+    use crate::dtype::{DataType, TypedVec};
+    use crate::ir::{ObsTable, SparseMatrixCSR};
+    let (n_vars, row_nnz) = (6_000_000usize, [5_000_001usize, 4_000_003, 7]);
+    let row = |r: usize| -> (Vec<u32>, Vec<i32>) {
+        let idx = (0..row_nnz[r]).map(|k| k as u32).collect();
+        let val = (0..row_nnz[r]).map(|k| (k * 3 + r) as i32).collect();
+        (idx, val)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("big.zarr");
+    let mut w = ZarrAdWriter::create(&out, 3, n_vars, DataType::I32).unwrap();
+    w.write_obs(&ObsTable {
+        index: vec!["a".into(), "b".into(), "c".into()],
+        columns: vec![],
+    })
+    .await
+    .unwrap();
+    for r in 0..3 {
+        let (indices, data) = row(r);
+        w.write_x_chunk(&MatrixChunk {
+            row_offset: r,
+            nrows: 1,
+            data: SparseMatrixCSR {
+                shape: (1, n_vars),
+                indptr: vec![0, row_nnz[r] as u64],
+                indices,
+                data: TypedVec::I32(data),
+            },
+        })
+        .await
+        .unwrap();
+    }
+    w.finalize().await.unwrap();
+
+    let mut rd = ZarrAdReader::open(&out, 1).unwrap();
+    let mut s = rd.x_stream();
+    let mut r = 0;
+    while let Some(c) = s.next().await {
+        let c = c.unwrap();
+        let (idx, val) = row(r);
+        assert_eq!(c.data.indices, idx, "row {r} indices");
+        assert_eq!(c.data.data, TypedVec::I32(val), "row {r} data");
+        r += 1;
+    }
+    assert_eq!(r, 3);
+}
