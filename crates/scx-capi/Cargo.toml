@@ -14,8 +14,8 @@ name = "scx_capi"
 crate-type = ["cdylib"]
 
 [features]
-# Self-contained local build. Yggdrasil builds with --no-default-features and
-# links HDF5_jll instead.
+# Self-contained build: HDF5 from source, linked statically. Yggdrasil builds the same
+# way (see yggdrasil/build_tarballs.jl); HDF5_jll is MPI-only since 1.14.
 default = ["vendored-hdf5"]
 vendored-hdf5 = ["scx-core/vendored-hdf5"]
 
