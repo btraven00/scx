@@ -913,14 +913,14 @@ async fn writer_x_across_buffered_chunk_stores() {
     })
     .await
     .unwrap();
-    for r in 0..3 {
+    for (r, &nnz) in row_nnz.iter().enumerate() {
         let (indices, data) = row(r);
         w.write_x_chunk(&MatrixChunk {
             row_offset: r,
             nrows: 1,
             data: SparseMatrixCSR {
                 shape: (1, n_vars),
-                indptr: vec![0, row_nnz[r] as u64],
+                indptr: vec![0, nnz as u64],
                 indices,
                 data: TypedVec::I32(data),
             },
