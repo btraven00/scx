@@ -3879,6 +3879,7 @@ dependencies = [
 name = "scx-core"
 version = "0.5.0"
 dependencies = [
+ "ahash",
  "arrow",
  "async-stream",
  "async-trait",
