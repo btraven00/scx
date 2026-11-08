@@ -100,8 +100,14 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
         )
         .into());
     }
-    let fmt = detect::detect(path)
-        .ok_or_else(|| ScxError::InvalidFormat(format!("could not detect format of '{input}'")))?;
+    let fmt = detect::detect(path).ok_or_else(|| {
+        let hint = if path.join("binned_outputs").is_dir() {
+            "; for Visium HD, pass one bin, e.g. binned_outputs/square_008um"
+        } else {
+            ""
+        };
+        ScxError::InvalidFormat(format!("could not detect format of '{input}'{hint}"))
+    })?;
     let cs = opts.chunk_size;
 
     let reader: Box<dyn DatasetReader + Send> = match fmt {

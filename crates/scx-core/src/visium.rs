@@ -11,8 +11,12 @@
 //! `chemistry_description` and `software_version`. Images stay in their PNG
 //! sample type (uint8, as CELLxGENE stores them), not scanpy's float32 in [0, 1].
 //!
-//! TODO: Visium HD (`tissue_positions.parquet`, binned outputs) and the
-//! full-resolution microscope image, which Space Ranger does not copy into `outs/`.
+//! Visium HD reads one bin size at a time: pass a bin directory, e.g.
+//! `outs/binned_outputs/square_008um`, which has the same layout with
+//! `tissue_positions.parquet`.
+//!
+//! TODO: the full-resolution microscope image, which Space Ranger does not
+//! copy into `outs/`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,61 +33,143 @@ pub(crate) fn is_outs_dir(dir: &Path) -> bool {
     dir.join(MATRIX).is_file() && dir.join("spatial").is_dir()
 }
 
-/// One spot's row of `tissue_positions.csv`.
+/// One spot's (or Visium HD bin's) row of the positions table.
 struct Spot {
     in_tissue: i64,
     array_row: i64,
     array_col: i64,
-    pxl_row: i64,
-    pxl_col: i64,
+    pxl_row: f64,
+    pxl_col: f64,
 }
 
 /// The positions of `barcodes`, in order. Space Ranger 2+ writes
 /// `tissue_positions.csv` with a header, 1.x `tissue_positions_list.csv`
-/// without; both have the same six columns.
+/// without, Visium HD `tissue_positions.parquet`; all have the same six
+/// columns.
 fn positions(spatial: &Path, barcodes: &[String]) -> Result<Vec<Spot>> {
-    let path = ["tissue_positions.csv", "tissue_positions_list.csv"]
+    let path = [
+        "tissue_positions.parquet",
+        "tissue_positions.csv",
+        "tissue_positions_list.csv",
+    ]
+    .iter()
+    .map(|f| spatial.join(f))
+    .find(|p| p.is_file())
+    .ok_or_else(|| {
+        ScxError::InvalidFormat(format!("no tissue_positions in {}", spatial.display()))
+    })?;
+    let rows = if path.extension().is_some_and(|e| e == "parquet") {
+        read_parquet(&path)?
+    } else {
+        read_csv(&path)?
+    };
+    join(rows, barcodes)
+        .map_err(|b| ScxError::InvalidFormat(format!("barcode {b} not in {}", path.display())))
+}
+
+/// `rows` picked out in `barcodes` order; on failure, the missing barcode.
+/// Space Ranger lists the filtered barcodes in the positions' order, so one
+/// forward walk usually does; a hash join covers any other order.
+fn join(rows: Vec<(String, Spot)>, barcodes: &[String]) -> std::result::Result<Vec<Spot>, String> {
+    let mut want = barcodes.iter().peekable();
+    if rows
         .iter()
-        .map(|f| spatial.join(f))
-        .find(|p| p.is_file())
-        .ok_or_else(|| {
-            ScxError::InvalidFormat(format!("no tissue_positions.csv in {}", spatial.display()))
-        })?;
-    let text = std::fs::read_to_string(&path)?;
-    let bad = |line: &str| ScxError::InvalidFormat(format!("{}: bad row '{line}'", path.display()));
-    let mut spots = HashMap::new();
-    for line in text
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("barcode"))
+        .filter(|(b, _)| want.next_if(|w| *w == b).is_some())
+        .count()
+        == barcodes.len()
     {
-        let f: Vec<&str> = line.split(',').collect();
-        if f.len() != 6 {
-            return Err(bad(line));
-        }
-        let n: Vec<i64> = f[1..]
-            .iter()
-            .map(|s| s.trim().parse::<f64>().map(|x| x.round() as i64))
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|_| bad(line))?;
-        spots.insert(
-            f[0],
-            Spot {
-                in_tissue: n[0],
-                array_row: n[1],
-                array_col: n[2],
-                pxl_row: n[3],
-                pxl_col: n[4],
-            },
-        );
+        let mut want = barcodes.iter().peekable();
+        return Ok(rows
+            .into_iter()
+            .filter(|(b, _)| want.next_if(|w| *w == b).is_some())
+            .map(|(_, s)| s)
+            .collect());
     }
+    let mut by_barcode: HashMap<String, Spot> = rows.into_iter().collect();
     barcodes
         .iter()
-        .map(|b| {
-            spots.remove(b.as_str()).ok_or_else(|| {
-                ScxError::InvalidFormat(format!("barcode {b} not in {}", path.display()))
-            })
+        .map(|b| by_barcode.remove(b).ok_or_else(|| b.clone()))
+        .collect()
+}
+
+fn read_csv(path: &Path) -> Result<Vec<(String, Spot)>> {
+    let text = std::fs::read_to_string(path)?;
+    let bad = |line: &str| ScxError::InvalidFormat(format!("{}: bad row '{line}'", path.display()));
+    text.lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("barcode"))
+        .map(|line| {
+            let f: Vec<&str> = line.split(',').collect();
+            let n: Vec<f64> = f
+                .get(1..6)
+                .filter(|_| f.len() == 6)
+                .ok_or_else(|| bad(line))?
+                .iter()
+                .map(|s| s.trim().parse::<f64>())
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|_| bad(line))?;
+            Ok((f[0].to_string(), spot(&n)))
         })
         .collect()
+}
+
+/// `[in_tissue, array_row, array_col, pxl_row, pxl_col]` as a [`Spot`].
+fn spot(n: &[f64]) -> Spot {
+    Spot {
+        in_tissue: n[0] as i64,
+        array_row: n[1] as i64,
+        array_col: n[2] as i64,
+        pxl_row: n[3],
+        pxl_col: n[4],
+    }
+}
+
+fn read_parquet(path: &Path) -> Result<Vec<(String, Spot)>> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::record::Field;
+    let err = |e: parquet::errors::ParquetError| {
+        ScxError::InvalidFormat(format!("{}: {e}", path.display()))
+    };
+    let names = [
+        "in_tissue",
+        "array_row",
+        "array_col",
+        "pxl_row_in_fullres",
+        "pxl_col_in_fullres",
+    ];
+    let reader = SerializedFileReader::new(std::fs::File::open(path)?).map_err(err)?;
+    let mut out = Vec::with_capacity(reader.metadata().file_metadata().num_rows() as usize);
+    for row in reader.get_row_iter(None).map_err(err)? {
+        let row = row.map_err(err)?;
+        let (mut barcode, mut n) = (None, [f64::NAN; 5]);
+        for (name, field) in row.get_column_iter() {
+            let v = match field {
+                Field::Str(s) if name == "barcode" => {
+                    barcode = Some(s.clone());
+                    continue;
+                }
+                Field::Byte(x) => *x as f64,
+                Field::Short(x) => *x as f64,
+                Field::Int(x) => *x as f64,
+                Field::Long(x) => *x as f64,
+                Field::Float(x) => *x as f64,
+                Field::Double(x) => *x,
+                _ => continue,
+            };
+            if let Some(i) = names.iter().position(|n| n == name) {
+                n[i] = v;
+            }
+        }
+        match barcode {
+            Some(b) if n.iter().all(|x| !x.is_nan()) => out.push((b, spot(&n))),
+            _ => {
+                return Err(ScxError::InvalidFormat(format!(
+                    "{}: a row lacks barcode or one of {names:?}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// obs columns and obsm `spatial` for `barcodes`.
@@ -105,10 +191,7 @@ pub(crate) fn obs_and_spatial(
     ];
     let xy = DenseMatrix {
         shape: (spots.len(), 2),
-        data: spots
-            .iter()
-            .flat_map(|s| [s.pxl_col as f64, s.pxl_row as f64])
-            .collect(),
+        data: spots.iter().flat_map(|s| [s.pxl_col, s.pxl_row]).collect(),
     };
     Ok((columns, xy))
 }
