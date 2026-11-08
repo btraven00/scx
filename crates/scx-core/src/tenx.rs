@@ -595,6 +595,66 @@ mod tests {
         assert!(!uns.arrays.contains_key("spatial/lib1/images/lowres"));
     }
 
+    /// A Visium HD bin directory: positions in parquet, float pixel
+    /// coordinates, an extra off-tissue bin, rows in the matrix's order.
+    #[test]
+    fn visium_hd_bin_dir_reads_parquet_positions() {
+        use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int32Type};
+        use parquet::file::writer::SerializedFileWriter;
+        let dir = tempfile::tempdir().unwrap();
+        write_standard(&dir.path().join(crate::visium::MATRIX));
+        let sp = dir.path().join("spatial");
+        std::fs::create_dir(&sp).unwrap();
+        let schema = std::sync::Arc::new(
+            parquet::schema::parser::parse_message_type(
+                "message s { required binary barcode (UTF8); required int32 in_tissue;
+                 required int32 array_row; required int32 array_col;
+                 required double pxl_row_in_fullres; required double pxl_col_in_fullres; }",
+            )
+            .unwrap(),
+        );
+        let f = std::fs::File::create(sp.join("tissue_positions.parquet")).unwrap();
+        let mut w = SerializedFileWriter::new(f, schema, Default::default()).unwrap();
+        let mut rg = w.next_row_group().unwrap();
+        let bc: Vec<ByteArray> = ["AAA", "OFF", "CCC", "GGG", "TTT"]
+            .map(ByteArray::from)
+            .to_vec();
+        let ints = [
+            vec![1, 0, 1, 1, 1],
+            vec![0, 9, 1, 2, 3],
+            vec![5, 9, 6, 7, 8],
+        ];
+        let px = [
+            vec![0.5, 9., 1.5, 2.5, 3.5],
+            vec![10.25, 9., 11.25, 12.25, 13.25],
+        ];
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<ByteArrayType>()
+            .write_batch(&bc, None, None)
+            .unwrap();
+        col.close().unwrap();
+        for v in &ints {
+            let mut col = rg.next_column().unwrap().unwrap();
+            col.typed::<Int32Type>().write_batch(v, None, None).unwrap();
+            col.close().unwrap();
+        }
+        for v in &px {
+            let mut col = rg.next_column().unwrap().unwrap();
+            col.typed::<DoubleType>()
+                .write_batch(v, None, None)
+                .unwrap();
+            col.close().unwrap();
+        }
+        rg.close().unwrap();
+        w.close().unwrap();
+
+        let mut r = TenxH5Reader::open_visium(dir.path(), 2).unwrap();
+        let obs = block_on(r.obs()).unwrap();
+        assert!(matches!(&obs.columns[1].data, ColumnData::Int64(v) if v == &[0, 1, 2, 3]));
+        let xy = &block_on(r.obsm()).unwrap().map["spatial"];
+        assert_eq!(xy.data, [10.25, 0.5, 11.25, 1.5, 12.25, 2.5, 13.25, 3.5]);
+    }
+
     #[test]
     fn visium_barcode_missing_from_positions_is_error() {
         let dir = tempfile::tempdir().unwrap();

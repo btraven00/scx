@@ -28,7 +28,9 @@ zarr = ["dep:zarrs"]
 net = [
     "dep:tokio",
     "dep:object_store",
-    "dep:parquet",
+    "parquet/default",
+    "parquet/async",
+    "parquet/object_store",
     "dep:arrow",
     "dep:async-stream",
     "dep:url",
@@ -46,7 +48,7 @@ bixverse = ["dep:bixverse-sc-data"]
 # Typed obs/var sidecars (obs.parquet / var.parquet) for the bixverse reader.
 # Sync reader only: no tokio or object_store, unlike `net`. Same parquet/arrow
 # pins as `net`, so enabling both unifies.
-bixverse-parquet = ["bixverse", "dep:parquet", "dep:arrow"]
+bixverse-parquet = ["bixverse", "parquet/default", "dep:arrow"]
 
 [dependencies]
 async-trait = "0.1"
@@ -88,7 +90,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = tr
 # ObjectStore trait our InMemory/S3 handles satisfy is the same type the
 # parquet async reader consumes (a version split would break the trait object).
 object_store = { version = "0.13", optional = true }
-parquet = { version = "59", features = ["async", "object_store"], optional = true }
+# Always on without arrow, for Visium HD tissue_positions.parquet (the record
+# API reads six columns); `net` and `bixverse-parquet` turn on its defaults.
+parquet = { version = "59", default-features = false, features = ["snap", "zstd", "flate2", "flate2-zlib-rs"] }
 arrow = { version = "59", optional = true }
 # Lets x_stream() defer the async footer read into the returned Stream (the
 # DatasetReader::x_stream signature is sync-returns-stream).
