@@ -1760,6 +1760,19 @@
         "node_type": "array",
         "storage_transformers": []
       },
+      "uns/spatial": {
+        "attributes": {
+          "encoding-type": "dict",
+          "encoding-version": "0.1.0"
+        },
+        "zarr_format": 3,
+        "consolidated_metadata": {
+          "kind": "inline",
+          "must_understand": false,
+          "metadata": {}
+        },
+        "node_type": "group"
+      },
       "uns/strings": {
         "shape": [
           2
@@ -3394,6 +3407,19 @@
         "node_type": "array",
         "storage_transformers": []
       },
+      "uns/spatial/lib": {
+        "attributes": {
+          "encoding-type": "dict",
+          "encoding-version": "0.1.0"
+        },
+        "zarr_format": 3,
+        "consolidated_metadata": {
+          "kind": "inline",
+          "must_understand": false,
+          "metadata": {}
+        },
+        "node_type": "group"
+      },
       "var/_index/mask": {
         "shape": [
           12
@@ -3550,6 +3576,139 @@
         ],
         "attributes": {
           "encoding-type": "string",
+          "encoding-version": "0.2.0"
+        },
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "uns/spatial/lib/images": {
+        "attributes": {
+          "encoding-type": "dict",
+          "encoding-version": "0.1.0"
+        },
+        "zarr_format": 3,
+        "consolidated_metadata": {
+          "kind": "inline",
+          "must_understand": false,
+          "metadata": {}
+        },
+        "node_type": "group"
+      },
+      "uns/spatial/lib/scalefactors": {
+        "attributes": {
+          "encoding-type": "dict",
+          "encoding-version": "0.1.0"
+        },
+        "zarr_format": 3,
+        "consolidated_metadata": {
+          "kind": "inline",
+          "must_understand": false,
+          "metadata": {}
+        },
+        "node_type": "group"
+      },
+      "uns/spatial/lib/images/hires": {
+        "shape": [
+          160,
+          160,
+          3
+        ],
+        "data_type": "uint8",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              160,
+              160,
+              3
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0,
+        "codecs": [
+          {
+            "name": "sharding_indexed",
+            "configuration": {
+              "chunk_shape": [
+                160,
+                160,
+                3
+              ],
+              "codecs": [
+                {
+                  "name": "bytes"
+                },
+                {
+                  "name": "zstd",
+                  "configuration": {
+                    "level": 0,
+                    "checksum": false
+                  }
+                }
+              ],
+              "index_codecs": [
+                {
+                  "name": "bytes",
+                  "configuration": {
+                    "endian": "little"
+                  }
+                },
+                {
+                  "name": "crc32c"
+                }
+              ],
+              "index_location": "end"
+            }
+          }
+        ],
+        "attributes": {
+          "encoding-type": "array",
+          "encoding-version": "0.2.0"
+        },
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "uns/spatial/lib/scalefactors/spot": {
+        "shape": [],
+        "data_type": "float64",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": []
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0.0,
+        "codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "encoding-type": "numeric-scalar",
           "encoding-version": "0.2.0"
         },
         "zarr_format": 3,

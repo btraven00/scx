@@ -1013,6 +1013,7 @@ async fn synthetic_roundtrip_all_slots() {
     );
     let uns = UnsTable {
         raw: serde_json::json!({ "title": "synthetic", "params": { "k": 15 } }),
+        ..Default::default()
     };
     let (indptr, indices, data) = diag_csr(n_obs, n_vars);
     let x = |d: &[f32]| MatrixChunk {

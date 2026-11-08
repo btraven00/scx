@@ -441,9 +441,7 @@ fn read_uns_sync(path: &Path) -> Result<UnsTable> {
     if file.group("misc").is_err() {
         return Ok(UnsTable::default());
     }
-    Ok(UnsTable {
-        raw: crate::h5_json::read_json(&file, "misc")?,
-    })
+    crate::h5_json::read_uns(&file, "misc")
 }
 
 // ---------------------------------------------------------------------------

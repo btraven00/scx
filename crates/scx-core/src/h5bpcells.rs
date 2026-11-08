@@ -1629,6 +1629,7 @@ mod tests {
                     "beta": [1.0, 2.0]
                 }
             }),
+            ..Default::default()
         };
 
         let x_chunk = MatrixChunk {

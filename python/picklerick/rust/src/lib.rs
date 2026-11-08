@@ -305,12 +305,7 @@ fn scx_inspect(py: Python<'_>, input: &str, with_names: bool) -> PyResult<Py<PyA
     d.set_item("var_dtypes", dtypes(&var.columns))?;
     d.set_item("obsm_keys", obsm.map.keys().collect::<Vec<_>>())?;
     d.set_item("varm_keys", varm.map.keys().collect::<Vec<_>>())?;
-    let uns_keys: Vec<&String> = uns
-        .raw
-        .as_object()
-        .map(|o| o.keys().collect())
-        .unwrap_or_default();
-    d.set_item("uns_keys", uns_keys)?;
+    d.set_item("uns_keys", uns.keys())?;
     if with_names {
         d.set_item("obs_names", &obs.index)?;
         d.set_item("var_names", &var.index)?;

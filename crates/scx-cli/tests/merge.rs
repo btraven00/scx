@@ -266,6 +266,7 @@ fn make_h5ad_with_uns(path: &Path, n_obs: usize, n_vars: usize) {
             raw: serde_json::json!({
                 "neighbors": { "method": "umap", "n_neighbors": 15 }
             }),
+            ..Default::default()
         };
         let mut writer = H5AdWriter::create(path, n_obs, n_vars, DataType::F32).unwrap();
         writer.write_obs(&obs).await.unwrap();
@@ -1084,6 +1085,7 @@ fn make_full_patch(path: &Path, n_obs: usize, n_vars: usize, k: f64) {
         w.write_varm(&varm).await.unwrap();
         w.write_uns(&UnsTable {
             raw: serde_json::json!({ "note": k }),
+            ..Default::default()
         })
         .await
         .unwrap();

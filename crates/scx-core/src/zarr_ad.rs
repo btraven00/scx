@@ -14,7 +14,7 @@
 //! anything like h5ad's hand-rolled parallel inflate. anndata >= 0.13 writes v3
 //! arrays sharded; zarrs reads shards natively.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -35,7 +35,8 @@ use crate::{
     error::{Result, ScxError},
     ir::{
         bool_level, float_level, Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk,
-        ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
+        ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsArray, UnsData, UnsTable, VarTable, Varm,
+        UNS_TYPED_MIN,
     },
     sparse::{csc_row_ptr, csc_to_csr, csr_chunk, csr_rows, csr_to_dense, dense_to_csr},
     stream::DatasetReader,
@@ -745,15 +746,37 @@ fn read_nullable(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)> {
 // uns (same JSON mapping as h5_json::read_json)
 // ---------------------------------------------------------------------------
 
-fn walk_group(store: &Store, path: &str) -> Value {
+/// The group at `path` as JSON; numeric arrays of at least `UNS_TYPED_MIN`
+/// values go to `arrays` under `rel` (the group's path below the uns root).
+fn walk_group(
+    store: &Store,
+    path: &str,
+    rel: &str,
+    arrays: &mut BTreeMap<String, UnsArray>,
+) -> Value {
     let mut map = Map::new();
     for name in children(store, path) {
         let child = format!("{path}/{name}");
+        let rel_child = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
         let value = match node(store, &child) {
-            Some(Node::Group(_)) => walk_group(store, &child),
-            Some(Node::Array(arr)) => match array_to_json(&arr) {
-                Ok(v) => v,
-                // Skipped rather than null: null is a NaN (see h5_json).
+            Some(Node::Group(_)) => walk_group(store, &child, &rel_child, arrays),
+            Some(Node::Array(arr)) => match typed_array(&arr) {
+                Ok(Some(a)) => {
+                    arrays.insert(rel_child, a);
+                    continue;
+                }
+                Ok(None) => match array_to_json(&arr) {
+                    Ok(v) => v,
+                    // Skipped rather than null: null is a NaN (see h5_json).
+                    Err(e) => {
+                        tracing::warn!("{child}: {e}; it is not carried");
+                        continue;
+                    }
+                },
                 Err(e) => {
                     tracing::warn!("{child}: {e}; it is not carried");
                     continue;
@@ -764,6 +787,39 @@ fn walk_group(store: &Store, path: &str) -> Value {
         map.insert(name, value);
     }
     Value::Object(map)
+}
+
+/// A numeric array of at least `UNS_TYPED_MIN` values, in its stored type.
+fn typed_array(arr: &ZArray) -> Result<Option<UnsArray>> {
+    let shape: Vec<usize> = arr.shape().iter().map(|&n| n as usize).collect();
+    if shape.iter().product::<usize>() < UNS_TYPED_MIN {
+        return Ok(None);
+    }
+    let (dt, all) = (arr.data_type(), subset(arr, None));
+    let data = if *dt == zdt::int8() {
+        UnsData::I8(get(arr, all)?)
+    } else if *dt == zdt::int16() {
+        UnsData::I16(get(arr, all)?)
+    } else if *dt == zdt::int32() {
+        UnsData::I32(get(arr, all)?)
+    } else if *dt == zdt::int64() {
+        UnsData::I64(get(arr, all)?)
+    } else if *dt == zdt::uint8() {
+        UnsData::U8(get(arr, all)?)
+    } else if *dt == zdt::uint16() {
+        UnsData::U16(get(arr, all)?)
+    } else if *dt == zdt::uint32() {
+        UnsData::U32(get(arr, all)?)
+    } else if *dt == zdt::uint64() {
+        UnsData::U64(get(arr, all)?)
+    } else if *dt == zdt::float32() {
+        UnsData::F32(get(arr, all)?)
+    } else if *dt == zdt::float64() {
+        UnsData::F64(get(arr, all)?)
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(UnsArray { shape, data }))
 }
 
 fn array_to_json(arr: &ZArray) -> Result<Value> {
@@ -857,7 +913,8 @@ impl DatasetReader for ZarrAdReader {
         if !is_group(&self.store, "uns") {
             return Ok(UnsTable::default());
         }
-        let mut raw = walk_group(&self.store, "uns");
+        let mut arrays = BTreeMap::new();
+        let mut raw = walk_group(&self.store, "uns", "", &mut arrays);
         // scx_provenance is stored as a JSON string; parse it back (as h5ad).
         if let Some(obj) = raw.as_object_mut() {
             if let Some(Value::String(s)) = obj.get("scx_provenance") {
@@ -866,7 +923,7 @@ impl DatasetReader for ZarrAdReader {
                 }
             }
         }
-        Ok(UnsTable { raw })
+        Ok(UnsTable { raw, arrays })
     }
 
     async fn varm(&mut self) -> Result<Varm> {

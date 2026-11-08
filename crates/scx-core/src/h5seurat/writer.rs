@@ -520,20 +520,21 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
 /// `uns` goes to Seurat's `misc` slot, the free-form list SeuratDisk saves
 /// as a group.
 pub(crate) fn seurat_write_uns(file: &File, uns: &UnsTable) -> Result<()> {
-    let Some(map) = uns.raw.as_object() else {
+    let map = uns.raw.as_object();
+    if map.is_none_or(|m| m.is_empty()) && uns.arrays.is_empty() {
         return Ok(());
-    };
+    }
     let misc = match file.group("misc") {
         Ok(g) => g,
         Err(_) => crate::h5::create_group(file, "misc")?,
     };
-    for (k, v) in map {
+    for (k, v) in map.into_iter().flatten() {
         if misc.link_exists(k) {
             misc.unlink(k)?;
         }
         crate::h5_json::write_json(&misc, k, v, crate::h5_json::Encoding::None)?;
     }
-    Ok(())
+    crate::h5_json::write_arrays(&misc, &uns.arrays, crate::h5_json::Encoding::None, None)
 }
 
 // ---------------------------------------------------------------------------

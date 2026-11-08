@@ -135,8 +135,9 @@ impl NpyIrWriter {
         }
 
         // --- uns ---
-        if filter.includes("uns") && !dataset.uns.raw.is_null() {
-            write_json(&dir.join("uns.json"), &dataset.uns.raw)?;
+        if filter.includes("uns") && !(dataset.uns.raw.is_null() && dataset.uns.arrays.is_empty()) {
+            // Large typed arrays go in as nested JSON: slow, but a snapshot is JSON.
+            write_json(&dir.join("uns.json"), &dataset.uns.to_json())?;
             meta.uns = Some(true);
         }
 
@@ -331,8 +332,8 @@ impl NpyIrWriter {
         }
 
         // --- uns ---
-        if filter.includes("uns") && !uns.raw.is_null() {
-            write_json(&dir.join("uns.json"), &uns.raw)?;
+        if filter.includes("uns") && !(uns.raw.is_null() && uns.arrays.is_empty()) {
+            write_json(&dir.join("uns.json"), &uns.to_json())?;
             meta.uns = Some(true);
         }
 

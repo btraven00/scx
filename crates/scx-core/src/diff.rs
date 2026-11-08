@@ -10,7 +10,7 @@ use futures::StreamExt;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::ir::{Column, ColumnData, DenseMatrix, MatrixChunk, SparseMatrixMeta};
+use crate::ir::{Column, ColumnData, DenseMatrix, MatrixChunk, SparseMatrixMeta, UnsTable};
 use crate::npy::SlotFilter;
 use crate::stream::{ChunkStream, DatasetReader};
 
@@ -186,7 +186,10 @@ pub async fn diff(
         out.extend(compare_dense("varm", &ma, &mb, &cols, opts));
     }
     if f.includes("uns") {
-        let (ua, ub) = (a.uns().await?.raw, b.uns().await?.raw);
+        let (mut ua, mut ub) = (a.uns().await?, b.uns().await?);
+        // A side read from JSON (npy) holds large arrays in raw.
+        ua.split_large();
+        ub.split_large();
         out.push(compare_uns(&ua, &ub, opts));
     }
     out.extend(compare_matrices(a, b, &rows, &cols, same_shape, opts).await?);
@@ -566,7 +569,7 @@ fn compare_dense(
 // uns
 // ---------------------------------------------------------------------------
 
-fn compare_uns(a: &serde_json::Value, b: &serde_json::Value, o: &DiffOptions) -> SlotDiff {
+fn compare_uns(ua: &UnsTable, ub: &UnsTable, o: &DiffOptions) -> SlotDiff {
     use serde_json::Value;
     fn strip(v: &Value) -> Value {
         match v {
@@ -629,9 +632,36 @@ fn compare_uns(a: &serde_json::Value, b: &serde_json::Value, o: &DiffOptions) ->
             s
         }
     }
-    let (a, b) = (strip(a), strip(b));
+    let (a, b) = (strip(&ua.raw), strip(&ub.raw));
     let mut found = Vec::new();
     walk("", &a, &b, o, &mut found);
+    let mut paths: Vec<&String> = ua.arrays.keys().chain(ub.arrays.keys()).collect();
+    paths.sort();
+    paths.dedup();
+    for p in paths {
+        match (ua.arrays.get(p), ub.arrays.get(p)) {
+            (Some(x), Some(y)) if x.shape != y.shape => {
+                found.push(format!("{p}: shape {:?} vs {:?}", x.shape, y.shape))
+            }
+            // Same type and values: one memcmp, even for an image.
+            (Some(x), Some(y)) if x.data == y.data => {}
+            (Some(x), Some(y)) => {
+                let (u, v) = (&x.data, &y.data);
+                let mut bad = (0..u.len()).filter(|&i| !close(u.at(i), v.at(i), o));
+                if let Some(i) = bad.next() {
+                    found.push(format!(
+                        "{p}: {} values differ, first at {i}: {} vs {}",
+                        1 + bad.count(),
+                        u.at(i),
+                        v.at(i)
+                    ));
+                }
+            }
+            (Some(_), None) => found.push(format!("{p}: only in A")),
+            (None, Some(_)) => found.push(format!("{p}: only in B")),
+            (None, None) => {}
+        }
+    }
     let n_keys = a.as_object().map_or(0, |m| m.len());
     let mut d = SlotDiff::new(
         "uns",
@@ -1040,6 +1070,7 @@ mod tests {
         async fn uns(&mut self) -> Result<UnsTable> {
             Ok(UnsTable {
                 raw: self.uns.clone(),
+                ..Default::default()
             })
         }
         fn x_stream(&mut self) -> ChunkStream<'_> {
@@ -1332,5 +1363,43 @@ mod tests {
         // --map wins over the rule.
         let pairs = pair(&a, &b, &[("X".into(), "X".into())]);
         assert!(pairs.contains(&(Some(0), Some(0))));
+    }
+
+    /// Large uns arrays are compared typed: equal to the same table read
+    /// back from JSON (an npy snapshot), and a changed value is reported.
+    #[test]
+    fn uns_arrays_compare_typed_and_json() {
+        use crate::ir::{UnsArray, UnsData, UNS_TYPED_MIN};
+        let img: Vec<u8> = (0..UNS_TYPED_MIN).map(|i| i as u8).collect();
+        let typed = UnsTable {
+            raw: serde_json::json!({"spatial": {"k": 1}}),
+            arrays: [(
+                "spatial/img".to_string(),
+                UnsArray {
+                    shape: vec![UNS_TYPED_MIN / 4, 4],
+                    data: UnsData::U8(img),
+                },
+            )]
+            .into(),
+        };
+        let mut json = UnsTable {
+            raw: typed.to_json(),
+            ..Default::default()
+        };
+        json.split_large();
+        let o = DiffOptions::default();
+        let d = compare_uns(&typed, &json, &o);
+        assert_eq!(d.status, Status::Same, "{:?}", d.details);
+
+        let mut other = typed.clone();
+        if let UnsData::U8(v) = &mut other.arrays.get_mut("spatial/img").unwrap().data {
+            v[5] += 1;
+        }
+        let d = compare_uns(&typed, &other, &o);
+        assert_eq!(d.status, Status::Diff);
+        assert_eq!(
+            d.details,
+            ["spatial/img: 1 values differ, first at 5: 5 vs 6"]
+        );
     }
 }

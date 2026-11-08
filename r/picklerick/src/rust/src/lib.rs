@@ -315,10 +315,7 @@ async fn collect_info(
     let mut varm_keys: Vec<String> = varm.map.keys().cloned().collect();
     obsm_keys.sort();
     varm_keys.sort();
-    let uns_keys:  Vec<String> = uns.raw
-        .as_object()
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default();
+    let uns_keys:  Vec<String> = uns.keys();
 
     // per-layer and per-obsp nnz stats (free from indptr, no matrix streaming)
     // Returned as parallel named vectors — R-idiomatic, avoids nested list issues.
@@ -562,7 +559,7 @@ fn scx_write_h5ad_inner(
 
     let uns_value: serde_json::Value =
         serde_json::from_str(uns_json).map_err(|e| Error::from(format!("uns JSON: {e}")))?;
-    let uns = UnsTable { raw: uns_value };
+    let uns = UnsTable { raw: uns_value, ..Default::default() };
 
     let chunk = MatrixChunk {
         row_offset: 0,

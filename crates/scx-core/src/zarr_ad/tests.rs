@@ -81,11 +81,9 @@ async fn assert_store_same_as_h5ad(
         sorted_debug(&h.varm().await.unwrap().map),
         "{zarr}: varm"
     );
-    assert_eq!(
-        z.uns().await.unwrap().raw,
-        h.uns().await.unwrap().raw,
-        "{zarr}: uns"
-    );
+    let (zu, hu) = (z.uns().await.unwrap(), h.uns().await.unwrap());
+    assert_eq!(zu.raw, hu.raw, "{zarr}: uns");
+    assert_eq!(zu.arrays, hu.arrays, "{zarr}: uns arrays");
 
     let (zl, hl) = (
         z.layer_metas().await.unwrap(),
@@ -263,6 +261,15 @@ async fn writer_roundtrips_what_h5ad_reads() {
         assert_eq!(detect(&out), Some(Format::ZarrAd));
         assert_store_same_as_h5ad(&out, &src, name, same_layout).await;
     }
+    // Typed uns arrays are written in their own type, in row chunks.
+    use zarrs::{array::data_type as zdt, filesystem::FilesystemStore};
+    let img = zarrs::array::Array::open(
+        std::sync::Arc::new(FilesystemStore::new(dir.path().join("varied.zarr")).unwrap()),
+        "/uns/spatial/lib/images/hires",
+    )
+    .unwrap();
+    assert_eq!(*img.data_type(), zdt::uint8());
+    assert_eq!(img.shape(), [160, 160, 3]);
 }
 
 /// X is stored in the dtype asked for, whatever the source's, with the same
@@ -546,6 +553,12 @@ async fn row_range_stream_reads_only_its_indptr() {
 async fn varied_encodings_read_exactly_what_h5ad_reads() {
     assert_same_as_h5ad("varied_v2.zarr", "varied.h5ad").await;
     assert_same_as_h5ad("varied_v3.zarr", "varied.h5ad").await;
+    // The Visium-like image is carried typed, not as JSON (see h5_json).
+    let mut z = ZarrAdReader::open(fixture("varied_v3.zarr"), CHUNK).unwrap();
+    let uns = z.uns().await.unwrap();
+    let img = &uns.arrays["spatial/lib/images/hires"];
+    assert_eq!(img.shape, [160, 160, 3]);
+    assert!(matches!(img.data, crate::ir::UnsData::U8(_)));
 }
 
 /// Without X the matrix comes from layers by h5ad's rules: the only layer, or

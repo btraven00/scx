@@ -29,8 +29,8 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        uns_chunk, Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
+        SparseMatrixCSR, SparseMatrixMeta, UnsArray, UnsData, UnsTable, VarTable, Varm,
     },
     stream::DatasetWriter,
 };
@@ -141,7 +141,7 @@ fn write_f64s(store: &Store, path: &str, v: &[f64], attrs: Map<String, Value>) -
     write_1d(store, path, zdt::float64(), FillValue::from(0f64), v, attrs)
 }
 
-/// An uns array of `shape` (row-major `values`), one chunk: uns is small.
+/// An uns array of `shape` (row-major `values`), in row-wise chunks.
 fn write_nd<T: Element>(
     store: &Store,
     path: &str,
@@ -150,7 +150,8 @@ fn write_nd<T: Element>(
     shape: &[u64],
     values: &[T],
 ) -> Result<()> {
-    let chunk: Vec<u64> = shape.iter().map(|&n| n.max(1)).collect();
+    let dims: Vec<usize> = shape.iter().map(|&n| n as usize).collect();
+    let chunk: Vec<u64> = uns_chunk(&dims).iter().map(|&n| n as u64).collect();
     let arr = create_array(
         store,
         path,
@@ -166,6 +167,37 @@ fn write_nd<T: Element>(
             .map_err(|e| zerr(path, e))?;
     }
     Ok(())
+}
+
+/// A typed uns array in its stored type.
+fn write_typed(store: &Store, path: &str, a: &UnsArray) -> Result<()> {
+    let shape: Vec<u64> = a.shape.iter().map(|&n| n as u64).collect();
+    match &a.data {
+        UnsData::I8(v) => write_nd(store, path, zdt::int8(), FillValue::from(0i8), &shape, v),
+        UnsData::I16(v) => write_nd(store, path, zdt::int16(), FillValue::from(0i16), &shape, v),
+        UnsData::I32(v) => write_nd(store, path, zdt::int32(), FillValue::from(0i32), &shape, v),
+        UnsData::I64(v) => write_nd(store, path, zdt::int64(), FillValue::from(0i64), &shape, v),
+        UnsData::U8(v) => write_nd(store, path, zdt::uint8(), FillValue::from(0u8), &shape, v),
+        UnsData::U16(v) => write_nd(store, path, zdt::uint16(), FillValue::from(0u16), &shape, v),
+        UnsData::U32(v) => write_nd(store, path, zdt::uint32(), FillValue::from(0u32), &shape, v),
+        UnsData::U64(v) => write_nd(store, path, zdt::uint64(), FillValue::from(0u64), &shape, v),
+        UnsData::F32(v) => write_nd(
+            store,
+            path,
+            zdt::float32(),
+            FillValue::from(0f32),
+            &shape,
+            v,
+        ),
+        UnsData::F64(v) => write_nd(
+            store,
+            path,
+            zdt::float64(),
+            FillValue::from(0f64),
+            &shape,
+            v,
+        ),
+    }
 }
 
 /// A 0-d array holding one value, as anndata stores uns scalars.
@@ -699,6 +731,17 @@ impl DatasetWriter for ZarrAdWriter {
             for (k, v) in obj {
                 write_json(&self.store, &format!("uns/{k}"), v)?;
             }
+        }
+        for (path, a) in &uns.arrays {
+            let mut dir = String::from("uns");
+            let dirs = path.rsplit_once('/').map_or("", |(d, _)| d);
+            for part in dirs.split('/').filter(|p| !p.is_empty()) {
+                dir = format!("{dir}/{part}");
+                if !super::is_group(&self.store, &dir) {
+                    create_group(&self.store, &dir, encoding("dict", "0.1.0"))?;
+                }
+            }
+            write_typed(&self.store, &format!("uns/{path}"), a)?;
         }
         Ok(())
     }

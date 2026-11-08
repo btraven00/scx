@@ -632,10 +632,22 @@ async fn apply_uns_patch(
         return Ok(false);
     }
     let uns = reader.uns().await?;
-    let value = uns.raw.get(name).ok_or_else(|| {
-        ScxError::InvalidFormat(format!("uns entry '{name}' not found in patch source"))
-    })?;
-    writer.add_uns_entry(name, value)?;
+    let sub = format!("{name}/");
+    let arrays: std::collections::BTreeMap<_, _> = uns
+        .arrays
+        .into_iter()
+        .filter(|(p, _)| p == name || p.starts_with(&sub))
+        .collect();
+    match uns.raw.get(name) {
+        Some(value) => writer.add_uns_entry(name, value)?,
+        None if arrays.is_empty() => {
+            return Err(ScxError::InvalidFormat(format!(
+                "uns entry '{name}' not found in patch source"
+            )))
+        }
+        None => {}
+    }
+    writer.add_uns_arrays(&arrays)?;
     Ok(true)
 }
 

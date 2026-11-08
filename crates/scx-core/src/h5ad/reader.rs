@@ -833,7 +833,7 @@ impl DatasetReader for H5AdReader {
         match file.group("uns") {
             Err(_) => Ok(UnsTable::default()),
             Ok(_) => {
-                let mut raw = crate::h5_json::read_json(&file, "uns")?;
+                let UnsTable { mut raw, arrays } = crate::h5_json::read_uns(&file, "uns")?;
                 // scx_provenance is stored as a JSON string to preserve keys
                 // containing "/" without HDF5 path-separator mangling.
                 // Parse it back to an Object so callers get the expected shape.
@@ -847,7 +847,7 @@ impl DatasetReader for H5AdReader {
                 if legacy::is_legacy(&file) {
                     legacy::trim_uns(&file, &mut raw);
                 }
-                Ok(UnsTable { raw })
+                Ok(UnsTable { raw, arrays })
             }
         }
     }

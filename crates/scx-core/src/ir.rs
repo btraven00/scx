@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::dtype::{DataType, TypedVec};
 use crate::error::ScxError;
@@ -301,10 +301,177 @@ pub struct DenseMatrix {
     pub data: Vec<f64>,
 }
 
-/// Opaque unstructured metadata.
+/// Unstructured metadata: JSON, plus the large numeric arrays as typed values.
+///
+/// In JSON every value is its own heap node, which a Visium full-resolution
+/// image in `uns["spatial"]` (~1.2e9 values) cannot afford. Arrays of at
+/// least [`UNS_TYPED_MIN`] numbers are therefore read into `arrays`, keyed by
+/// their path under uns ("spatial/lib/images/hires"), and are absent from
+/// `raw`. Smaller arrays stay in `raw` as (nested) JSON arrays.
 #[derive(Debug, Clone, Default)]
 pub struct UnsTable {
     pub raw: serde_json::Value,
+    pub arrays: BTreeMap<String, UnsArray>,
+}
+
+/// Numeric uns arrays with at least this many values are carried typed.
+pub const UNS_TYPED_MIN: usize = 1 << 16;
+
+/// A numeric N-d uns array: its shape and row-major values, in their stored type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnsArray {
+    pub shape: Vec<usize>,
+    pub data: UnsData,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnsData {
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    U32(Vec<u32>),
+    U64(Vec<u64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+/// `$body` with `$v` bound to the values of `$data` (a `UnsData`), whatever
+/// their type.
+macro_rules! uns_data_match {
+    ($data:expr, $v:ident => $body:expr) => {
+        match $data {
+            $crate::ir::UnsData::I8($v) => $body,
+            $crate::ir::UnsData::I16($v) => $body,
+            $crate::ir::UnsData::I32($v) => $body,
+            $crate::ir::UnsData::I64($v) => $body,
+            $crate::ir::UnsData::U8($v) => $body,
+            $crate::ir::UnsData::U16($v) => $body,
+            $crate::ir::UnsData::U32($v) => $body,
+            $crate::ir::UnsData::U64($v) => $body,
+            $crate::ir::UnsData::F32($v) => $body,
+            $crate::ir::UnsData::F64($v) => $body,
+        }
+    };
+}
+pub(crate) use uns_data_match;
+
+impl UnsData {
+    pub fn len(&self) -> usize {
+        uns_data_match!(self, v => v.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Value `i` as f64.
+    #[allow(clippy::unnecessary_cast)] // f64 -> f64 in the F64 arm
+    pub fn at(&self, i: usize) -> f64 {
+        uns_data_match!(self, v => v[i] as f64)
+    }
+
+    fn to_json(&self) -> Vec<serde_json::Value> {
+        uns_data_match!(self, v => v.iter().map(|&x| serde_json::json!(x)).collect())
+    }
+}
+
+/// Chunk shape for storing a uns array of `shape`: whole rows along the first
+/// axis, about 2^20 values per chunk.
+pub(crate) fn uns_chunk(shape: &[usize]) -> Vec<usize> {
+    let row: usize = shape.iter().skip(1).product::<usize>().max(1);
+    let mut chunk: Vec<usize> = shape.iter().map(|&n| n.max(1)).collect();
+    if let Some(first) = chunk.first_mut() {
+        *first = (*first).min(((1usize << 20) / row).max(1));
+    }
+    chunk
+}
+
+impl UnsTable {
+    /// The top-level keys, in `raw` or holding typed arrays; sorted.
+    pub fn keys(&self) -> Vec<String> {
+        let mut k: Vec<String> = self
+            .raw
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        k.extend(
+            self.arrays
+                .keys()
+                .map(|p| p.split('/').next().unwrap_or(p).to_string()),
+        );
+        k.sort();
+        k.dedup();
+        k
+    }
+
+    /// `raw` with `arrays` put back in as nested JSON arrays. Slow and large
+    /// for big arrays: for outputs that only hold JSON.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut raw = self.raw.clone();
+        for (path, a) in &self.arrays {
+            if !raw.is_object() {
+                raw = serde_json::Value::Object(Default::default());
+            }
+            let mut node = &mut raw;
+            let mut parts = path.split('/').peekable();
+            while let Some(part) = parts.next() {
+                let map = match node {
+                    serde_json::Value::Object(m) => m,
+                    _ => break,
+                };
+                if parts.peek().is_none() {
+                    map.insert(
+                        part.to_string(),
+                        crate::h5_json::nest(a.data.to_json(), &a.shape),
+                    );
+                    break;
+                }
+                node = map
+                    .entry(part)
+                    .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            }
+        }
+        raw
+    }
+
+    /// Move numeric JSON arrays of at least [`UNS_TYPED_MIN`] values out of
+    /// `raw` into `arrays`, as the readers of stored formats do, so a table
+    /// read from JSON compares like one read from a file.
+    pub(crate) fn split_large(&mut self) {
+        fn walk(v: &mut serde_json::Value, path: &str, out: &mut BTreeMap<String, UnsArray>) {
+            let serde_json::Value::Object(map) = v else {
+                return;
+            };
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let p = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}/{k}")
+                };
+                let typed = match &map[&k] {
+                    serde_json::Value::Array(a) => crate::h5_json::numeric_array(a)
+                        .filter(|(shape, _)| shape.iter().product::<usize>() >= UNS_TYPED_MIN),
+                    _ => None,
+                };
+                match typed {
+                    Some((shape, num)) => {
+                        let data = match num {
+                            crate::h5_json::Num::I64(v) => UnsData::I64(v),
+                            crate::h5_json::Num::F64(v) => UnsData::F64(v),
+                        };
+                        map.remove(&k);
+                        out.insert(p, UnsArray { shape, data });
+                    }
+                    None => walk(map.get_mut(&k).unwrap(), &p, out),
+                }
+            }
+        }
+        walk(&mut self.raw, "", &mut self.arrays);
+    }
 }
 
 /// Top-level container — used for non-streaming (materialized) datasets.
