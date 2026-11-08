@@ -10,7 +10,9 @@ use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::h5::{read_u64, read_u64_range, read_vec};
 use crate::h5_str::read_strings;
-use crate::ir::{Column, ColumnData, Embeddings, MatrixChunk, ObsTable, UnsTable, VarTable};
+use crate::ir::{
+    Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, UnsTable, VarTable,
+};
 use crate::stream::{
     load_indptr, normalize_ranges, read_block, row_range_chunks, stream_indptr, ChunkStream,
     DatasetReader,
@@ -118,6 +120,8 @@ pub struct TenxH5Reader {
     dtype: DataType,
     /// Space Ranger `spatial/` folder, for a Visium `outs/` directory.
     spatial: Option<PathBuf>,
+    /// Its obs columns and obsm `spatial`, read once for both.
+    positions: Option<(Vec<Column>, DenseMatrix)>,
 }
 
 impl TenxH5Reader {
@@ -181,7 +185,29 @@ impl TenxH5Reader {
             chunk_size,
             dtype,
             spatial: None,
+            positions: None,
         })
+    }
+
+    /// The Visium positions, read on first use; `None` without `spatial/`.
+    fn positions(
+        &mut self,
+        barcodes: Option<Vec<String>>,
+    ) -> Result<Option<&(Vec<Column>, DenseMatrix)>> {
+        let Some(sp) = &self.spatial else {
+            return Ok(None);
+        };
+        if self.positions.is_none() {
+            let barcodes = match barcodes {
+                Some(b) => b,
+                None => {
+                    let file = File::open(&self.path)?;
+                    read_strings(&file, "matrix/barcodes")?
+                }
+            };
+            self.positions = Some(crate::visium::obs_and_spatial(sp, &barcodes)?);
+        }
+        Ok(self.positions.as_ref())
     }
 
     fn load_indptr(path: &Path) -> Result<Vec<u64>> {
@@ -299,8 +325,8 @@ impl DatasetReader for TenxH5Reader {
     async fn obs(&mut self) -> Result<ObsTable> {
         let file = File::open(&self.path)?;
         let index = read_strings(&file, "matrix/barcodes")?;
-        let columns = match &self.spatial {
-            Some(sp) => crate::visium::obs_and_spatial(sp, &index)?.0,
+        let columns = match self.positions(Some(index.clone()))? {
+            Some((columns, _)) => columns.clone(),
             None => Vec::new(),
         };
         Ok(ObsTable { index, columns })
@@ -308,11 +334,8 @@ impl DatasetReader for TenxH5Reader {
 
     async fn obsm(&mut self) -> Result<Embeddings> {
         let mut obsm = Embeddings::default();
-        if let Some(sp) = &self.spatial {
-            let file = File::open(&self.path)?;
-            let index = read_strings(&file, "matrix/barcodes")?;
-            let xy = crate::visium::obs_and_spatial(sp, &index)?.1;
-            obsm.map.insert("spatial".into(), xy);
+        if let Some((_, xy)) = self.positions(None)? {
+            obsm.map.insert("spatial".into(), xy.clone());
         }
         Ok(obsm)
     }

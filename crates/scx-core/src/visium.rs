@@ -123,57 +123,91 @@ fn spot(n: &[f64]) -> Spot {
     }
 }
 
+/// The six position columns, read whole per row group (the record API
+/// allocates every row's column names: 35 s for a 2 um Visium HD bin).
 fn read_parquet(path: &Path) -> Result<Vec<(String, Spot)>> {
-    use parquet::file::reader::{FileReader, SerializedFileReader};
-    use parquet::record::Field;
-    let err = |e: parquet::errors::ParquetError| {
-        ScxError::InvalidFormat(format!("{}: {e}", path.display()))
+    use parquet::basic::Type;
+    use parquet::column::reader::get_typed_column_reader;
+    use parquet::data_type::{
+        ByteArrayType, DataType, DoubleType, FloatType, Int32Type, Int64Type,
     };
-    let names = [
+    use parquet::file::reader::{FileReader, RowGroupReader, SerializedFileReader};
+
+    let bad = |what: String| ScxError::InvalidFormat(format!("{}: {what}", path.display()));
+    let err = |e: parquet::errors::ParquetError| bad(e.to_string());
+    fn all<T: DataType>(rg: &dyn RowGroupReader, i: usize) -> parquet::errors::Result<Vec<T::T>> {
+        let mut r = get_typed_column_reader::<T>(rg.get_column_reader(i)?);
+        let mut v = Vec::new();
+        r.read_records(usize::MAX, None, None, &mut v)?;
+        Ok(v)
+    }
+
+    let reader = SerializedFileReader::new(std::fs::File::open(path)?).map_err(err)?;
+    let schema = reader.metadata().file_metadata().schema_descr_ptr();
+    let col = |name: &str| {
+        (0..schema.num_columns())
+            .find(|&i| schema.column(i).name() == name)
+            .ok_or_else(|| bad(format!("no column '{name}'")))
+    };
+    let bc = col("barcode")?;
+    let nums = [
         "in_tissue",
         "array_row",
         "array_col",
         "pxl_row_in_fullres",
         "pxl_col_in_fullres",
-    ];
-    let reader = SerializedFileReader::new(std::fs::File::open(path)?).map_err(err)?;
-    let mut out = Vec::with_capacity(reader.metadata().file_metadata().num_rows() as usize);
-    for row in reader.get_row_iter(None).map_err(err)? {
-        let row = row.map_err(err)?;
-        let (mut barcode, mut n) = (None, [f64::NAN; 5]);
-        for (name, field) in row.get_column_iter() {
-            let v = match field {
-                Field::Str(s) if name == "barcode" => {
-                    barcode = Some(s.clone());
-                    continue;
-                }
-                Field::Byte(x) => *x as f64,
-                Field::Short(x) => *x as f64,
-                Field::Int(x) => *x as f64,
-                Field::Long(x) => *x as f64,
-                Field::UByte(x) => *x as f64,
-                Field::UShort(x) => *x as f64,
-                Field::UInt(x) => *x as f64,
-                Field::ULong(x) => *x as f64,
-                Field::Float(x) => *x as f64,
-                Field::Double(x) => *x,
-                _ => continue,
-            };
-            if let Some(i) = names.iter().position(|n| n == name) {
-                n[i] = v;
-            }
+    ]
+    .map(col);
+    let mut barcodes: Vec<String> = Vec::new();
+    let mut n: [Vec<f64>; 5] = Default::default();
+    for g in 0..reader.num_row_groups() {
+        let rg = reader.get_row_group(g).map_err(err)?;
+        if schema.column(bc).physical_type() != Type::BYTE_ARRAY {
+            return Err(bad("barcode is not a string column".into()));
         }
-        match barcode {
-            Some(b) if n.iter().all(|x| !x.is_nan()) => out.push((b, spot(&n))),
-            _ => {
-                return Err(ScxError::InvalidFormat(format!(
-                    "{}: a row lacks barcode or one of {names:?}",
-                    path.display()
-                )))
+        for b in all::<ByteArrayType>(&*rg, bc).map_err(err)? {
+            barcodes.push(b.as_utf8().map_err(err)?.to_string());
+        }
+        for (out, i) in n.iter_mut().zip(&nums) {
+            let i = *i.as_ref().map_err(|e| bad(e.to_string()))?;
+            // Space Ranger's uint8/uint32 are INT32 underneath; positions fit.
+            match schema.column(i).physical_type() {
+                Type::INT32 => out.extend(
+                    all::<Int32Type>(&*rg, i)
+                        .map_err(err)?
+                        .iter()
+                        .map(|&x| x as f64),
+                ),
+                Type::INT64 => out.extend(
+                    all::<Int64Type>(&*rg, i)
+                        .map_err(err)?
+                        .iter()
+                        .map(|&x| x as f64),
+                ),
+                Type::FLOAT => out.extend(
+                    all::<FloatType>(&*rg, i)
+                        .map_err(err)?
+                        .iter()
+                        .map(|&x| x as f64),
+                ),
+                Type::DOUBLE => out.extend(all::<DoubleType>(&*rg, i).map_err(err)?),
+                t => {
+                    return Err(bad(format!(
+                        "column {} is {t}, not a number",
+                        schema.column(i).name()
+                    )))
+                }
             }
         }
     }
-    Ok(out)
+    if n.iter().any(|c| c.len() != barcodes.len()) {
+        return Err(bad("position columns differ in length".into()));
+    }
+    Ok(barcodes
+        .into_iter()
+        .enumerate()
+        .map(|(k, b)| (b, spot(&[n[0][k], n[1][k], n[2][k], n[3][k], n[4][k]])))
+        .collect())
 }
 
 /// obs columns and obsm `spatial` for `barcodes`.

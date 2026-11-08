@@ -515,13 +515,26 @@ fn write_json(store: &Store, path: &str, value: &Value) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// A 1-D array appended to chunk by chunk; its metadata is stored on `finish`.
+///
+/// Appends are buffered and stored as whole chunks, `FLUSH_CHUNKS` at a time:
+/// storing at an unaligned offset made zarrs read, decompress, merge and
+/// recompress the partial chunk on every append, which made X 3-6x slower
+/// to write than to h5ad, and one chunk at a time compresses on one core.
 struct Growable {
     arr: ZArray,
+    /// Elements stored so far.
     len: u64,
+    /// Little-endian bytes not yet stored.
+    buf: Vec<u8>,
+    elem_size: usize,
 }
+
+/// Whole chunks buffered before a store (32 MiB of f32 per array).
+const FLUSH_CHUNKS: usize = 8;
 
 impl Growable {
     fn create(store: &Store, path: &str, data_type: ZDataType, fill: FillValue) -> Result<Self> {
+        let elem_size = data_type.fixed_size().unwrap_or(1);
         let arr = create_array(
             store,
             path,
@@ -531,21 +544,51 @@ impl Growable {
             vec![CHUNK_ELEMS],
             array_enc(),
         )?;
-        Ok(Self { arr, len: 0 })
+        Ok(Self {
+            arr,
+            len: 0,
+            buf: Vec::new(),
+            elem_size,
+        })
     }
 
-    fn append<T: Element>(&mut self, v: &[T]) -> Result<()> {
+    fn append<T: Element + bytemuck::Pod>(&mut self, v: &[T]) -> Result<()> {
+        debug_assert_eq!(std::mem::size_of::<T>(), self.elem_size);
+        if cfg!(target_endian = "little") {
+            self.buf.extend_from_slice(bytemuck::cast_slice(v));
+        } else {
+            for x in v {
+                self.buf.extend(bytemuck::bytes_of(x).iter().rev().copied());
+            }
+        }
+        let chunk = CHUNK_ELEMS as usize * self.elem_size;
+        if self.buf.len() >= FLUSH_CHUNKS * chunk {
+            self.store(self.buf.len() / chunk * chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Store the first `nbytes` of the buffer.
+    fn store(&mut self, nbytes: usize) -> Result<()> {
+        if nbytes == 0 {
+            return Ok(());
+        }
         let path = self.arr.path().as_str().to_string();
-        let end = self.len + v.len() as u64;
+        let end = self.len + (nbytes / self.elem_size) as u64;
         self.arr.set_shape(vec![end]).map_err(|e| zerr(&path, e))?;
+        let bytes: Vec<u8> = self.buf.drain(..nbytes).collect();
         self.arr
-            .store_array_subset(&vec![self.len..end], v)
+            .store_array_subset(
+                &vec![self.len..end],
+                zarrs::array::ArrayBytes::new_flen(bytes),
+            )
             .map_err(|e| zerr(&path, e))?;
         self.len = end;
         Ok(())
     }
 
-    fn finish(&self) -> Result<()> {
+    fn finish(mut self) -> Result<()> {
+        self.store(self.buf.len())?;
         self.arr
             .store_metadata()
             .map_err(|e| zerr(self.arr.path().as_str(), e))
