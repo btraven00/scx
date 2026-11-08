@@ -519,4 +519,62 @@ mod tests {
         }
         assert!(ColumnData::Int(vec![]).is_empty());
     }
+
+    /// to_json puts typed arrays back as nested JSON, creating the objects
+    /// on their path; split_large takes them out again (ints as I64, floats
+    /// as F64) and leaves small arrays in raw.
+    #[test]
+    fn uns_json_round_trip_and_keys() {
+        let n = UNS_TYPED_MIN;
+        let mut t = UnsTable {
+            raw: serde_json::Value::Null,
+            arrays: [
+                (
+                    "img/hires".to_string(),
+                    UnsArray {
+                        shape: vec![n / 2, 2],
+                        data: UnsData::U16((0..n).map(|i| i as u16).collect()),
+                    },
+                ),
+                (
+                    "w".to_string(),
+                    UnsArray {
+                        shape: vec![n],
+                        data: UnsData::F32(vec![0.5; n]),
+                    },
+                ),
+            ]
+            .into(),
+        };
+        let json = t.to_json();
+        assert_eq!(json["img"]["hires"][3], serde_json::json!([6, 7]));
+        assert_eq!(json["w"][0], 0.5);
+        assert_eq!(t.keys(), ["img", "w"]);
+
+        t.raw = serde_json::json!({"small": [1, 2], "x": 1});
+        let mut back = UnsTable {
+            raw: t.to_json(),
+            ..Default::default()
+        };
+        back.split_large();
+        assert_eq!(
+            back.raw,
+            serde_json::json!({"img": {}, "small": [1, 2], "x": 1})
+        );
+        let hires = &back.arrays["img/hires"];
+        assert_eq!(hires.shape, [n / 2, 2]);
+        assert_eq!(hires.data, UnsData::I64((0..n as i64).collect()));
+        assert_eq!(back.arrays["w"].data, UnsData::F64(vec![0.5; n]));
+        assert_eq!((hires.data.len(), hires.data.at(9)), (n, 9.0));
+        assert!(!hires.data.is_empty());
+    }
+
+    #[test]
+    fn uns_chunks_are_whole_rows_of_about_a_million_values() {
+        assert_eq!(uns_chunk(&[19587, 20330, 3]), [17, 20330, 3]);
+        assert_eq!(uns_chunk(&[10, 3]), [10, 3]);
+        assert_eq!(uns_chunk(&[3_000_000]), [1 << 20]);
+        assert_eq!(uns_chunk(&[0, 4]), [1, 4]);
+        assert!(uns_chunk(&[]).is_empty());
+    }
 }

@@ -754,3 +754,140 @@ async fn one_byte_int_columns_stay_ints() {
     assert!(matches!(col("u8col"), ColumnData::Int(v) if v == vec![1; n]));
     assert!(matches!(col("i8col"), ColumnData::Int(v) if v == vec![-1; n]));
 }
+
+/// Every typed uns dtype, 1-D to 3-D, at the top level and nested, survives
+/// a write and read through h5ad, h5seurat and Zarr unchanged.
+#[tokio::test]
+async fn typed_uns_arrays_round_trip_in_every_format() {
+    use crate::dtype::{DataType, TypedVec};
+    use crate::h5ad::H5AdWriter;
+    use crate::h5seurat::{H5SeuratReader, H5SeuratWriter};
+    use crate::ir::{
+        Embeddings, ObsTable, SparseMatrixCSR, UnsArray, UnsData, UnsTable, VarTable,
+        UNS_TYPED_MIN as N,
+    };
+
+    let arr = |shape: Vec<usize>, data| UnsArray { shape, data };
+    let r = || 0..N;
+    let uns = UnsTable {
+        raw: serde_json::json!({"a": {"k": 1}}),
+        arrays: [
+            (
+                "a/b/i8",
+                arr(vec![N], UnsData::I8(r().map(|i| i as i8).collect())),
+            ),
+            (
+                "a/i16",
+                arr(
+                    vec![N / 4, 4],
+                    UnsData::I16(r().map(|i| i as i16).collect()),
+                ),
+            ),
+            (
+                "i32",
+                arr(
+                    vec![N / 8, 4, 2],
+                    UnsData::I32(r().map(|i| -(i as i32)).collect()),
+                ),
+            ),
+            (
+                "i64",
+                arr(vec![N], UnsData::I64(r().map(|i| i as i64 - 5).collect())),
+            ),
+            (
+                "u8",
+                arr(vec![N / 2, 2], UnsData::U8(r().map(|i| i as u8).collect())),
+            ),
+            (
+                "u16",
+                arr(vec![N], UnsData::U16(r().map(|i| i as u16).collect())),
+            ),
+            (
+                "u32",
+                arr(vec![N], UnsData::U32(r().map(|i| i as u32 * 3).collect())),
+            ),
+            (
+                "u64",
+                arr(vec![N], UnsData::U64(r().map(|i| i as u64 * 7).collect())),
+            ),
+            (
+                "f32",
+                arr(
+                    vec![N / 2, 2],
+                    UnsData::F32(r().map(|i| i as f32 / 2.0).collect()),
+                ),
+            ),
+            (
+                "f64",
+                arr(vec![N], UnsData::F64(r().map(|i| i as f64 / 3.0).collect())),
+            ),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect(),
+    };
+
+    async fn write(mut w: Box<dyn DatasetWriter>, uns: &UnsTable) {
+        let names = |p: &str| (0..2).map(|i| format!("{p}{i}")).collect();
+        w.write_obs(&ObsTable {
+            index: names("c"),
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        w.write_var(&VarTable {
+            index: names("g"),
+            columns: vec![],
+        })
+        .await
+        .unwrap();
+        w.write_obsm(&Embeddings::default()).await.unwrap();
+        w.write_uns(uns).await.unwrap();
+        let x = SparseMatrixCSR {
+            shape: (2, 2),
+            indptr: vec![0, 0, 0],
+            indices: vec![],
+            data: TypedVec::F32(vec![]),
+        };
+        w.write_x_chunk(&MatrixChunk {
+            row_offset: 0,
+            nrows: 2,
+            data: x,
+        })
+        .await
+        .unwrap();
+        w.finalize().await.unwrap();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let (h5ad, seurat, zarr) = (
+        dir.path().join("u.h5ad"),
+        dir.path().join("u.h5seurat"),
+        dir.path().join("u.zarr"),
+    );
+    let f32 = DataType::F32;
+    let h5ad_w = H5AdWriter::create_compressed(&h5ad, 2, 2, f32, Some(4)).unwrap();
+    write(Box::new(h5ad_w), &uns).await;
+    let seurat_w = H5SeuratWriter::create(&seurat, 2, 2, f32, None, None, None, false).unwrap();
+    write(Box::new(seurat_w), &uns).await;
+    write(
+        Box::new(ZarrAdWriter::create(&zarr, 2, 2, f32).unwrap()),
+        &uns,
+    )
+    .await;
+
+    let readers: Vec<(&str, Box<dyn DatasetReader>)> = vec![
+        ("h5ad", Box::new(H5AdReader::open(&h5ad, CHUNK).unwrap())),
+        (
+            "h5seurat",
+            Box::new(H5SeuratReader::open(&seurat, CHUNK, None, None).unwrap()),
+        ),
+        ("zarr", Box::new(ZarrAdReader::open(&zarr, CHUNK).unwrap())),
+    ];
+    for (name, mut rd) in readers {
+        let got = rd.uns().await.unwrap();
+        assert_eq!(got.arrays, uns.arrays, "{name}");
+        assert_eq!(got.raw["a"]["k"], 1, "{name}");
+        assert_eq!(got.keys(), uns.keys(), "{name}");
+    }
+}
