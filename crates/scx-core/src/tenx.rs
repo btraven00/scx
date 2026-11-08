@@ -607,8 +607,11 @@ mod tests {
         std::fs::create_dir(&sp).unwrap();
         let schema = std::sync::Arc::new(
             parquet::schema::parser::parse_message_type(
-                "message s { required binary barcode (UTF8); required int32 in_tissue;
-                 required int32 array_row; required int32 array_col;
+                // Space Ranger's own types: in_tissue uint8, array_* uint32.
+                "message s { required binary barcode (UTF8);
+                 required int32 in_tissue (INTEGER(8, false));
+                 required int32 array_row (INTEGER(32, false));
+                 required int32 array_col (INTEGER(32, false));
                  required double pxl_row_in_fullres; required double pxl_col_in_fullres; }",
             )
             .unwrap(),
