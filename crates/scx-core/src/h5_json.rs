@@ -1,15 +1,19 @@
 //! Unstructured metadata (AnnData `uns`, Seurat `misc`) between JSON and HDF5.
 //!
 //! Objects are groups; scalars and 1-D arrays of one type are datasets.
+//! Numeric datasets of at least `UNS_TYPED_MIN` values (Visium images, big
+//! matrices) bypass JSON as typed `UnsArray`s.
 //! Writing for AnnData also sets the `encoding-type` attributes anndata
 //! expects; Seurat's `misc` has none.
 
 use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5::{Group, H5Type, Location};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use crate::error::{Result, ScxError};
+use crate::ir::{uns_chunk, uns_data_match, UnsArray, UnsData, UnsTable, UNS_TYPED_MIN};
 
 /// Which attribute convention to write.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -182,23 +186,122 @@ pub(crate) fn write_json(parent: &Group, name: &str, value: &Value, enc: Encodin
     }
 }
 
-/// Read the group at `path` as a JSON object. A dataset of a type with no
-/// JSON form (opaque, ...) is skipped with a warning; a NaN reads as `null`.
-pub(crate) fn read_json(file: &Group, path: &str) -> Result<Value> {
+/// Read the group at `path` as uns: JSON, with numeric datasets of at least
+/// [`UNS_TYPED_MIN`] values as typed arrays. A dataset of a type with no JSON
+/// form (opaque, ...) is skipped with a warning; a NaN reads as `null`.
+pub(crate) fn read_uns(file: &Group, path: &str) -> Result<UnsTable> {
+    let mut arrays = BTreeMap::new();
+    let raw = read_tree(file, path, "", &mut arrays)?;
+    Ok(UnsTable { raw, arrays })
+}
+
+/// The group at `path` as a JSON object; typed arrays go to `arrays` under
+/// `rel` (the group's path below the uns root).
+fn read_tree(
+    file: &Group,
+    path: &str,
+    rel: &str,
+    arrays: &mut BTreeMap<String, UnsArray>,
+) -> Result<Value> {
     let grp = file.group(path)?;
     let mut map = serde_json::Map::new();
     for name in grp.member_names()? {
         let child = format!("{path}/{name}");
-        let value = if file.dataset(&child).is_ok() {
+        let rel_child = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let value = if let Ok(ds) = file.dataset(&child) {
+            if let Some(a) = typed_dataset(&ds)? {
+                arrays.insert(rel_child, a);
+                continue;
+            }
             dataset_json(file, &child)?
         } else {
-            Some(read_json(file, &child)?)
+            Some(read_tree(file, &child, &rel_child, arrays)?)
         };
         if let Some(value) = value {
             map.insert(name, value);
         }
     }
     Ok(Value::Object(map))
+}
+
+/// A numeric dataset of at least [`UNS_TYPED_MIN`] values, in its stored type.
+fn typed_dataset(ds: &hdf5::Dataset) -> Result<Option<UnsArray>> {
+    use hdf5::types::{FloatSize as F, IntSize as I};
+    use TypeDescriptor as T;
+    if ds.size() < UNS_TYPED_MIN {
+        return Ok(None);
+    }
+    let data = match ds.dtype()?.to_descriptor()? {
+        T::Integer(I::U1) => UnsData::I8(ds.read_raw()?),
+        T::Integer(I::U2) => UnsData::I16(ds.read_raw()?),
+        T::Integer(I::U4) => UnsData::I32(ds.read_raw()?),
+        T::Integer(I::U8) => UnsData::I64(ds.read_raw()?),
+        T::Unsigned(I::U1) => UnsData::U8(ds.read_raw()?),
+        T::Unsigned(I::U2) => UnsData::U16(ds.read_raw()?),
+        T::Unsigned(I::U4) => UnsData::U32(ds.read_raw()?),
+        T::Unsigned(I::U8) => UnsData::U64(ds.read_raw()?),
+        T::Float(F::U4) => UnsData::F32(ds.read_raw()?),
+        T::Float(F::U8) => UnsData::F64(ds.read_raw()?),
+        _ => return Ok(None),
+    };
+    Ok(Some(UnsArray {
+        shape: ds.shape(),
+        data,
+    }))
+}
+
+/// Write `arrays` (paths relative to `root`) as chunked datasets, deflated
+/// at `level` when set, creating missing parent groups as dicts. An existing
+/// entry at a path is replaced.
+pub(crate) fn write_arrays(
+    root: &Group,
+    arrays: &BTreeMap<String, UnsArray>,
+    enc: Encoding,
+    level: Option<u8>,
+) -> Result<()> {
+    for (path, a) in arrays {
+        let (dirs, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let mut grp = root.clone();
+        for part in dirs.split('/').filter(|p| !p.is_empty()) {
+            grp = match grp.group(part) {
+                Ok(g) => g,
+                Err(_) => {
+                    let g = crate::h5::create_group(&grp, part)?;
+                    encode(&g, enc, "dict", "0.1.0")?;
+                    g
+                }
+            };
+        }
+        if grp.link_exists(name) {
+            grp.unlink(name)?;
+        }
+        uns_data_match!(&a.data, v => typed_array(&grp, name, &a.shape, v, enc, level))?;
+    }
+    Ok(())
+}
+
+fn typed_array<T: H5Type>(
+    grp: &Group,
+    name: &str,
+    shape: &[usize],
+    v: &[T],
+    enc: Encoding,
+    level: Option<u8>,
+) -> Result<()> {
+    let mut b = grp.new_dataset::<T>().shape(shape);
+    if shape.iter().all(|&n| n > 0) {
+        b = b.chunk(uns_chunk(shape));
+        if let Some(level) = level {
+            b = b.deflate(level);
+        }
+    }
+    let ds = b.create(name)?;
+    ds.write_raw(v)?;
+    encode(&ds, enc, "array", "0.2.0")
 }
 
 fn dataset_json(file: &Group, path: &str) -> Result<Option<Value>> {
@@ -358,7 +461,7 @@ mod tests {
             .with_data(&rows)
             .create("names")
             .unwrap();
-        let v = read_json(&f, "uns").unwrap();
+        let v = read_uns(&f, "uns").unwrap().raw;
         assert_eq!(
             v,
             serde_json::json!({"names": {
@@ -394,7 +497,7 @@ mod tests {
             .create("imat")
             .unwrap();
 
-        let v = read_json(&f, "uns").unwrap();
+        let v = read_uns(&f, "uns").unwrap().raw;
         let want = serde_json::json!({
             "scalar": null,
             "vec": [null, 0.5, null],
@@ -415,6 +518,54 @@ mod tests {
             .read_scalar::<f64>()
             .unwrap()
             .is_nan());
-        assert_eq!(read_json(&f, "out").unwrap(), want);
+        assert_eq!(read_uns(&f, "out").unwrap().raw, want);
+    }
+
+    /// Regression (CELLxGENE Visium 392c10c6): a 19587x20330x3 uint8 tissue
+    /// image in uns/spatial was read as one JSON value per pixel, which took
+    /// hours and tens of GB. Large numeric arrays now stay typed, keep their
+    /// dtype and shape, and are written back chunked and compressed.
+    #[test]
+    fn large_uns_arrays_stay_typed() {
+        let tmp = tempfile::NamedTempFile::with_suffix(".h5").unwrap();
+        let f = hdf5::File::create(tmp.path()).unwrap();
+        let images = f.create_group("uns/spatial/lib/images").unwrap();
+        let img = ndarray::Array3::<u8>::from_shape_fn((160, 160, 3), |(i, j, c)| {
+            (i * 7 + j * 3 + c) as u8
+        });
+        images
+            .new_dataset_builder()
+            .with_data(&img)
+            .create("hires")
+            .unwrap();
+        f.group("uns/spatial/lib")
+            .unwrap()
+            .new_dataset_builder()
+            .with_data(&ndarray::arr0(0.08f64))
+            .create("scale")
+            .unwrap();
+
+        let uns = read_uns(&f, "uns").unwrap();
+        let path = "spatial/lib/images/hires";
+        let a = &uns.arrays[path];
+        assert_eq!(a.shape, [160, 160, 3]);
+        assert_eq!(a.data, UnsData::U8(img.iter().copied().collect()));
+        // Out of raw; the small scalar beside it stays JSON.
+        assert_eq!(
+            uns.raw,
+            serde_json::json!({"spatial": {"lib": {"images": {}, "scale": 0.08}}})
+        );
+
+        let out = f.create_group("out").unwrap();
+        for (k, v) in uns.raw.as_object().unwrap() {
+            write_json(&out, k, v, Encoding::AnnData).unwrap();
+        }
+        write_arrays(&out, &uns.arrays, Encoding::AnnData, Some(4)).unwrap();
+        let ds = out.dataset(path).unwrap();
+        assert_eq!(ds.shape(), [160, 160, 3]);
+        assert!(ds.is_chunked() && !ds.filters().is_empty());
+        let back = read_uns(&f, "out").unwrap();
+        assert_eq!(back.raw, uns.raw);
+        assert_eq!(back.arrays, uns.arrays);
     }
 }

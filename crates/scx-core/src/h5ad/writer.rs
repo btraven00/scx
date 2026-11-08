@@ -281,6 +281,20 @@ impl H5AdWriter {
         crate::h5_json::write_json(&uns_grp, name, value, crate::h5_json::Encoding::AnnData)
     }
 
+    /// Add (or replace) typed `/uns` arrays, by their path under uns.
+    pub fn add_uns_arrays(
+        &self,
+        arrays: &std::collections::BTreeMap<String, crate::ir::UnsArray>,
+    ) -> Result<()> {
+        let uns_grp = dict_group(&self.file, "uns")?;
+        crate::h5_json::write_arrays(
+            &uns_grp,
+            arrays,
+            crate::h5_json::Encoding::AnnData,
+            self.compression,
+        )
+    }
+
     /// Write or replace `uns["scx_provenance"]` with `prov`.
     ///
     /// The value is serialised as a single JSON string scalar rather than a
@@ -724,7 +738,12 @@ impl DatasetWriter for H5AdWriter {
                 crate::h5_json::write_json(&grp, key, val, crate::h5_json::Encoding::AnnData)?;
             }
         }
-        Ok(())
+        crate::h5_json::write_arrays(
+            &grp,
+            &uns.arrays,
+            crate::h5_json::Encoding::AnnData,
+            self.compression,
+        )
     }
 
     async fn begin_sparse(

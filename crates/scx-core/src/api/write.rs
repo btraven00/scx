@@ -1130,6 +1130,7 @@ mod tests {
             raw: serde_json::json!({
                 "scx_test": { "answer": 42, "label": "hello" }
             }),
+            ..Default::default()
         };
         b.add_uns(uns).unwrap();
 
@@ -1271,6 +1272,7 @@ mod tests {
         };
         let uns = UnsTable {
             raw: serde_json::json!({"params": {"k": 1, "names": ["a", "b"]}}),
+            ..Default::default()
         };
         (obs, var, obsm, varm, uns)
     }

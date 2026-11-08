@@ -143,6 +143,9 @@ def write_varied():
     a.uns["nan_scalar"] = np.nan
     a.uns["nan_vec"] = np.array([np.nan, 0.5, np.nan])
     a.uns["nan_mat"] = np.array([[1.0, np.nan], [3.0, 4.0], [np.nan, 6.0]])
+    # A Visium-like image: large enough (>= 65536 values) to be carried typed.
+    hires = (np.arange(160 * 160 * 3) % 251).astype(np.uint8).reshape(160, 160, 3)
+    a.uns["spatial"] = {"lib": {"images": {"hires": hires}, "scalefactors": {"spot": 0.08}}}
     write_three(a, "varied")
 
     nox = ad.AnnData(obs=obs[[]], var=var[[]])

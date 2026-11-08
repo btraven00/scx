@@ -126,7 +126,10 @@ impl NpyIrReader {
         // --- uns ---
         let uns = if meta.uns == Some(true) {
             let raw: serde_json::Value = read_json(&dir.join("uns.json"))?;
-            UnsTable { raw }
+            UnsTable {
+                raw,
+                ..Default::default()
+            }
         } else {
             UnsTable::default()
         };

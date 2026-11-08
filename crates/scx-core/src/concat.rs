@@ -223,6 +223,7 @@ pub async fn concat(
     writer
         .write_uns(&UnsTable {
             raw: provenance_json(inputs, &keys, &n_obs_each, n_out_vars, opts),
+            ..Default::default()
         })
         .await?;
 
