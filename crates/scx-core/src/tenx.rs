@@ -192,20 +192,22 @@ impl TenxH5Reader {
     /// The Visium positions, read on first use; `None` without `spatial/`.
     fn positions(
         &mut self,
-        barcodes: Option<Vec<String>>,
+        barcodes: Option<&[String]>,
     ) -> Result<Option<&(Vec<Column>, DenseMatrix)>> {
         let Some(sp) = &self.spatial else {
             return Ok(None);
         };
         if self.positions.is_none() {
+            let read;
             let barcodes = match barcodes {
                 Some(b) => b,
                 None => {
                     let file = File::open(&self.path)?;
-                    read_strings(&file, "matrix/barcodes")?
+                    read = read_strings(&file, "matrix/barcodes")?;
+                    &read
                 }
             };
-            self.positions = Some(crate::visium::obs_and_spatial(sp, &barcodes)?);
+            self.positions = Some(crate::visium::obs_and_spatial(sp, barcodes)?);
         }
         Ok(self.positions.as_ref())
     }
@@ -325,7 +327,7 @@ impl DatasetReader for TenxH5Reader {
     async fn obs(&mut self) -> Result<ObsTable> {
         let file = File::open(&self.path)?;
         let index = read_strings(&file, "matrix/barcodes")?;
-        let columns = match self.positions(Some(index.clone()))? {
+        let columns = match self.positions(Some(&index))? {
             Some((columns, _)) => columns.clone(),
             None => Vec::new(),
         };

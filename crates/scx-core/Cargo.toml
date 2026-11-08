@@ -70,6 +70,8 @@ flate2 = { version = "1", features = ["zlib-rs"] }
 memmap2 = "0.9"
 # Visium tissue images (spatial/tissue_*_image.png).
 png = "0.18"
+# Fast hashing for the Visium barcode join; already built for parquet.
+ahash = { version = "0.8", default-features = false }
 ndarray = "0.17"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
