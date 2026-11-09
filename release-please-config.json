@@ -9,6 +9,10 @@
         {
           "type": "generic",
           "path": "/r/picklerick/src/rust/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "/r/picklerick/DESCRIPTION"
         }
       ]
     },
