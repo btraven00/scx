@@ -33,6 +33,12 @@ scx inspect --help
 scx validate --help
 ```
 
+## diff
+
+```{bash}
+scx diff --help
+```
+
 ## export
 
 ```{bash}
