@@ -251,6 +251,7 @@ fn infer_column(name: &str, values: Vec<String>) -> Column {
                 codes,
                 levels,
                 ordered: false,
+                level_type: crate::ir::LevelType::Str,
             }
         } else {
             ColumnData::String(values.iter().map(|v| (*v).clone()).collect())
@@ -387,6 +388,7 @@ fn read_parquet_table(path: &Path) -> Result<Table> {
                     codes,
                     levels,
                     ordered: false,
+                    level_type: crate::ir::LevelType::Str,
                 }
             }
             _ => ColumnData::String(

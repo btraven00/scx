@@ -519,6 +519,7 @@ fn build_obs(
                 codes,
                 levels: keys.to_vec(),
                 ordered: false,
+                level_type: crate::ir::LevelType::Str,
             },
         ));
     }
@@ -646,6 +647,18 @@ fn concat_data(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
                 matches!(c, ColumnData::Categorical { levels, ordered: true, .. }
                     if Some(levels) == first_levels)
             });
+            // Typed levels survive only when every input is a categorical
+            // with the same level type; anything else mixes in strings.
+            let mut types = cols.iter().flatten().map(|c| match c {
+                ColumnData::Categorical { level_type, .. } => *level_type,
+                _ => crate::ir::LevelType::Str,
+            });
+            let first = types.next().unwrap_or_default();
+            let level_type = if types.all(|t| t == first) {
+                first
+            } else {
+                crate::ir::LevelType::Str
+            };
             let mut b = CatBuilder::default();
             for (c, &n) in cols.iter().zip(lens) {
                 match c {
@@ -671,6 +684,7 @@ fn concat_data(cols: &[Option<&ColumnData>], lens: &[usize]) -> ColumnData {
                 codes: b.codes,
                 levels: b.levels,
                 ordered,
+                level_type,
             }
         }
     }
@@ -960,6 +974,7 @@ mod tests {
                 codes: vec![0, 1],
                 levels: sv(&["x", "y"]),
                 ordered: false,
+                level_type: crate::ir::LevelType::Str,
             },
             [false, true],
         );

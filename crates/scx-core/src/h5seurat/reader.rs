@@ -317,6 +317,7 @@ fn read_factor_column(file: &File, grp_path: &str) -> Result<(ColumnData, Vec<bo
             codes,
             levels,
             ordered,
+            level_type: crate::ir::LevelType::Str,
         },
         missing,
     ))

@@ -34,9 +34,9 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        bool_level, float_level, Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk,
-        ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsArray, UnsData, UnsTable, VarTable, Varm,
-        UNS_TYPED_MIN,
+        bool_level, float_level, Column, ColumnData, DenseMatrix, Embeddings, LevelType,
+        MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsArray, UnsData, UnsTable,
+        VarTable, Varm, UNS_TYPED_MIN,
     },
     sparse::{csc_row_ptr, csc_to_csr, csr_chunk, csr_rows, csr_to_dense, dense_to_csr},
     stream::DatasetReader,
@@ -696,20 +696,20 @@ fn read_categorical(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)
     let missing = raw.iter().map(|&c| c < 0).collect();
     let codes = raw.iter().map(|&c| c.max(0) as u32).collect();
     let cats = open_array(store, &format!("{path}/categories"))?;
-    let levels = if is_string(&cats) {
-        read_strings(&cats)?
+    let (levels, level_type) = if is_string(&cats) {
+        (read_strings(&cats)?, LevelType::Str)
     } else if is_float(&cats) {
-        read_f64(&cats, None)?
-            .iter()
-            .map(|&v| float_level(v))
-            .collect()
+        let v = read_f64(&cats, None)?;
+        (
+            v.iter().map(|&v| float_level(v)).collect(),
+            LevelType::Float,
+        )
     } else if *cats.data_type() == zdt::bool() {
-        read_bools(&cats)?.iter().map(|&v| bool_level(v)).collect()
+        let v = read_bools(&cats)?;
+        (v.iter().map(|&v| bool_level(v)).collect(), LevelType::Bool)
     } else {
-        read_i64(&cats, None)?
-            .iter()
-            .map(|v| v.to_string())
-            .collect()
+        let v = read_i64(&cats, None)?;
+        (v.iter().map(|v| v.to_string()).collect(), LevelType::Int)
     };
     let ordered = matches!(node(store, path), Some(Node::Group(a))
         if a.get("ordered").and_then(Value::as_bool) == Some(true));
@@ -718,6 +718,7 @@ fn read_categorical(store: &Store, path: &str) -> Result<(ColumnData, Vec<bool>)
             codes,
             levels,
             ordered,
+            level_type,
         },
         missing,
     ))

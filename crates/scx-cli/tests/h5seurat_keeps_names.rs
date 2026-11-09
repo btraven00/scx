@@ -24,6 +24,7 @@ async fn write_source(path: &Path) {
         codes: vec![2, 0, 1],
         levels: vec!["low".into(), "mid".into(), "high".into()],
         ordered: true,
+        level_type: scx_core::ir::LevelType::Str,
     };
     w.write_obs(&ObsTable {
         index: vec!["c0".into(), "c1".into(), "c2".into()],

@@ -276,10 +276,12 @@ fn take_column(c: &Column, idx: &[usize]) -> Column {
             codes,
             levels,
             ordered,
+            level_type,
         } => ColumnData::Categorical {
             codes: t(codes, idx),
             levels: levels.clone(),
             ordered: *ordered,
+            level_type: *level_type,
         },
     };
     Column {

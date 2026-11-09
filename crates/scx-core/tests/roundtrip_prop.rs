@@ -116,6 +116,7 @@ fn column(n: usize) -> impl Strategy<Value = ColumnData> {
                 codes,
                 levels,
                 ordered,
+                level_type: scx_core::ir::LevelType::Str,
             }
         ),
     ]

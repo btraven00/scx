@@ -218,6 +218,7 @@ fn where_skips_the_chunk_copy_fast_path() {
                 codes: vec![0, 1, 0, 0, 1, 0],
                 levels: vec!["a".into(), "b".into()],
                 ordered: false,
+                level_type: scx_core::ir::LevelType::Str,
             },
         ))
         .unwrap();

@@ -1029,6 +1029,7 @@ mod tests {
                         codes: vec![0, 1, 0, 2, 1, 2],
                         levels: vec!["A".into(), "B".into(), "C".into()],
                         ordered: false,
+                        level_type: crate::ir::LevelType::Str,
                     },
                 ),
             ],
@@ -1251,6 +1252,7 @@ mod tests {
                     codes: vec![0, 1, 0, 1],
                     levels: vec!["a".into(), "b".into()],
                     ordered: false,
+                    level_type: crate::ir::LevelType::Str,
                 },
             ),
             Column::with_missing(

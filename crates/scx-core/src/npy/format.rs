@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
-    ir::{Column, ColumnData, DenseMatrix, SparseMatrixCSR},
+    ir::{Column, ColumnData, DenseMatrix, LevelType, SparseMatrixCSR},
 };
 
 use super::meta::*;
@@ -439,6 +439,12 @@ pub(super) fn read_col(col_dir: &Path, name: &str, cm: &ColumnMeta) -> Result<Co
                 codes,
                 levels,
                 ordered: cm.ordered,
+                level_type: match cm.level_type.as_deref() {
+                    Some("int") => LevelType::Int,
+                    Some("float") => LevelType::Float,
+                    Some("bool") => LevelType::Bool,
+                    _ => LevelType::Str,
+                },
             }
         }
         other => {

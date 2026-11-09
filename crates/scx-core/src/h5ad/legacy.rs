@@ -99,6 +99,7 @@ pub(super) fn read_dataframe(file: &Group, path: &str) -> Result<(Vec<String>, V
                             codes,
                             levels,
                             ordered: false,
+                            level_type: crate::ir::LevelType::Str,
                         },
                         missing,
                     ));

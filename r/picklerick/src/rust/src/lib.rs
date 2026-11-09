@@ -413,6 +413,7 @@ fn robj_to_column_data(name: &str, obj: &Robj) -> Result<ColumnData> {
             codes,
             levels,
             ordered: obj.inherits("ordered"),
+            level_type: scx_core::ir::LevelType::Str,
         });
     }
     if let Some(v) = obj.as_logical_slice() {
@@ -924,7 +925,7 @@ fn columns_to_robj(cols: Vec<Column>) -> Robj {
             ColumnData::Float(v)  => v.into_robj(),
             ColumnData::Bool(v)   => v.into_robj(),
             ColumnData::String(v) => v.into_robj(),
-            ColumnData::Categorical { codes, levels, ordered } => {
+            ColumnData::Categorical { codes, levels, ordered, .. } => {
                 // R factor: 1-based integer codes, written straight into the
                 // INTSXP (no intermediate Vec<i32>). NA sentinel = code 0
                 // → level 1 (we have no NA from IR).
