@@ -35,7 +35,8 @@ system HDF5.
 
 Supported inputs: H5AD, MuData `.h5mu` (one modality, chosen with `assay=`),
 H5Seurat (dgCMatrix or BPCells-backed), BPCells
-directories, 10x HDF5, MatrixMarket, and AnnData Zarr. Engine errors are
+directories, 10x HDF5, MatrixMarket, 10x Visium and Visium HD (Space Ranger
+`outs/`, or one HD bin directory), and AnnData Zarr. Engine errors are
 raised as `pk.PickleRickError`.
 
 `convert` streams the matrix in chunks of `chunk_size` cells, so peak
