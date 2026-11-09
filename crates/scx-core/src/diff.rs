@@ -403,11 +403,13 @@ fn compare_columns(
             ColumnData::Categorical {
                 levels: la,
                 ordered: oa,
+                level_type: ta,
                 ..
             },
             ColumnData::Categorical {
                 levels: lb,
                 ordered: ob,
+                level_type: tb,
                 ..
             },
         ) = (&ca.data, &cb.data)
@@ -417,6 +419,15 @@ fn compare_columns(
                 differ.push(format!("{}: ordered {oa} vs {ob}", ca.name));
             } else if la != lb && n_diff == 0 {
                 notes.push(format!("{}: same values, levels in another order", ca.name));
+            }
+            // h5seurat and R store levels as strings: a note, like a dtype.
+            if ta != tb {
+                notes.push(format!(
+                    "{}: {} levels vs {} levels",
+                    ca.name,
+                    ta.as_str(),
+                    tb.as_str()
+                ));
             }
         }
         if n_diff == 0 {
@@ -1128,6 +1139,7 @@ mod tests {
                             codes: vec![0, 1, 0],
                             levels: vec!["B".into(), "T".into()],
                             ordered: false,
+                            level_type: crate::ir::LevelType::Str,
                         },
                         mask: None,
                     },
@@ -1219,6 +1231,7 @@ mod tests {
             codes: vec![1, 0, 1],
             levels: vec!["T".into(), "B".into()],
             ordered: false,
+            level_type: crate::ir::LevelType::Str,
         };
         let r = run(&base(), &b, &DiffOptions::default());
         let cols = slot(&r, "obs columns");
@@ -1270,10 +1283,12 @@ mod tests {
                     codes,
                     levels,
                     ordered,
+                    ..
                 } => ColumnData::Categorical {
                     codes: perm.iter().map(|&i| codes[i]).collect(),
                     levels: levels.clone(),
                     ordered: *ordered,
+                    level_type: crate::ir::LevelType::Str,
                 },
                 ColumnData::Int64(v) => ColumnData::Int64(perm.iter().map(|&i| v[i]).collect()),
                 ColumnData::Float(v) => ColumnData::Float(perm.iter().map(|&i| v[i]).collect()),

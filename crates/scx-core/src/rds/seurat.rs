@@ -765,6 +765,7 @@ fn meta_columns(
                         codes,
                         levels,
                         ordered,
+                        level_type: crate::ir::LevelType::Str,
                     },
                     missing,
                 )

@@ -25,6 +25,7 @@ fn synthetic_dataset() -> SingleCellDataset {
                     codes: vec![0, 1, 0],
                     levels: vec!["A".into(), "B".into()],
                     ordered: false,
+                    level_type: crate::ir::LevelType::Str,
                 },
             ),
             Column::new(

@@ -313,6 +313,7 @@ async fn writer_roundtrips_wide_categoricals_and_masked_columns() {
         codes: vec![0, (levels - 1) as u32, 1],
         levels: (0..levels).map(|i| format!("l{i}")).collect(),
         ordered: false,
+        level_type: crate::ir::LevelType::Str,
     };
     let obs = ObsTable {
         index: (0..n).map(|i| format!("c{i}")).collect(),
@@ -941,4 +942,47 @@ async fn writer_x_across_buffered_chunk_stores() {
         r += 1;
     }
     assert_eq!(r, 3);
+}
+
+/// Regression (#161): typed category levels are written back as their type.
+#[tokio::test]
+async fn typed_category_levels_roundtrip() {
+    use zarrs::{array::data_type as zdt, filesystem::FilesystemStore};
+    let obs = crate::ir::typed_level_obs();
+    let n = obs.index.len();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("typed.zarr");
+    let mut w = ZarrAdWriter::create(&out, n, 0, crate::dtype::DataType::F32).unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_x_chunk(&MatrixChunk {
+        row_offset: 0,
+        nrows: n,
+        data: crate::ir::SparseMatrixCSR {
+            shape: (n, 0),
+            indptr: vec![0; n + 1],
+            indices: vec![],
+            data: crate::dtype::TypedVec::F32(vec![]),
+        },
+    })
+    .await
+    .unwrap();
+    w.finalize().await.unwrap();
+
+    let store = std::sync::Arc::new(FilesystemStore::new(&out).unwrap());
+    let dtype = |c: &str| {
+        zarrs::array::Array::open(store.clone(), &format!("/obs/{c}/categories"))
+            .unwrap()
+            .data_type()
+            .clone()
+    };
+    assert_eq!(dtype("len"), zdt::int64());
+    assert_eq!(dtype("frac"), zdt::float64());
+    assert_eq!(dtype("flag"), zdt::bool());
+
+    let got = ZarrAdReader::open(&out, CHUNK)
+        .unwrap()
+        .obs()
+        .await
+        .unwrap();
+    assert_eq!(format!("{:?}", got.columns), format!("{:?}", obs.columns));
 }

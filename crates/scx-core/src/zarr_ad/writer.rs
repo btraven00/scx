@@ -29,8 +29,9 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        uns_chunk, Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable,
-        SparseMatrixCSR, SparseMatrixMeta, UnsArray, UnsData, UnsTable, VarTable, Varm,
+        bool_levels, float_levels, int_levels, uns_chunk, Column, ColumnData, DenseMatrix,
+        Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsArray, UnsData,
+        UnsTable, VarTable, Varm,
     },
     stream::DatasetWriter,
 };
@@ -348,6 +349,7 @@ fn write_column(store: &Store, path: &str, col: &Column) -> Result<()> {
                 codes,
                 levels,
                 ordered,
+                level_type,
             },
             _,
         ) => {
@@ -385,12 +387,18 @@ fn write_column(store: &Store, path: &str, col: &Column) -> Result<()> {
             } else {
                 write_i32s(store, &cp, &codes, array_enc())?;
             }
-            write_strings(
-                store,
-                &format!("{path}/categories"),
-                levels,
-                encoding("string-array", "0.2.0"),
-            )
+            // Typed levels go back as their type; labels that don't parse
+            // (none should) fall back to strings.
+            let cats = format!("{path}/categories");
+            if let Some(v) = int_levels(*level_type, levels) {
+                write_i64s(store, &cats, &v, array_enc())
+            } else if let Some(v) = float_levels(*level_type, levels) {
+                write_f64s(store, &cats, &v, array_enc())
+            } else if let Some(v) = bool_levels(*level_type, levels) {
+                write_bools(store, &cats, &v, array_enc())
+            } else {
+                write_strings(store, &cats, levels, encoding("string-array", "0.2.0"))
+            }
         }
     }
 }

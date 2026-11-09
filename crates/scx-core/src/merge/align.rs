@@ -75,6 +75,7 @@ pub fn reindex_column(col: &Column, reindex: &[Option<usize>]) -> Column {
             codes,
             levels,
             ordered,
+            level_type,
         } => {
             let new_codes = reindex
                 .iter()
@@ -84,6 +85,7 @@ pub fn reindex_column(col: &Column, reindex: &[Option<usize>]) -> Column {
                 codes: new_codes,
                 levels: levels.clone(),
                 ordered: *ordered,
+                level_type: *level_type,
             }
         }
     };
@@ -168,6 +170,7 @@ mod tests {
                 codes: vec![0, 1, 0],
                 levels: vec!["A".to_string(), "B".to_string()],
                 ordered: true,
+                level_type: crate::ir::LevelType::Str,
             },
         );
         let ri = vec![Some(2), None, Some(0)];
@@ -178,6 +181,7 @@ mod tests {
                 codes,
                 levels,
                 ordered,
+                ..
             } => {
                 assert!(ordered);
                 assert_eq!(codes, vec![0, 0, 0]); // patch[2]=0, NA→0, patch[0]=0

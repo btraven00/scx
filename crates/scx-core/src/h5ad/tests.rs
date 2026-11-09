@@ -992,6 +992,7 @@ async fn synthetic_roundtrip_all_slots() {
                     codes: (0..n_obs as u32).map(|i| i % 3).collect(),
                     levels: vec!["A".into(), "B".into(), "C".into()],
                     ordered: false,
+                    level_type: crate::ir::LevelType::Str,
                 },
             ),
         ],
@@ -1162,6 +1163,7 @@ async fn write_synthetic_compressed(compression: Option<u8>) -> NamedTempFile {
                     codes: (0..n_obs as u32).map(|i| i % 3).collect(),
                     levels: vec!["A".into(), "B".into(), "C".into()],
                     ordered: false,
+                    level_type: crate::ir::LevelType::Str,
                 },
             ),
         ],
@@ -1643,6 +1645,7 @@ async fn categorical_codes_wider_than_i16_are_not_truncated() {
                 codes: codes.clone(),
                 levels: levels.clone(),
                 ordered: false,
+                level_type: crate::ir::LevelType::Str,
             },
         )],
     };
@@ -1733,6 +1736,7 @@ async fn categorical_codes_stay_narrow_for_small_level_counts() {
                     codes: (0..n_obs as u32).collect(),
                     levels: (0..n_levels).map(|i| format!("l{i}")).collect(),
                     ordered: false,
+                    level_type: crate::ir::LevelType::Str,
                 },
             )],
         };
@@ -2539,4 +2543,52 @@ async fn sparse_obsm_read_dense_and_dense_obsp_streams() {
         vals.extend(c.unwrap().data.data.to_f64());
     }
     assert_eq!(vals, [0.5, 0.5, 1.0]);
+}
+
+/// Regression (#161): integer, float and bool category levels came back as
+/// strings, so `var/feature_length` (a category of ints in CELLxGENE files)
+/// changed dtype on every conversion. They are written back as their type.
+#[tokio::test]
+async fn typed_category_levels_roundtrip() {
+    let obs = crate::ir::typed_level_obs();
+    let n = obs.index.len();
+    let tmp = NamedTempFile::with_suffix(".h5ad").unwrap();
+    let mut w = H5AdWriter::create(tmp.path(), n, 0, DataType::F32).unwrap();
+    w.write_obs(&obs).await.unwrap();
+    w.write_x_chunk(&MatrixChunk {
+        row_offset: 0,
+        nrows: n,
+        data: SparseMatrixCSR {
+            shape: (n, 0),
+            indptr: vec![0; n + 1],
+            indices: vec![],
+            data: TypedVec::F32(vec![]),
+        },
+    })
+    .await
+    .unwrap();
+    w.finalize().await.unwrap();
+    drop(w);
+
+    let f = File::open(tmp.path()).unwrap();
+    let dtype = |c: &str| {
+        f.dataset(&format!("obs/{c}/categories"))
+            .unwrap()
+            .dtype()
+            .unwrap()
+            .to_descriptor()
+            .unwrap()
+    };
+    use hdf5::types::{FloatSize, IntSize, TypeDescriptor as T};
+    assert_eq!(dtype("len"), T::Integer(IntSize::U8));
+    assert_eq!(dtype("frac"), T::Float(FloatSize::U8));
+    assert_eq!(dtype("flag"), T::Boolean);
+    assert_eq!(dtype("name"), T::VarLenUnicode);
+
+    let got = H5AdReader::open(tmp.path(), 500)
+        .unwrap()
+        .obs()
+        .await
+        .unwrap();
+    assert_eq!(format!("{:?}", got.columns), format!("{:?}", obs.columns));
 }

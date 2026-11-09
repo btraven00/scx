@@ -63,7 +63,8 @@ Values compare as the IR holds them, by class rather than exact storage type:
 - floats: tolerance as above; NaN equals NaN.
 - `Float` vs `Int` with integral values: equal, reported as a dtype note.
 - categoricals: compared as their decoded strings per cell, so recoding is
-  fine. Level order differs → a note; `ordered` flag differs → a difference.
+  fine. Level order differs → a note; `ordered` flag differs → a difference;
+  level type differs (int levels in h5ad, strings in h5seurat) → a note.
 - `String` vs `Categorical` with the same per-cell strings: equal, dtype note.
 - `Bool` vs integer 0/1: dtype note, equal.
 

@@ -14,8 +14,8 @@ use crate::{
     dtype::{DataType, TypedVec},
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
-        SparseMatrixMeta, UnsTable, VarTable, Varm,
+        bool_levels, float_levels, int_levels, Column, ColumnData, DenseMatrix, Embeddings,
+        MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
     stream::DatasetWriter,
 };
@@ -663,6 +663,7 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
                 codes,
                 levels,
                 ordered,
+                level_type,
             },
             _,
         ) => {
@@ -693,8 +694,21 @@ fn write_column(grp: &Group, col: &Column, compression: Option<u8>) -> Result<()
             };
             write_encoding_on_ds(&ds, "array", "0.2.0")?;
 
-            let cat_ds = write_strings(&cat_grp, "categories", levels)?;
-            write_encoding_on_ds(&cat_ds, "string-array", "0.2.0")?;
+            // Typed levels go back as their type; labels that don't parse
+            // (none should) fall back to strings.
+            if let Some(v) = int_levels(*level_type, levels) {
+                let ds = write_1d(&cat_grp, "categories", Array1::from_vec(v), compression)?;
+                write_encoding_on_ds(&ds, "array", "0.2.0")?;
+            } else if let Some(v) = float_levels(*level_type, levels) {
+                let ds = write_1d(&cat_grp, "categories", Array1::from_vec(v), compression)?;
+                write_encoding_on_ds(&ds, "array", "0.2.0")?;
+            } else if let Some(v) = bool_levels(*level_type, levels) {
+                let ds = write_1d(&cat_grp, "categories", Array1::from_vec(v), compression)?;
+                write_encoding_on_ds(&ds, "array", "0.2.0")?;
+            } else {
+                let ds = write_strings(&cat_grp, "categories", levels)?;
+                write_encoding_on_ds(&ds, "string-array", "0.2.0")?;
+            }
         }
     }
     Ok(())

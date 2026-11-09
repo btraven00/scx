@@ -483,6 +483,7 @@ mod tests {
                         codes: vec![0, 1, 0, 1],
                         levels: vec!["A549".into(), "MCF7".into()],
                         ordered: false,
+                        level_type: crate::ir::LevelType::Str,
                     },
                 ),
                 Column::with_missing(

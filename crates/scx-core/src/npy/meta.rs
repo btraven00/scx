@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ir::{Column, ColumnData};
+use crate::ir::{Column, ColumnData, LevelType};
 
 // ---------------------------------------------------------------------------
 // Slot filter
@@ -108,15 +108,25 @@ pub(super) struct ColumnMeta {
     /// Categorical level order is meaningful; absent means false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) ordered: bool,
+    /// Categorical level type (`int`, `float`, `bool`); absent means `str`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) level_type: Option<String>,
 }
 
 impl ColumnMeta {
     pub(super) fn of(col: &Column) -> Self {
-        let (n_levels, ordered) = match &col.data {
+        let (n_levels, ordered, level_type) = match &col.data {
             ColumnData::Categorical {
-                levels, ordered, ..
-            } => (Some(levels.len()), *ordered),
-            _ => (None, false),
+                levels,
+                ordered,
+                level_type,
+                ..
+            } => (
+                Some(levels.len()),
+                *ordered,
+                (*level_type != LevelType::Str).then(|| level_type.as_str().to_string()),
+            ),
+            _ => (None, false, None),
         };
         Self {
             name: col.name.clone(),
@@ -124,6 +134,7 @@ impl ColumnMeta {
             shape: [col.data.len()],
             n_levels,
             ordered,
+            level_type,
         }
     }
 }
@@ -225,6 +236,7 @@ mod tests {
                 codes: vec![0],
                 levels: vec!["a".into()],
                 ordered: false,
+                level_type: LevelType::Str,
             }),
             "categorical"
         );

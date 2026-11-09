@@ -1971,6 +1971,7 @@ mod tests {
                         codes: vec![0, 1, 0],
                         levels: vec!["T cell".into(), "B cell".into()],
                         ordered: false,
+                        level_type: crate::ir::LevelType::Str,
                     },
                 ),
             ],

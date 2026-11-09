@@ -100,10 +100,68 @@ pub enum ColumnData {
     Bool(Vec<bool>),
     Categorical {
         codes: Vec<u32>,
+        /// Level labels. Non-string levels are spelled as pandas prints them
+        /// (`517`, `1.0`, `True`); `level_type` says what they were.
         levels: Vec<String>,
         /// Level order is meaningful (pandas `ordered=True`, R `ordered`).
         ordered: bool,
+        /// The type of the levels in the source, so writers that can store
+        /// typed categories (h5ad, Zarr) write them back as that type.
+        level_type: LevelType,
     },
+}
+
+/// The type of a categorical's levels. Formats whose levels are always
+/// strings (h5seurat, R factors) read and write `Str`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LevelType {
+    #[default]
+    Str,
+    Int,
+    Float,
+    Bool,
+}
+
+impl LevelType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LevelType::Str => "str",
+            LevelType::Int => "int",
+            LevelType::Float => "float",
+            LevelType::Bool => "bool",
+        }
+    }
+}
+
+/// `levels` parsed back to integers, when `level_type` is `Int` and every
+/// label parses; `None` means write them as strings.
+pub(crate) fn int_levels(level_type: LevelType, levels: &[String]) -> Option<Vec<i64>> {
+    (level_type == LevelType::Int)
+        .then(|| levels.iter().map(|l| l.parse().ok()).collect())
+        .flatten()
+}
+
+/// As [`int_levels`], for `Float` levels.
+pub(crate) fn float_levels(level_type: LevelType, levels: &[String]) -> Option<Vec<f64>> {
+    (level_type == LevelType::Float)
+        .then(|| levels.iter().map(|l| l.parse().ok()).collect())
+        .flatten()
+}
+
+/// As [`int_levels`], for `Bool` levels (`True` / `False`).
+pub(crate) fn bool_levels(level_type: LevelType, levels: &[String]) -> Option<Vec<bool>> {
+    (level_type == LevelType::Bool)
+        .then(|| {
+            levels
+                .iter()
+                .map(|l| match l.as_str() {
+                    "True" => Some(true),
+                    "False" => Some(false),
+                    _ => None,
+                })
+                .collect()
+        })
+        .flatten()
 }
 
 /// A float category level as pandas spells it (`str(1.0)` is `1.0`, not `1`),
@@ -490,6 +548,27 @@ pub struct SingleCellDataset {
     pub varm: Varm,
 }
 
+/// Three cells with a categorical of each level type, for the h5ad and Zarr
+/// typed-level round trips (#161).
+#[cfg(test)]
+pub(crate) fn typed_level_obs() -> ObsTable {
+    let cat = |levels: &[&str], level_type| ColumnData::Categorical {
+        codes: vec![1, 0, 1],
+        levels: levels.iter().map(|l| l.to_string()).collect(),
+        ordered: false,
+        level_type,
+    };
+    ObsTable {
+        index: vec!["c0".into(), "c1".into(), "c2".into()],
+        columns: vec![
+            Column::new("len", cat(&["517", "1015"], LevelType::Int)),
+            Column::new("frac", cat(&["0.5", "1.0"], LevelType::Float)),
+            Column::new("flag", cat(&["True", "False"], LevelType::Bool)),
+            Column::new("name", cat(&["a", "b"], LevelType::Str)),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,6 +586,7 @@ mod tests {
                     codes: vec![0, 1],
                     levels: vec!["x".into(), "y".into()],
                     ordered: false,
+                    level_type: crate::ir::LevelType::Str,
                 },
                 2,
                 "categorical",

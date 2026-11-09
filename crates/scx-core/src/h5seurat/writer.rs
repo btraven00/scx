@@ -496,6 +496,7 @@ fn seurat_write_col(grp: &Group, col: &Column) -> Result<()> {
             codes,
             levels,
             ordered,
+            ..
         } => {
             let col_grp = crate::h5::create_group(grp, name)?;
             // 1-based codes, NA_integer_ for missing.

@@ -22,8 +22,8 @@ use crate::{
     dtype::DataType,
     error::{Result, ScxError},
     ir::{
-        bool_level, float_level, Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk,
-        ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
+        bool_level, float_level, Column, ColumnData, DenseMatrix, Embeddings, LevelType,
+        MatrixChunk, ObsTable, SparseMatrixCSR, SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
     sparse::dense_to_csr,
     stream::DatasetReader,
@@ -470,7 +470,7 @@ fn ad_read_categorical_at(
             )))
         }
     };
-    let levels = ad_read_levels(file, categories_path)?;
+    let (levels, level_type) = ad_read_levels(file, categories_path)?;
     let missing: Vec<bool> = raw.iter().map(|&c| c < 0).collect();
     let codes = raw.iter().map(|&c| c.max(0) as u32).collect();
     Ok((
@@ -478,63 +478,66 @@ fn ad_read_categorical_at(
             codes,
             levels,
             ordered: false,
+            level_type,
         },
         missing,
     ))
 }
 
-/// Read a categorical `categories` dataset as level labels. AnnData usually
-/// stores these as strings, but pandas Categoricals with integer/float levels
-/// (e.g. cluster ids stored as small uints) are equally valid. We coerce any
-/// scalar level dtype to its string label so `ColumnData::Categorical` always
-/// carries `Vec<String>` levels.
-fn ad_read_levels(file: &Group, path: &str) -> Result<Vec<String>> {
+/// Read a categorical `categories` dataset as level labels and their type.
+/// AnnData usually stores strings, but pandas categoricals with integer, float
+/// or bool levels (e.g. CELLxGENE's `feature_length`) are equally valid. The
+/// labels are spelled as pandas prints them; the type lets the h5ad and Zarr
+/// writers store the levels back as numbers.
+fn ad_read_levels(file: &Group, path: &str) -> Result<(Vec<String>, LevelType)> {
     let ds = file.dataset(path)?;
-    match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => read_strings(file, path),
-        TypeDescriptor::Integer(IntSize::U1) => {
-            Ok(ds.read_1d::<i8>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Integer(IntSize::U2) => {
-            Ok(ds.read_1d::<i16>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Integer(IntSize::U8) => {
-            Ok(ds.read_1d::<i64>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Integer(_) => {
-            Ok(ds.read_1d::<i32>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Unsigned(IntSize::U1) => {
-            Ok(ds.read_1d::<u8>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Unsigned(IntSize::U2) => {
-            Ok(ds.read_1d::<u16>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Unsigned(IntSize::U8) => {
-            Ok(ds.read_1d::<u64>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Unsigned(_) => {
-            Ok(ds.read_1d::<u32>()?.iter().map(|v| v.to_string()).collect())
-        }
-        TypeDescriptor::Float(FloatSize::U4) => Ok(ds
-            .read_1d::<f32>()?
-            .iter()
-            .map(|&v| float_level(v))
-            .collect()),
-        TypeDescriptor::Float(_) => Ok(ds
-            .read_1d::<f64>()?
-            .iter()
-            .map(|&v| float_level(v))
-            .collect()),
-        TypeDescriptor::Boolean => Ok(ds
-            .read_1d::<bool>()?
-            .iter()
-            .map(|&v| bool_level(v))
-            .collect()),
-        other => Err(ScxError::InvalidFormat(format!(
-            "unsupported categorical level dtype {other:?} at '{path}'"
-        ))),
+    fn ints<T: ToString>(v: impl IntoIterator<Item = T>) -> (Vec<String>, LevelType) {
+        (
+            v.into_iter().map(|x| x.to_string()).collect(),
+            LevelType::Int,
+        )
     }
+    Ok(match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::VarLenUnicode | TypeDescriptor::VarLenAscii => {
+            (read_strings(file, path)?, LevelType::Str)
+        }
+        TypeDescriptor::Integer(IntSize::U1) => ints(ds.read_1d::<i8>()?),
+        TypeDescriptor::Integer(IntSize::U2) => ints(ds.read_1d::<i16>()?),
+        TypeDescriptor::Integer(IntSize::U8) => ints(ds.read_1d::<i64>()?),
+        TypeDescriptor::Integer(_) => ints(ds.read_1d::<i32>()?),
+        TypeDescriptor::Unsigned(IntSize::U1) => ints(ds.read_1d::<u8>()?),
+        TypeDescriptor::Unsigned(IntSize::U2) => ints(ds.read_1d::<u16>()?),
+        // A u64 level past i64::MAX can't be written back as int64: the
+        // writer then falls back to strings.
+        TypeDescriptor::Unsigned(IntSize::U8) => ints(ds.read_1d::<u64>()?),
+        TypeDescriptor::Unsigned(_) => ints(ds.read_1d::<u32>()?),
+        TypeDescriptor::Float(FloatSize::U4) => (
+            ds.read_1d::<f32>()?
+                .iter()
+                .map(|&v| float_level(v))
+                .collect(),
+            LevelType::Float,
+        ),
+        TypeDescriptor::Float(_) => (
+            ds.read_1d::<f64>()?
+                .iter()
+                .map(|&v| float_level(v))
+                .collect(),
+            LevelType::Float,
+        ),
+        TypeDescriptor::Boolean => (
+            ds.read_1d::<bool>()?
+                .iter()
+                .map(|&v| bool_level(v))
+                .collect(),
+            LevelType::Bool,
+        ),
+        other => {
+            return Err(ScxError::InvalidFormat(format!(
+                "unsupported categorical level dtype {other:?} at '{path}'"
+            )))
+        }
+    })
 }
 
 /// Read a nullable column group (`values` + `mask`, mask true = NA), as
