@@ -46,6 +46,7 @@ One reader for every format, detected by content:
 | H5Seurat (dgCMatrix or BPCells-backed) | ✓ | ✓ |
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
 | 10x MatrixMarket directory | ✓ | |
+| 10x Visium `outs/` and Visium HD bin directories | ✓ | |
 | BPCells matrix directory | ✓ | X only |
 
 Two vignettes: `vignette("overview")` says what the package is and indexes

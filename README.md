@@ -42,6 +42,7 @@ build can opt out with `--no-default-features` — see
 | BPCells matrix directory | ✓ | ✓ X only |
 | 10x HDF5 (Cell Ranger `.h5`) | ✓ | |
 | MatrixMarket `.mtx[.gz]` / 10x MEX directory | ✓ | |
+| 10x Visium (Space Ranger `outs/`) and Visium HD (one bin, e.g. `binned_outputs/square_008um`): positions, scale factors and images, laid out as `scanpy.read_visium` | ✓ | |
 | Parquet, local or S3/GCS/HTTP (build with `--features net`) | ✓ | |
 | Seurat `.rds` / `.rda` (layers, cell and feature metadata, reductions, graphs; v3/v4 `Assay`, v5 `Assay5`) | ✓ | [no](docs/rds-write.md) |
 | bixverse binary sparse store, v3 and v4 (build with `--features bixverse`) | ✓ | |

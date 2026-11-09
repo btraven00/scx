@@ -125,10 +125,16 @@ enum Cli {
     /// Convert between single-cell formats
     ///
     /// Input auto-detected by content:
-    ///   .h5seurat  — SeuratDisk H5Seurat (Seurat v3/v4)
-    ///   .h5ad      — AnnData H5AD (CSR X only)
-    ///   .h5        — SCX internal HDF5 schema, or 10x HDF5 (Cell Ranger output)
+    ///   .h5ad      — AnnData H5AD
+    ///   .h5mu      — MuData (one modality, picked with --assay)
+    ///   .h5seurat  — SeuratDisk H5Seurat (dgCMatrix or BPCells-backed)
+    ///   .rds/.rda  — Seurat object
+    ///   .h5        — 10x HDF5 (Cell Ranger output)
+    ///   .mtx[.gz]  — MatrixMarket, or a 10x MEX directory
     ///   .zarr      — AnnData Zarr store, v2 or v3 (directory)
+    ///   outs/      — 10x Visium (Space Ranger); for Visium HD, one bin
+    ///                directory, e.g. binned_outputs/square_008um
+    ///   BPCells matrix directory; Parquet with the `net` feature
     ///
     /// Output format selected by extension:
     ///   .h5ad      — AnnData H5AD  (default)
