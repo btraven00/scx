@@ -105,6 +105,27 @@ sce
 
 :::
 
+`inspect` shows shapes and names. `scx diff` compares the data: it reads
+both files, in any formats SCX reads, and reports slot by slot whether the
+values survived. Matrices are streamed, so it also works on atlas-sized
+files.
+
+```{bash}
+scx diff tiny_v4.h5seurat tiny_cli.h5ad
+```
+
+Each slot is `SAME`, `DIFF`, `ONLY A` or `ONLY B`, or `SKIPPED` when it
+can't be compared. Floats are equal within `--rtol` (default `1e-6`, so an
+`f64` to `f32` conversion passes); `--exact` turns the tolerance off. What a
+conversion legitimately changes, such as a storage dtype or the order of
+categorical levels, is printed as a `NOTE` and is not a difference.
+`--only X,obs` limits the comparison to some slots, `--map X=layers/data`
+pairs matrices stored under different names, and `--json` prints the report
+for a script. `diff` exits 0 when everything compared is the same and 1 when
+something differs or was skipped, so a pipeline can stop on a lossy
+conversion. It is in the command line only; the full rules are in
+[docs/diff.md](https://github.com/btraven00/scx/blob/main/docs/diff.md).
+
 ## Convert a subset of cells
 
 `--where` writes only the cells whose `obs` matches, without reading the
@@ -155,11 +176,11 @@ name.
 `scx convert` records where its output came from, in two places. The
 `provenance` section of `scx inspect tiny_cli.h5ad` above is the first: a
 block in `uns["scx_provenance"]` with the SCX version and the source file's
-path and SHA-256. It depends only on the input, so it is the same every
-time that input is converted.
+path and hash (BLAKE3 by default). It depends only on the input, so it is
+the same every time that input is converted.
 
 The second is a sidecar file next to the output, which adds what is
-particular to one run: when the conversion ran, and the output's SHA-256 and
+particular to one run: when the conversion ran, and the output's hash and
 shape.
 
 ```{bash}
@@ -170,8 +191,10 @@ A conversion with `--where` adds the filter to both records, as
 `"where": {"cell_type": ["T"]}`.
 
 In a pipeline that downloads its input, `--source-url` adds the origin URL
-to both records, and `--source-sha256` passes in a hash the downloader
-already computed, so SCX doesn't read the source a second time to hash it.
+to both records. `--source-hash sha256` records the SHA-256 that
+repositories publish instead of BLAKE3, and `--source-sha256` passes in a
+hash the downloader already computed, so SCX doesn't hash the source
+itself.
 
 Provenance is written by the command line only: `convert()` in Python and R
 writes neither the block nor the sidecar. The record formats are described

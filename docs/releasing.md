@@ -105,8 +105,11 @@ scx-core    = "X.Y.Z" # x-release-please-version
 ```
 
 The marker comment lets the release PR bump this requirement with the other
-versions; don't edit it by hand. Which scx-core a build uses depends on where
-it runs:
+versions; don't edit it by hand. The package's own `Version` in
+`r/picklerick/DESCRIPTION` moves the same way. DESCRIPTION has no comments, so
+the markers are the two `Config/release-please/*` fields around it.
+
+Which scx-core a build uses depends on where it runs:
 
 | Build | scx-core |
 |---|---|
@@ -163,9 +166,9 @@ gh workflow run python.yml --ref picklerick-vX.Y.Z
 - a macOS arm64 wheel
 - an sdist
 
-Each wheel is tested against anndata and h5py from PyPI. The wheels use the
-abi3 stable ABI, `cp314-abi3`, so one wheel per platform covers Python 3.14 and
-every later version.
+Each wheel is tested against anndata and h5py from PyPI, on Python 3.10, 3.12
+and 3.14. The wheels use the abi3 stable ABI, `cp310-abi3`, so one wheel per
+platform covers Python 3.10 and every later version.
 
 ### 2. Download the artifacts
 
