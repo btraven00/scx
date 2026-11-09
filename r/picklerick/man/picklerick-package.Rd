@@ -6,7 +6,7 @@
 \alias{picklerick-package}
 \title{picklerick: Fast Single-Cell Format Conversion via SCX}
 \description{
-R bindings to the SCX streaming interop engine for single-cell genomics. Reads AnnData (.h5ad and Zarr), H5Seurat, 10x HDF5, 10x MatrixMarket and BPCells files into SingleCellExperiment or Seurat objects, or wraps the matrix in a DelayedArray that reads cells on demand. Converts between formats through a memory-bounded streaming pipeline and inspects file metadata without loading the matrix. No Python dependency.
+R bindings to the SCX streaming interop engine for single-cell genomics. Reads AnnData (.h5ad and Zarr), MuData (.h5mu), H5Seurat, 10x HDF5, 10x MatrixMarket and BPCells files into SingleCellExperiment or Seurat objects, or wraps the matrix in a DelayedArray that reads cells on demand. Converts between formats through a memory-bounded streaming pipeline and inspects file metadata without loading the matrix. No Python dependency.
 }
 \details{
 Start with \code{\link[=read_h5ad]{read_h5ad()}} to read a file into a \code{SingleCellExperiment} or
