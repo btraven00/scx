@@ -42,8 +42,8 @@ fn convert_refuses_unknown_output_extension() {
         "nothing written"
     );
 
-    // A known extension still converts.
-    let out = dir.path().join("out.zarr");
+    // A known extension still converts (h5ad: every build writes it).
+    let out = dir.path().join("out.h5ad");
     let res = scx(&["convert", &tiny_h5ad(), out.to_str().unwrap()]);
     assert!(
         res.status.success(),
