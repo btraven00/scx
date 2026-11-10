@@ -136,8 +136,8 @@ enum Cli {
     ///                directory, e.g. binned_outputs/square_008um
     ///   BPCells matrix directory; Parquet with the `net` feature
     ///
-    /// Output format selected by extension:
-    ///   .h5ad      — AnnData H5AD  (default)
+    /// Output format selected by extension (any other is an error):
+    ///   .h5ad      — AnnData H5AD
     ///   .h5seurat  — SeuratDisk H5Seurat
     ///   .bpcells   — BPCells matrix directory (X + dimnames only)
     ///   .zarr      — AnnData Zarr v3 store (directory)
@@ -454,8 +454,9 @@ enum Cli {
     /// Export a tabular slot to CSV or Parquet
     ///
     /// Reads the specified slot from the input file and writes it as a flat
-    /// table.  The output format is determined by the file extension:
-    ///   .csv      — comma-separated values (default)
+    /// table.  The output format is determined by the file extension (any
+    /// other is an error):
+    ///   .csv      — comma-separated values
     ///   .parquet  — Apache Parquet
     ///
     /// Supported slots:
@@ -991,6 +992,16 @@ async fn run() -> anyhow::Result<()> {
 
             let input_path = Path::new(&input);
             let output_path = Path::new(&output);
+            // The extension picks the writer; anything else used to become an
+            // h5ad under the wrong name. Checked before the input is read.
+            if !matches!(
+                output_path.extension().and_then(|e| e.to_str()),
+                Some("h5ad" | "h5seurat" | "zarr" | "bpcells")
+            ) {
+                anyhow::bail!(
+                    "unsupported output extension for '{output}': use .h5ad, .h5seurat, .zarr or .bpcells"
+                );
+            }
 
             // The source hash is only needed for the provenance records, so it
             // is computed on its own thread while the conversion runs.
