@@ -42,31 +42,47 @@ pub(crate) fn csc_to_csr(
     data: &TypedVec,
 ) -> SparseMatrixCSR {
     let row_ptr = csc_row_ptr(shape.0, indices);
-    // Destination of each stored entry: its row's next free slot. Walking the
-    // columns in order keeps every row's column ids ascending.
-    let mut next: Vec<u64> = row_ptr[..shape.0].to_vec();
-    let mut dest = vec![0usize; indices.len()];
-    let mut csr_indices = vec![0u32; indices.len()];
-    for col in 0..shape.1 {
-        for k in indptr[col] as usize..indptr[col + 1] as usize {
-            let r = indices[k] as usize;
-            dest[k] = next[r] as usize;
-            csr_indices[dest[k]] = col as u32;
-            next[r] += 1;
-        }
-    }
-    fn scatter<T: Copy + Default>(v: &[T], dest: &[usize]) -> Vec<T> {
+    // Each stored entry goes to its row's next free slot, column id and value
+    // together. Walking the columns in order keeps every row's column ids
+    // ascending. Holds only the input and the output: no per-entry index.
+    fn transpose<T: Copy + Default>(
+        v: &[T],
+        n_cols: usize,
+        indptr: &[u64],
+        indices: &[u32],
+        row_ptr: &[u64],
+    ) -> (Vec<u32>, Vec<T>) {
+        let mut cols = vec![0u32; v.len()];
         let mut out = vec![T::default(); v.len()];
-        for (k, &d) in dest.iter().enumerate() {
-            out[d] = v[k];
+        let mut next: Vec<u64> = row_ptr[..row_ptr.len() - 1].to_vec();
+        for col in 0..n_cols {
+            for k in indptr[col] as usize..indptr[col + 1] as usize {
+                let r = indices[k] as usize;
+                let d = next[r] as usize;
+                cols[d] = col as u32;
+                out[d] = v[k];
+                next[r] += 1;
+            }
         }
-        out
+        (cols, out)
     }
-    let data = match data {
-        TypedVec::F32(v) => TypedVec::F32(scatter(v, &dest)),
-        TypedVec::F64(v) => TypedVec::F64(scatter(v, &dest)),
-        TypedVec::I32(v) => TypedVec::I32(scatter(v, &dest)),
-        TypedVec::U32(v) => TypedVec::U32(scatter(v, &dest)),
+    let (csr_indices, data) = match data {
+        TypedVec::F32(v) => {
+            let (c, d) = transpose(v, shape.1, indptr, indices, &row_ptr);
+            (c, TypedVec::F32(d))
+        }
+        TypedVec::F64(v) => {
+            let (c, d) = transpose(v, shape.1, indptr, indices, &row_ptr);
+            (c, TypedVec::F64(d))
+        }
+        TypedVec::I32(v) => {
+            let (c, d) = transpose(v, shape.1, indptr, indices, &row_ptr);
+            (c, TypedVec::I32(d))
+        }
+        TypedVec::U32(v) => {
+            let (c, d) = transpose(v, shape.1, indptr, indices, &row_ptr);
+            (c, TypedVec::U32(d))
+        }
     };
     SparseMatrixCSR {
         shape,
