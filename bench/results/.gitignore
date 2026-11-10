@@ -2,3 +2,5 @@
 *.html
 *_files/
 *.json
+# Per-release performance records are kept (docs/releasing.md).
+!release-*.json
