@@ -749,13 +749,15 @@ impl Slot {
         chunk: usize,
     ) -> ChunkStream<'r> {
         match self {
-            // TODO: holds all of a gene-major X; compare by gene when both
-            // sides are gene-major if that ever matters at atlas scale.
+            // Reads X once per block of cells that fits the budget; comparing
+            // by gene when both sides are gene-major would read it once.
             Slot::X if !r.x_col_ptr().is_empty() => {
-                tracing::warn!(
-                    "X is gene-major (CSC): reading all of it into memory to compare by cell"
-                );
-                crate::transpose::x_cell_major_stream(r, chunk)
+                tracing::warn!("X is gene-major (CSC): transposing it to compare by cell");
+                crate::transpose::x_cell_major_stream(
+                    r,
+                    crate::transpose::DEFAULT_TRANSPOSE_MEM,
+                    chunk,
+                )
             }
             Slot::X => r.x_stream(),
             Slot::Raw(m) => r.raw_stream(m, chunk),
