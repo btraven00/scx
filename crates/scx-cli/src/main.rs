@@ -247,10 +247,10 @@ enum Cli {
         #[arg(long)]
         gene_major: bool,
 
-        /// Memory budget in GB for transposing X: the nonzeros --gene-major
-        /// holds at a time (less means more reads of X), and the most a
-        /// gene-major (CSC) input may take to be read whole and written by
-        /// cell, for outputs other than `.h5ad` (which keep it gene-major).
+        /// Memory budget in GB for transposing X: the nonzeros held at a time
+        /// when --gene-major writes X by gene, or when a gene-major (CSC)
+        /// input is written by cell (outputs other than `.h5ad`, which keep
+        /// it gene-major). Less memory means more reads of X.
         #[arg(long, value_name = "GB", default_value = "4")]
         transpose_mem: f64,
 
@@ -1333,35 +1333,29 @@ async fn convert_with_reader(
         anyhow::bail!("--gene-major only applies to .h5ad output");
     }
     // Gene-major (CSC) X: into h5ad it stays gene-major, copied by gene with
-    // bounded memory. Every other output takes X by cell, so it is read
-    // whole and transposed, if that fits --transpose-mem. Decided before
-    // anything is written.
+    // bounded memory. Every other output takes X by cell: it is transposed
+    // within --transpose-mem, in one read when it fits, else in blocks of
+    // cells, one read of X each.
     let csc_in = !reader.x_col_ptr().is_empty();
     let copy_csc = csc_in && out_ext == Some("h5ad") && filters.is_empty();
     if csc_in && !copy_csc {
         let need = scx_core::transpose::cell_major_bytes(reader);
         let gb = |b: f64| b / 1e9;
-        if need > transpose_mem as u64 {
-            anyhow::bail!(
-                "{}",
-                format!(
-                    "X is gene-major (CSC); {} output needs it by cell, which means \
-                     holding ~{:.2} GB in memory, over --transpose-mem {:.2} GB. Raise \
-                     --transpose-mem, write .h5ad (X stays gene-major), or {}",
-                    out_ext.unwrap_or("this"),
-                    gb(need as f64),
-                    gb(transpose_mem as f64),
-                    "convert X to CSR first: adata.X = adata.X.tocsr(); adata.write_h5ad(path)"
-                )
-                .if_supports_color(Stderr, |t| t.red())
-            );
-        }
+        let how = if need <= transpose_mem as u64 {
+            format!("reading it once (~{:.2} GB in memory)", gb(need as f64))
+        } else {
+            format!(
+                "~{:.2} GB is over --transpose-mem {:.2} GB, so X is read once per \
+                 block of cells that fits; raise --transpose-mem for fewer reads",
+                gb(need as f64),
+                gb(transpose_mem as f64)
+            )
+        };
         eprintln!(
             "{}",
             format!(
-                "warning: X is gene-major (CSC): reading all of it (~{:.2} GB) into memory \
-                 to write {} output by cell. Write .h5ad to keep it gene-major instead.",
-                gb(need as f64),
+                "warning: X is gene-major (CSC) and {} output needs it by cell: {how}. \
+                 Write .h5ad to keep it gene-major instead.",
                 out_ext.unwrap_or("this")
             )
             .if_supports_color(Stderr, |t| t.red())
@@ -1642,14 +1636,12 @@ async fn convert_with_reader(
             t_x.elapsed()
         );
     } else if csc_in {
-        let x = scx_core::transpose::x_cell_major(reader).await?;
-        for start in (0..n_obs).step_by(chunk_size.max(1)) {
-            let rows = start..(start + chunk_size.max(1)).min(n_obs);
-            writer
-                .write_x_chunk(&scx_core::sparse::csr_rows(&x, rows))
-                .await?;
+        let mut stream =
+            scx_core::transpose::x_cell_major_stream(reader, transpose_mem, chunk_size);
+        while let Some(chunk) = stream.next().await {
+            writer.write_x_chunk(&chunk?).await?;
         }
-        tracing::info!("gene-major X transposed in memory in {:.2?}", t_x.elapsed());
+        tracing::info!("gene-major X transposed by cell in {:.2?}", t_x.elapsed());
     } else if gene_major {
         let blocks = scx_core::transpose::write_x_csc(reader, &mut *writer, transpose_mem).await?;
         tracing::info!(

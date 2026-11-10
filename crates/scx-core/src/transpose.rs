@@ -15,6 +15,10 @@ use crate::h5ad::writer::cast;
 use crate::ir::SparseMatrixCSR;
 use crate::stream::{DatasetReader, DatasetWriter};
 
+/// The default memory budget for transposing X, as `scx convert
+/// --transpose-mem`'s default (4 GB); `scx diff` uses it as is.
+pub const DEFAULT_TRANSPOSE_MEM: usize = 4_000_000_000;
+
 /// Copy gene-major (CSC) X to `writer` by column, as stored: one by-gene
 /// pass, holding one reader chunk of genes at a time. Returns the number of
 /// chunks.
@@ -88,25 +92,68 @@ pub async fn x_cell_major<R: DatasetReader + ?Sized>(reader: &mut R) -> Result<S
     ))
 }
 
-/// Gene-major X as row chunks of `chunk` cells, through [`x_cell_major`]:
-/// holds all of X, so callers that can should stream by gene instead.
+/// Gene-major X as row chunks of `chunk` cells, holding about `mem_bytes`.
+/// When [`cell_major_bytes`] fits, X is read once, through [`x_cell_major`].
+/// Otherwise it is read once to count each cell's nonzeros and then once per
+/// block of consecutive cells whose nonzeros fit: [`write_x_csc`]'s passes
+/// with the axes swapped. One reader chunk is held on top of the budget.
 pub fn x_cell_major_stream<'r>(
     reader: &'r mut (dyn DatasetReader + Send),
+    mem_bytes: usize,
     chunk: usize,
 ) -> crate::stream::ChunkStream<'r> {
     use futures::stream;
-    let (n_obs, chunk) = (reader.shape().0, chunk.max(1));
-    Box::pin(stream::once(x_cell_major(reader)).flat_map(move |res| {
-        match res {
-            Ok(m) => stream::iter(
-                (0..n_obs)
-                    .step_by(chunk)
-                    .map(move |s| Ok(crate::sparse::csr_rows(&m, s..(s + chunk).min(n_obs)))),
-            )
-            .left_stream(),
+    let ((n_obs, n_vars), dtype, chunk) = (reader.shape(), reader.dtype(), chunk.max(1));
+    let by_rows = move |start: usize, m: SparseMatrixCSR| {
+        stream::iter((0..m.shape.0).step_by(chunk).map(move |s| {
+            let mut c = crate::sparse::csr_rows(&m, s..(s + chunk).min(m.shape.0));
+            c.row_offset += start;
+            Ok(c)
+        }))
+    };
+    if cell_major_bytes(reader) <= mem_bytes as u64 {
+        return Box::pin(
+            stream::once(x_cell_major(reader)).flat_map(move |res| match res {
+                Ok(m) => by_rows(0, m).left_stream(),
+                Err(e) => stream::iter([Err(e)]).right_stream(),
+            }),
+        );
+    }
+    // (reader, cell pointer, the blocks of cells still to read)
+    type Plan = (Vec<u64>, std::vec::IntoIter<Range<usize>>);
+    let next_block = move |(reader, plan): (&'r mut (dyn DatasetReader + Send), Option<Plan>)| async move {
+        let (row_ptr, mut blocks) = match plan {
+            Some(p) => p,
+            None => match count_ptr(reader.x_stream_cols(vec![0..n_vars]), n_obs).await {
+                Ok(ptr) => {
+                    let max_nnz = (mem_bytes / (4 + dtype.size())).max(1) as u64;
+                    let blocks = column_blocks(&ptr, max_nnz).into_iter();
+                    (ptr, blocks)
+                }
+                Err(e) => return Some((Err(e), None)),
+            },
+        };
+        let cells = blocks.next()?;
+        let block = read_columns(
+            reader.x_stream_cols(vec![0..n_vars]),
+            &row_ptr,
+            cells.clone(),
+            n_vars,
+            dtype,
+        )
+        .await;
+        let state = block.is_ok().then_some((reader, Some((row_ptr, blocks))));
+        Some((block.map(|m| (cells.start, m)), state))
+    };
+    Box::pin(
+        stream::unfold(Some((reader, None)), move |st| async move {
+            next_block(st?).await
+        })
+        .flat_map(move |res| match res {
+            Ok((start, m)) => by_rows(start, m).left_stream(),
             Err(e) => stream::iter([Err(e)]).right_stream(),
-        }
-    }))
+        }),
+    )
 }
 
 /// Write the reader's X to `writer` by column (CSC), holding about
@@ -128,25 +175,14 @@ pub async fn write_x_csc(
     let (n_obs, n_vars) = reader.shape();
     let dtype = reader.dtype();
 
-    let mut col_ptr = vec![0u64; n_vars + 1];
-    {
-        let mut stream = reader.x_stream();
-        while let Some(chunk) = stream.next().await {
-            for &c in &chunk?.data.indices {
-                col_ptr[c as usize + 1] += 1;
-            }
-        }
-    }
-    for j in 0..n_vars {
-        col_ptr[j + 1] += col_ptr[j];
-    }
+    let col_ptr = count_ptr(reader.x_stream(), n_vars).await?;
 
     // Per nonzero: the u32 cell id and the value, plus the i32 copy of the
     // ids the h5ad writer makes.
     let max_nnz = (mem_bytes / (4 + dtype.size() + 4)).max(1) as u64;
     let blocks = column_blocks(&col_ptr, max_nnz);
     for cols in &blocks {
-        let block = read_columns(reader, &col_ptr, cols.clone(), n_obs, dtype).await?;
+        let block = read_columns(reader.x_stream(), &col_ptr, cols.clone(), n_obs, dtype).await?;
         writer.write_x_columns(&block).await?;
     }
     if blocks.is_empty() {
@@ -180,10 +216,30 @@ fn column_blocks(col_ptr: &[u64], max_nnz: u64) -> Vec<Range<usize>> {
     blocks
 }
 
-/// Columns `cols` of the reader's X as the CSR of their transpose
-/// (columns × cells), from one pass over X.
+/// The pointer array of `stream`'s minor axis: entry `i + 1` counts the
+/// nonzeros with index `i`, cumulated. One pass over the stream.
+async fn count_ptr(mut stream: crate::stream::ChunkStream<'_>, n: usize) -> Result<Vec<u64>> {
+    let mut ptr = vec![0u64; n + 1];
+    while let Some(chunk) = stream.next().await {
+        for &i in &chunk?.data.indices {
+            let slot = ptr.get_mut(i as usize + 1).ok_or_else(|| {
+                ScxError::InvalidFormat(format!("X: index {i} out of range for {n}"))
+            })?;
+            *slot += 1;
+        }
+    }
+    for j in 0..n {
+        ptr[j + 1] += ptr[j];
+    }
+    Ok(ptr)
+}
+
+/// Minor-axis entries `cols` of `stream` (a pass over X by cell or by gene)
+/// as the CSR of their transpose: `cols` × the stream's rows (`n_obs` of
+/// them), from one pass. By cell that is a block of genes of the CSC; by gene,
+/// a block of cells of the CSR.
 async fn read_columns(
-    reader: &mut dyn DatasetReader,
+    mut stream: crate::stream::ChunkStream<'_>,
     col_ptr: &[u64],
     cols: Range<usize>,
     n_obs: usize,
@@ -205,7 +261,6 @@ async fn read_columns(
         DataType::U32 => TypedVec::U32(vec![0; nnz]),
     };
 
-    let mut stream = reader.x_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         let csr = &chunk.data;
@@ -362,6 +417,75 @@ mod tests {
                 };
                 assert_eq!(&v[nz], col.data());
             }
+        }
+    }
+
+    /// Gene-major X back by cell: in one read when it fits the budget, else
+    /// in blocks of cells (one read each). Both give X's rows, in order, in
+    /// chunks of `chunk` cells with their offsets in the full matrix.
+    #[tokio::test]
+    async fn cell_major_stream_reads_blocks_of_cells_within_budget() {
+        let (n_obs, n_vars) = (7, 5);
+        let mut tri = TriMatI::<f32, u32>::new((n_obs, n_vars));
+        for (i, j, v) in [
+            (0, 1, 1.),
+            (0, 4, 2.),
+            (2, 1, 3.),
+            (3, 0, 4.),
+            (5, 1, 5.),
+            (6, 3, 6.),
+            (6, 4, 7.),
+        ] {
+            tri.add_triplet(i, j, v);
+        }
+        let x = tri.to_csr::<u32>();
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("in.h5ad"), tmp.path().join("csc.h5ad"));
+        let frame = |n: usize, p: &str| (0..n).map(|i| format!("{p}{i}")).collect::<Vec<_>>();
+        let obs = ObsTable {
+            index: frame(n_obs, "c"),
+            columns: vec![],
+        };
+        let var = VarTable {
+            index: frame(n_vars, "g"),
+            columns: vec![],
+        };
+        write_h5ad_csr(&src, x.view(), obs, var, &H5AdOptions::default()).unwrap();
+        let mut reader = H5AdReader::open(&src, 2).unwrap();
+        let mut writer = H5AdWriter::create(&dst, n_obs, n_vars, DataType::F32).unwrap();
+        write_x_csc(&mut reader, &mut writer, 1 << 20)
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        // 8 bytes per f32 nonzero: 16 bytes is blocks of at most 2 nonzeros.
+        for budget in [16, 1 << 20] {
+            let mut csc = H5AdReader::open(&dst, 2).unwrap();
+            assert!(!csc.x_col_ptr().is_empty());
+            let chunks: Vec<_> = x_cell_major_stream(&mut csc, budget, 2)
+                .map(|c| c.unwrap())
+                .collect()
+                .await;
+            let mut row = 0;
+            for c in &chunks {
+                assert_eq!(c.row_offset, row, "budget {budget}");
+                assert!(c.nrows <= 2);
+                for r in 0..c.nrows {
+                    let want = x.outer_view(row + r).unwrap();
+                    let nz = c.data.indptr[r] as usize..c.data.indptr[r + 1] as usize;
+                    assert_eq!(
+                        &c.data.indices[nz.clone()],
+                        want.indices(),
+                        "budget {budget}"
+                    );
+                    let TypedVec::F32(v) = &c.data.data else {
+                        panic!("f32")
+                    };
+                    assert_eq!(&v[nz], want.data(), "budget {budget}");
+                }
+                row += c.nrows;
+            }
+            assert_eq!(row, n_obs, "budget {budget}");
         }
     }
 

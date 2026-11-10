@@ -91,8 +91,8 @@ fn gene_major_from_bpcells_h5seurat_matches_plain_convert() {
 }
 
 /// Gene-major X as input. convert keeps it gene-major into h5ad (copied by
-/// gene), transposes it in memory for outputs that take X by cell, with a
-/// warning, and refuses up front when that would pass --transpose-mem.
+/// gene), and transposes it for outputs that take X by cell, with a warning:
+/// in one read when it fits --transpose-mem, else in blocks of cells.
 #[test]
 fn gene_major_input_converts() {
     let tmp = tempfile::tempdir().unwrap();
@@ -142,16 +142,18 @@ fn gene_major_input_converts() {
         );
     }
 
-    // Over budget: refused, nothing written.
+    // Over budget: a block of cells per read (here one cell each), same X.
     let big = tmp.path().join("big.h5seurat");
     let out = scx(&["convert", s(&genes), s(&big), "--transpose-mem", "1e-12"]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "over-budget transpose was accepted");
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("read once per block of cells"), "{err}");
+    let out = scx(&["diff", s(&genes), s(&big)]);
     assert!(
-        err.contains("--transpose-mem") && err.contains("tocsr"),
-        "{err}"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
     );
-    assert!(!big.exists());
 }
 
 /// concat and snapshot still take X by cell only: they refuse gene-major
