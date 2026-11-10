@@ -27,14 +27,23 @@ pub async fn run_export(args: ExportArgs) -> anyhow::Result<()> {
         layer: Some(args.layer.clone()),
         ..scx_core::OpenOptions::new(1)
     };
+    let output_path = PathBuf::from(&args.output);
+    let parquet = match output_path.extension().and_then(|e| e.to_str()) {
+        Some("parquet") => true,
+        Some("csv") => false,
+        _ => anyhow::bail!(
+            "unsupported output extension for '{}': use .csv or .parquet",
+            args.output
+        ),
+    };
     let mut reader = scx_core::open(&args.input, &opts).await?;
 
     let mut df = build_dataframe(&mut *reader, &args.slot).await?;
 
-    let output_path = PathBuf::from(&args.output);
-    match output_path.extension().and_then(|e| e.to_str()) {
-        Some("parquet") => write_parquet(&mut df, &output_path)?,
-        _ => write_csv(&mut df, &output_path)?,
+    if parquet {
+        write_parquet(&mut df, &output_path)?
+    } else {
+        write_csv(&mut df, &output_path)?
     }
 
     eprintln!(
