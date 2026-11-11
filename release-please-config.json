@@ -14,16 +14,19 @@
           "type": "generic",
           "path": "/r/picklerick/DESCRIPTION"
         }
-      ]
+      ],
+      "release-as": "0.6.1"
     },
     "crates/scx-cli": {
       "release-type": "rust",
-      "package-name": "scx-cli"
+      "package-name": "scx-cli",
+      "release-as": "0.6.1"
     },
     "python/picklerick": {
       "release-type": "rust",
       "package-name": "picklerick-py-native",
-      "component": "picklerick"
+      "component": "picklerick",
+      "release-as": "0.6.1"
     }
   },
   "plugins": [
