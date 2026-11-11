@@ -88,6 +88,13 @@ impl ZarrAdReader {
             FilesystemStore::new(&root).map_err(|e| zerr(&root.display().to_string(), e))?,
         );
 
+        // A SpatialData store: read its table, which is an AnnData store.
+        if let Some(Node::Group(attrs)) = node(&store, "") {
+            if attrs.contains_key("spatialdata_attrs") {
+                return Self::open_layer(spatialdata_table(&root)?, chunk_size, layer);
+            }
+        }
+
         // Optional root encoding check, tolerating stores without it (as h5ad).
         if let Some(Node::Group(attrs)) = node(&store, "") {
             if let Some(enc) = attrs.get("encoding-type").and_then(Value::as_str) {
@@ -164,6 +171,34 @@ impl ZarrAdReader {
             &open_array(&self.store, &format!("{}/indptr", self.x_path))?,
             range,
         )
+    }
+}
+
+/// The one table of the SpatialData store at `root` (`tables/<name>`).
+/// Images, labels, points and shapes are not read; with several tables the
+/// caller names one by its path.
+fn spatialdata_table(root: &Path) -> Result<PathBuf> {
+    let dir = root.join("tables");
+    let mut tables: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|it| it.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    tables.retain(|p| p.join("zarr.json").is_file() || p.join(".zgroup").is_file());
+    tables.sort();
+    match &tables[..] {
+        [one] => Ok(one.clone()),
+        [] => Err(ScxError::InvalidFormat(format!(
+            "SpatialData store {} has no tables; scx reads only a store's AnnData table",
+            root.display()
+        ))),
+        many => Err(ScxError::InvalidFormat(format!(
+            "SpatialData store {} has {} tables; pass one as its path: {}",
+            root.display(),
+            many.len(),
+            many.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
     }
 }
 

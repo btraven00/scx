@@ -986,3 +986,39 @@ async fn typed_category_levels_roundtrip() {
         .unwrap();
     assert_eq!(format!("{:?}", got.columns), format!("{:?}", obs.columns));
 }
+
+/// A SpatialData store (as spatialdata 0.8 writes it): root attrs carry
+/// `spatialdata_attrs`, and each table is an AnnData store under `tables/`.
+/// Opening the root reads its one table; with two, the error names both.
+#[tokio::test]
+async fn spatialdata_root_reads_its_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let sd = dir.path().join("sd.zarr");
+    copy_dir(&fixture("small_v3.zarr"), &sd.join("tables/table"));
+    let group = |attrs: &str| {
+        format!(r#"{{"zarr_format": 3, "node_type": "group", "attributes": {attrs}}}"#)
+    };
+    std::fs::write(sd.join("tables/zarr.json"), group("{}")).unwrap();
+    std::fs::write(
+        sd.join("zarr.json"),
+        group(
+            r#"{"spatialdata_attrs": {"version": "0.2", "spatialdata_software_version": "0.8.0"}}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(sd.join("shapes")).unwrap(); // not a table: ignored
+    assert_eq!(detect(&sd), Some(Format::ZarrAd));
+    assert_store_same_as_h5ad(&sd, &fixture("small.h5ad"), "sd.zarr", true).await;
+
+    copy_dir(&fixture("small_v3.zarr"), &sd.join("tables/other"));
+    let err = ZarrAdReader::open(&sd, CHUNK).err().unwrap().to_string();
+    assert!(
+        err.contains("has 2 tables")
+            && err.contains("tables/other")
+            && err.contains("tables/table"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(sd.join("tables")).unwrap();
+    let err = ZarrAdReader::open(&sd, CHUNK).err().unwrap().to_string();
+    assert!(err.contains("has no tables"), "{err}");
+}
