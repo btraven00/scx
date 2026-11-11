@@ -61,7 +61,7 @@ impl Format {
             Format::Parquet => "Parquet",
             Format::Mtx => "MatrixMarket",
             Format::ZarrAd => "Zarr (AnnData)",
-            Format::Rds => "RDS (Seurat)",
+            Format::Rds => "RDS",
             Format::Bixverse => "bixverse store",
             Format::PlainH5 => "HDF5 (unrecognized)",
         }

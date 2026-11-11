@@ -126,7 +126,7 @@ fn inspects_rds_url() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        stdout.contains("RDS (Seurat)") && stdout.contains("6 obs"),
+        stdout.contains("Format : RDS") && stdout.contains("6 obs"),
         "{stdout}"
     );
 }
