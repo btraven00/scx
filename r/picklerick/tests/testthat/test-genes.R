@@ -51,3 +51,15 @@ test_that("gene_blocks covers the genes in order, block by block", {
   expect_identical(do.call(cbind, lapply(seq_len(sub$n), sub$read)), full[, c(9L, 1L, 4L)])
   expect_output(print(sub), "3 genes in 2 blocks")
 })
+
+test_that("forked workers read blocks of an iterator opened in the parent", {
+  skip_on_os("windows") # no fork
+  path <- spe_fixture("visiumhd_spe.rds")
+  it <- gene_blocks(path, block_size = 10L)
+  first <- it$read(1L) # the parent has used its reader threads before forking
+  # A child inheriting rayon's global pool has no threads and hangs; the
+  # reader rebuilds its pool per process.
+  got <- parallel::mclapply(seq_len(it$n), it$read, mc.cores = 2L)
+  expect_identical(got[[1L]], first)
+  expect_identical(do.call(cbind, got), read_genes(path))
+})
