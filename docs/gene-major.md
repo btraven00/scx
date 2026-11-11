@@ -129,25 +129,35 @@ every other reader returns the error above.
 
 ## R objects in `.rds`: no gene-major copy
 
-A Seurat, SingleCellExperiment or SpatialExperiment `.rds` must be
-decompressed in full whatever is read, so a gene-major copy saves nothing.
-`x_stream_cols` on an `.rds` makes one pass over the file and keeps only the
-nonzeros of the selected genes (12 bytes each) plus the `@i` vector a cell
-stream also holds, then emits them by gene, freeing each block as it goes.
-Give each worker its own gene range to bound its memory.
+A Seurat, SingleCellExperiment or SpatialExperiment `.rds` is one gzip
+stream, so a gene-major copy saves nothing: the reader inflates the file
+once at open (it must, to find the object's structure) and records an
+access point every 4 MB of output (the bit position and the 32 KB before
+it, as zlib's `zran.c`). Every later read then starts at the nearest point
+and is split across points to inflate in parallel. `x_stream_cols` reads
+`@i`, counts each selected gene's nonzeros, and transposes `@x` block by
+block, threads writing disjoint slots; memory is 12 bytes per kept nonzero
+plus 4 bytes per nonzero of the matrix.
 
 In R, `read_genes(path, genes)` returns those genes as a cells x genes
-`dgCMatrix`; in Python, `open_stream(path, axis="var", genes=...)` works as
-above. On a 10x Visium HD 8 um SpatialExperiment (443,765 bins x 18,082
-genes, 48.5 M nonzeros, 124 MB gzip), `read_genes` took 3.2 s / 1.1 GB peak
-for 2,000 genes and 5.2 s / 2.3 GB for all of them; `readRDS` alone takes
-4.3 s.
+`dgCMatrix`, and `gene_blocks(path, block_size)` opens the file once and
+reads one block at a time (`$next_block()`, or `$read(k)` from forked
+workers). In Python, `open_stream(path, axis="var", genes=...)` works as
+above.
+
+On a 10x Visium HD 8 um SpatialExperiment (443,765 bins x 18,082 genes,
+48.5 M nonzeros, 124 MB gzip, 16 cores), from Rust: open 0.95 s (the one
+serial inflate is 0.65 s of it), then 2,000 genes in 0.3 s and all genes
+in 0.6 s. In R, `gene_blocks` with 2,000-gene blocks costs about 0.4 s per
+block after the open. `readRDS` alone takes 4.3 s. Only the first gzip
+member is indexed; GEO's gzip-in-gzip `.rds.gz` is read sequentially, one
+inflate per pass.
 
 ## Limits
 
-- Gene-axis streaming reads h5ad and Zarr CSC X, and `.rds` objects in one
-  pass. In R, `read_genes()` reads a gene subset; HDF5Array also reads CSC
-  h5ad by column.
+- Gene-axis streaming reads h5ad and Zarr CSC X, and `.rds` objects through
+  their gzip index. In R, `read_genes()` / `gene_blocks()` read gene subsets;
+  HDF5Array also reads CSC h5ad by column.
 - `.h5ad` output only. Zarr, h5seurat and BPCells output refuse `--gene-major`.
 - `scx convert` on a gene-major input keeps it gene-major in `.h5ad` output,
   copied by gene with bounded memory. Other outputs take X by cell, so X is

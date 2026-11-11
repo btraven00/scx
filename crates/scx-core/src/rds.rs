@@ -8,12 +8,14 @@
 //! With the `net` feature an `.rds` URL is downloaded to a temporary file
 //! first: the reader makes several forward passes over the stream.
 
+mod gz;
 mod sce;
 mod seurat;
 mod xdr;
 
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub use seurat::RdsReader;
 /// The reader's name from when it read Seurat objects only.
@@ -48,6 +50,79 @@ pub(crate) fn open_stream(path: &Path) -> Result<xdr::Xdr<Box<dyn Read + Send>>>
         }
     }
     Ok(xdr::Xdr::new(Box::new(r)))
+}
+
+/// Where a reader goes back to the decompressed stream for its lazy
+/// vectors: through the gzip index built by the first pass when there is
+/// one, else by inflating the file again from its start.
+#[derive(Clone)]
+pub(crate) struct Source {
+    pub(crate) path: PathBuf,
+    index: Option<Arc<gz::GzIndex>>,
+}
+
+type Stream = xdr::Xdr<Box<dyn Read + Send>>;
+
+impl Source {
+    /// Whether reads skip straight to their offset (and run in parallel).
+    pub(crate) fn indexed(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// The stream positioned at `offset`.
+    pub(crate) fn stream_at(&self, offset: u64) -> Result<Stream> {
+        match &self.index {
+            Some(ix) if ix.covers(offset, 0) => Ok(xdr::Xdr::at(
+                Box::new(gz::ParReader::new(ix.clone(), offset)),
+                offset,
+            )),
+            _ => {
+                let mut x = open_stream(&self.path)?;
+                x.seek_to(offset)?;
+                Ok(x)
+            }
+        }
+    }
+
+    /// `len` bytes of the stream at `offset`.
+    pub(crate) fn bytes_at(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        match &self.index {
+            Some(ix) if ix.covers(offset, len as u64) => Ok(ix
+                .read(offset, len)
+                .map_err(|e| ScxError::InvalidFormat(format!("rds: unreadable stream ({e})")))?),
+            _ => self.stream_at(offset)?.bytes(len),
+        }
+    }
+}
+
+/// The stream of `path` from its start, for the reader's first pass. A
+/// plain gzip file (what `saveRDS` writes) is indexed on the way: read the
+/// stream to its end, then [`indexed_source`] makes later passes cheap.
+pub(crate) fn open_indexing(path: &Path) -> Result<(Stream, Arc<Mutex<Option<gz::GzIndex>>>)> {
+    let none = || Arc::new(Mutex::new(None));
+    let mut magic = [0u8; 2];
+    let is_gzip =
+        std::fs::File::open(path)?.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b];
+    if !is_gzip {
+        return Ok((open_stream(path)?, none()));
+    }
+    let (r, slot) = gz::IndexingGz::open(path)?;
+    let mut r = BufReader::with_capacity(1 << 20, r);
+    // gzip in gzip (GEO's x.rds.gz): the outer layer's offsets are not the
+    // stream's, so read it the plain way.
+    if r.fill_buf()?.starts_with(&[0x1f, 0x8b]) {
+        return Ok((open_stream(path)?, none()));
+    }
+    Ok((xdr::Xdr::new(Box::new(r)), slot))
+}
+
+/// The [`Source`] for `path` once the stream from [`open_indexing`] was read
+/// to its end.
+pub(crate) fn indexed_source(path: &Path, slot: &Mutex<Option<gz::GzIndex>>) -> Source {
+    Source {
+        path: path.to_path_buf(),
+        index: slot.lock().unwrap().take().map(Arc::new),
+    }
 }
 
 /// Whether `path` is an R serialization stream (gzip or plain, `.rds` or `.rda`).

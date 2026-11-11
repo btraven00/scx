@@ -197,6 +197,17 @@ impl<R: Read> Xdr<R> {
         Self { r, pos: 0 }
     }
 
+    /// A reader whose first byte is at stream offset `pos`.
+    pub(crate) fn at(r: R, pos: u64) -> Self {
+        Self { r, pos }
+    }
+
+    /// Read to the end of the stream, so a gzip layer checks its trailer.
+    pub(crate) fn drain(&mut self) -> Result<()> {
+        self.pos += std::io::copy(&mut self.r, &mut std::io::sink()).map_err(truncated)?;
+        Ok(())
+    }
+
     pub(crate) fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; n];
         self.r.read_exact(&mut buf).map_err(truncated)?;
