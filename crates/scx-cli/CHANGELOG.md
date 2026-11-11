@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.6.0](https://github.com/btraven00/scx/compare/scx-cli-v0.5.0...scx-cli-v0.6.0) (2026-11-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** ColumnData::Categorical has a new `level_type: LevelType` field (`scx_core::ir::LevelType`: Str, Int, Float, Bool). Constructors must set it (`LevelType::Str` for string levels), and patterns that name fields must add `..`. `levels` stays `Vec<String>`, spelled as pandas prints the values.
+* **uns:** UnsTable has a new public field `arrays`. Struct literals need `..Default::default()`.
+* **cli:** provenance `source.sha256` / `output.sha256` are now `source.hash` / `output.hash` with an algorithm prefix.
+* **core:** ColumnData::Categorical has a new `ordered` field. Constructors must set it, and patterns that name fields must add `..`. In bixverse: add `..` to the Categorical pattern in src/rust/src/single_cell/r_sc_h5ad_arrow.rs, and set `ordered` in src/rust/src/single_cell/r_sc_h5ad.rs (factor_to_categorical), e.g.
+* **core:** ColumnData has a new Int64 variant, so exhaustive matches on it need an extra arm. In bixverse that is one edit: src/rust/src/single_cell/r_sc_h5ad_arrow.rs needs a `ColumnData::Int64(v) => Arc::new(Int64Array::try_new(v.into(), nulls)?)` arm.
+
+### Features
+
+* add scx diff to compare two datasets slot by slot ([b1fe5b8](https://github.com/btraven00/scx/commit/b1fe5b8a9c0add9c92810f3d595d212a999b8a6a))
+* AnnData Zarr v3 output and row-range reads (open_stream rows=/where=) ([0b78f11](https://github.com/btraven00/scx/commit/0b78f114364201e3be68b0f099609d8c9a4d8420))
+* bixverse store reader (v3 and v4) behind the bixverse feature ([41aadd1](https://github.com/btraven00/scx/commit/41aadd1968803d01427b9c57189c6b6608948c84))
+* **cli:** add convert --no-output-hash ([3be3958](https://github.com/btraven00/scx/commit/3be3958e5cef4fe266debc8dace1caf34dd7ad66))
+* **cli:** convert --where COL=VALUE keeps only the matching cells ([a60d3d5](https://github.com/btraven00/scx/commit/a60d3d5f969420354d50c49d64af5b091f45c309))
+* **cli:** convert reads stdin with `-` ([11add67](https://github.com/btraven00/scx/commit/11add677a20648bd58a78cb2db2f4c1eb5d80463))
+* **cli:** inspect asks before downloading a URL over 1 GB ([d7febf7](https://github.com/btraven00/scx/commit/d7febf7ef37eb284baa392c40205031f2c7cf547))
+* **cli:** provenance records source file name and algo-tagged hashes ([d2ecd86](https://github.com/btraven00/scx/commit/d2ecd868bec88fbd1bd36ee152fd5f31691e3d25))
+* **cli:** scx --version, naming the net and zarr features ([4135bb9](https://github.com/btraven00/scx/commit/4135bb9ae112123620a6299bfbc1efb149f63ca4))
+* **cli:** show gene-major X in inspect; budget the transpose with --transpose-mem ([f5bda4e](https://github.com/btraven00/scx/commit/f5bda4ed4fa8f1f14ecbdc1b3caeca6f90907992))
+* **cli:** write obkit phase anchors when OBKIT_DIR is set ([61110ad](https://github.com/btraven00/scx/commit/61110adb5fa2ad480a101a0b84d5f3fc9d4e1599))
+* **convert:** convert gene-major X instead of refusing it ([956032e](https://github.com/btraven00/scx/commit/956032e4ea7b2a1863dcc5938f806e6bf7b61139))
+* **core:** read gzipped .rds.gz, and show what a non-Seurat .rds holds ([e76647c](https://github.com/btraven00/scx/commit/e76647cd87c076fdbc82c0d6031158fa3ec350f0))
+* **core:** read per-cell-list Parquet beyond Tahoe's column names and arrow widths ([53cc756](https://github.com/btraven00/scx/commit/53cc756358ead47f4374a05c9045fa69da307969))
+* **core:** read Seurat objects from .rds/.rda files ([3798c8b](https://github.com/btraven00/scx/commit/3798c8b490e2d34832c3bfed358079055a7bf981))
+* **core:** write X gene-major with bounded memory ([6312be9](https://github.com/btraven00/scx/commit/6312be9e4cf4c3683c5bb235553c4de0cc66cf76))
+* **h5mu:** read one MuData modality ([42e1abd](https://github.com/btraven00/scx/commit/42e1abdfd95834aa2d38e13847a576953d56fb55))
+* read any single-file format from a URL ([af6581d](https://github.com/btraven00/scx/commit/af6581d59eacbc72bcfcb816d4f42f7a59a55159))
+* record the source hash of remote .rds inputs ([a290a74](https://github.com/btraven00/scx/commit/a290a7497375e299c231cedee18fb117582c8ea4))
+* **visium:** read Space Ranger outs/ directories with spatial metadata ([4793c5b](https://github.com/btraven00/scx/commit/4793c5b6f1b42db0036745c382e424c6f7b73ecb))
+* write the matrix to layers/&lt;name&gt; instead of /X (--x-slot for h5ad) ([bcfc791](https://github.com/btraven00/scx/commit/bcfc791ec63ad59b95a13c89ec0bb6a78717fd10))
+
+
+### Bug Fixes
+
+* **cli:** default --assay to the reader's choice, not RNA ([d0e3325](https://github.com/btraven00/scx/commit/d0e3325eeb51f02b3e847536eceed9b37bf79d88))
+* **cli:** inspect .rds URLs instead of failing to detect them ([8250c90](https://github.com/btraven00/scx/commit/8250c908e44d4e8578065d68a6ebf87a3b29adce))
+* **cli:** refuse an output extension scx has no writer for ([cad31d8](https://github.com/btraven00/scx/commit/cad31d810ad02d59c34110b6b8939009453c1d05))
+* **cli:** say a missing input file does not exist ([aadc07f](https://github.com/btraven00/scx/commit/aadc07f8b01645af9e252a8ab260970b5932572e))
+* **convert:** keep AnnData raw in h5ad and Zarr output ([8222696](https://github.com/btraven00/scx/commit/8222696a349fbbb3722a25b717e3b9a7baf43120))
+* **core:** keep int64 obs/var columns instead of clamping to i32 ([4f5d30a](https://github.com/btraven00/scx/commit/4f5d30afd2f832437f2b0f6c8e2fca7e74380799))
+* **core:** keep the ordered flag on categoricals ([ab1f93b](https://github.com/btraven00/scx/commit/ab1f93b9a91a6be06cab5ba860c7a2ff53bd6c20))
+* **core:** keep the type of categorical levels ([aa0d849](https://github.com/btraven00/scx/commit/aa0d8494cd61e60dc546c520468cecfcb8fba7cb)), closes [#161](https://github.com/btraven00/scx/issues/161)
+* **core:** read CSC layers and obsp instead of failing the whole file ([e9133bf](https://github.com/btraven00/scx/commit/e9133bfb3f9a3eda6f108f851b7b74cc276fb319))
+* **core:** refuse gene-major input before writing, and transpose BPCells h5seurat ([156ae97](https://github.com/btraven00/scx/commit/156ae97890106ce8770d5d7d2254c9b8a5cd0253))
+* gate the zarr merge test on the zarr feature ([ba16452](https://github.com/btraven00/scx/commit/ba1645243ff5ab673e8515d273cb6c7e2115dc04))
+* **h5seurat:** copy chunks into datasets with the source's extents ([432dc76](https://github.com/btraven00/scx/commit/432dc76564f54f7b71eacbb3d18fd439e336f6d5))
+* **h5seurat:** keep obsm keys and the ordered flag of categoricals ([2ae2727](https://github.com/btraven00/scx/commit/2ae27278858aa2de2c2bb79de59ab43180b8dcad))
+* make scx validate reject unknown schema keys and exit 2 on errors ([1af32eb](https://github.com/btraven00/scx/commit/1af32eb37839963220b5eca52b7076ecfa12c937))
+* put h5ad raw.X into the h5seurat counts slot ([a257104](https://github.com/btraven00/scx/commit/a257104d8c71ecc3460e0ea4321dc7c8c236032f))
+* **raw:** keep raw.var's columns, not just its index ([f6a5e61](https://github.com/btraven00/scx/commit/f6a5e61498b160dd761bf22576ee78bfa4a458c5))
+* refuse to merge into a timestamped HDF5 file without opt-in ([ea5ed58](https://github.com/btraven00/scx/commit/ea5ed5868cbfd6ec61cad2773f49abbd8092845a))
+* scx-cli bixverse-parquet enables bixverse; test the factory, sidecars and CLI ([a103372](https://github.com/btraven00/scx/commit/a1033721abbf682931d8c05295a90bbf68b39084))
+* **uns:** carry large numeric uns arrays typed, not as JSON ([20ef448](https://github.com/btraven00/scx/commit/20ef448ba811e01de7060c6d63f92b8a8f337823))
+* write merge added_at to the sidecar, not uns ([778e819](https://github.com/btraven00/scx/commit/778e819f10853167f0b4077f5e0c1d9aeb9727e1))
+
+
+### Performance Improvements
+
+* check rows while copying, find chunks in one pass, hash in the background ([8518587](https://github.com/btraven00/scx/commit/851858774f675094487068e6f4194a6b5ec46453))
+* **cli:** hash blake3 output with parallel pread, not a whole-file mmap ([c986f28](https://github.com/btraven00/scx/commit/c986f284de0d26801bce58979ef480e1b50b16fa))
+* **cli:** hash the source with blake3 by default (--source-hash) ([7247a06](https://github.com/btraven00/scx/commit/7247a06a8cf4e3581c1a4680671162ddad6c6b6e))
+* convert holds one metadata frame at a time and hands freed memory back ([0cb70ef](https://github.com/btraven00/scx/commit/0cb70eff35c18857053fcafcdd41645a37f93212))
+* copy an h5ad's X and raw.X into a dgCMatrix h5seurat as stored ([48eaa7d](https://github.com/btraven00/scx/commit/48eaa7dc8c313a58660e832f344f7781323c6d68))
+* **core:** write gene-major X by cell within --transpose-mem ([5868ff8](https://github.com/btraven00/scx/commit/5868ff82565ffc99db916c6663116c34a16fa624))
+* **h5:** inflate each chunk in one call into a buffer of its full size ([98a3bea](https://github.com/btraven00/scx/commit/98a3beae139be90647bb14ef6598efe5487d7133))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.5.0 to 0.6.0
+
 ## [0.5.0](https://github.com/btraven00/scx/compare/scx-cli-v0.4.1...scx-cli-v0.5.0) (2026-10-07)
 
 
