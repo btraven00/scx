@@ -419,9 +419,11 @@ impl GzIndex {
             pieces.push((w[0], head));
             rest = tail;
         }
-        pieces
-            .into_par_iter()
-            .try_for_each(|(at, piece)| self.read_into(at, piece))?;
+        pool().install(|| {
+            pieces
+                .into_par_iter()
+                .try_for_each(|(at, piece)| self.read_into(at, piece))
+        })?;
         Ok(out)
     }
 }
@@ -470,6 +472,33 @@ impl Read for ParReader {
         self.at += n;
         Ok(n)
     }
+}
+
+/// The thread pool for this process's parallel reads.
+///
+/// Not rayon's global pool: a process forked after using it (R's
+/// `parallel::mclapply`) inherits the pool without its threads, and its
+/// first parallel read waits forever. The pool is rebuilt when the process
+/// id changes.
+pub(crate) fn pool() -> Arc<rayon::ThreadPool> {
+    static POOL: Mutex<Option<(u32, Arc<rayon::ThreadPool>)>> = Mutex::new(None);
+    let pid = std::process::id();
+    let mut slot = POOL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((owner, p)) = slot.as_ref() {
+        if *owner == pid {
+            return p.clone();
+        }
+    }
+    let p = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("rds: cannot start reader threads"),
+    );
+    // The parent's pool has no threads here; dropping it would signal them.
+    if let Some(old) = slot.replace((pid, p.clone())) {
+        std::mem::forget(old);
+    }
+    p
 }
 
 #[cfg(test)]

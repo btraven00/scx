@@ -861,10 +861,11 @@ pub(super) fn fetch(src: &Source, nodes: &[&Node]) -> Result<Fetched> {
     }
     if src.indexed() {
         use rayon::prelude::*;
-        return lazy
-            .into_par_iter()
-            .map(|(offset, bytes)| Ok((offset, src.bytes_at(offset, bytes as usize)?)))
-            .collect();
+        return super::gz::pool().install(|| {
+            lazy.into_par_iter()
+                .map(|(offset, bytes)| Ok((offset, src.bytes_at(offset, bytes as usize)?)))
+                .collect()
+        });
     }
     let mut xdr = src.stream_at(0)?;
     for (offset, bytes) in lazy {
@@ -969,9 +970,11 @@ impl Scan {
             } if self.src.indexed() => {
                 use rayon::prelude::*;
                 let raw = self.src.bytes_at(*offset, *len as usize * 4)?;
-                raw.par_chunks_exact(4)
-                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                    .collect()
+                super::gz::pool().install(|| {
+                    raw.par_chunks_exact(4)
+                        .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+                        .collect()
+                })
             }
             Kind::Lazy {
                 num: Num::Int,
@@ -1156,7 +1159,8 @@ impl DatasetReader for RdsReader {
         let (src, parts) = (&self.src, &self.x.parts);
         row_range_chunks(n_vars, ranges.clone(), self.chunk_size, move |cols| {
             if gathered.is_none() {
-                gathered = Some(gather_genes(src, parts, n_vars, &ranges)?);
+                let pool = super::gz::pool();
+                gathered = Some(pool.install(|| gather_genes(src, parts, n_vars, &ranges))?);
             }
             let (pos, parts) = gathered.as_ref().unwrap();
             let mut indptr = vec![0u64];
