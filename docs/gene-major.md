@@ -124,13 +124,30 @@ path:
   pointer as a row pointer would transpose the matrix silently.
 
 In Rust, step 2 is `DatasetReader::x_stream_cols(ranges)`. `H5AdReader` and
-`ZarrAdReader` on CSC X implement it, and every other reader returns the error
-above.
+`ZarrAdReader` on CSC X implement it, and so does the `.rds` reader (below);
+every other reader returns the error above.
+
+## R objects in `.rds`: no gene-major copy
+
+A Seurat, SingleCellExperiment or SpatialExperiment `.rds` must be
+decompressed in full whatever is read, so a gene-major copy saves nothing.
+`x_stream_cols` on an `.rds` makes one pass over the file and keeps only the
+nonzeros of the selected genes (12 bytes each) plus the `@i` vector a cell
+stream also holds, then emits them by gene, freeing each block as it goes.
+Give each worker its own gene range to bound its memory.
+
+In R, `read_genes(path, genes)` returns those genes as a cells x genes
+`dgCMatrix`; in Python, `open_stream(path, axis="var", genes=...)` works as
+above. On a 10x Visium HD 8 um SpatialExperiment (443,765 bins x 18,082
+genes, 48.5 M nonzeros, 124 MB gzip), `read_genes` took 3.2 s / 1.1 GB peak
+for 2,000 genes and 5.2 s / 2.3 GB for all of them; `readRDS` alone takes
+4.3 s.
 
 ## Limits
 
-- Gene-axis streaming reads h5ad and Zarr CSC X. The R binding isn't wired;
-  in R, HDF5Array already reads CSC h5ad by column.
+- Gene-axis streaming reads h5ad and Zarr CSC X, and `.rds` objects in one
+  pass. In R, `read_genes()` reads a gene subset; HDF5Array also reads CSC
+  h5ad by column.
 - `.h5ad` output only. Zarr, h5seurat and BPCells output refuse `--gene-major`.
 - `scx convert` on a gene-major input keeps it gene-major in `.h5ad` output,
   copied by gene with bounded memory. Other outputs take X by cell, so X is

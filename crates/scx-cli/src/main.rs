@@ -128,10 +128,11 @@ enum Cli {
     ///   .h5ad      — AnnData H5AD
     ///   .h5mu      — MuData (one modality, picked with --assay)
     ///   .h5seurat  — SeuratDisk H5Seurat (dgCMatrix or BPCells-backed)
-    ///   .rds/.rda  — Seurat object
+    ///   .rds/.rda  — Seurat object, SingleCellExperiment or SpatialExperiment
     ///   .h5        — 10x HDF5 (Cell Ranger output)
     ///   .mtx[.gz]  — MatrixMarket, or a 10x MEX directory
-    ///   .zarr      — AnnData Zarr store, v2 or v3 (directory)
+    ///   .zarr      — AnnData Zarr store, v2 or v3 (directory), or the one
+    ///                table of a SpatialData store
     ///   outs/      — 10x Visium (Space Ranger); for Visium HD, one bin
     ///                directory, e.g. binned_outputs/square_008um
     ///   BPCells matrix directory; Parquet with the `net` feature
@@ -896,13 +897,13 @@ async fn run() -> anyhow::Result<()> {
                     inspect(&mut r, &input, "MatrixMarket").await?;
                 }
                 Some(Format::Rds) => {
-                    match scx_core::rds::RdsSeuratReader::open(
+                    match scx_core::rds::RdsReader::open(
                         input_path,
                         chunk,
                         assay.as_deref(),
                         layer.as_deref(),
                     ) {
-                        Ok(mut r) => inspect(&mut r, &input, "RDS (Seurat)").await?,
+                        Ok(mut r) => inspect(&mut r, &input, "RDS").await?,
                         // Not something scx converts: show what the file holds.
                         Err(e) => {
                             println!("File   : {input}\nFormat : RDS\n{e}\n");

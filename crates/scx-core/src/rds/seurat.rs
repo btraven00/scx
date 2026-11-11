@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -32,55 +33,62 @@ use crate::ir::{
     Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
     SparseMatrixMeta, VarTable, Varm,
 };
-use crate::stream::{row_chunks, ChunkStream, DatasetReader};
+use crate::stream::{normalize_ranges, row_chunks, row_range_chunks, ChunkStream, DatasetReader};
 
 /// One dgCMatrix layer, genes x cells: its columns are rows of X.
-struct Layer {
-    i: Node,
-    x: Node,
+pub(super) struct Layer {
+    pub(super) i: Node,
+    pub(super) x: Node,
     /// Column pointer (cells + 1 entries).
-    p: Vec<u64>,
+    pub(super) p: Vec<u64>,
     /// First X row this layer fills.
-    row_offset: usize,
+    pub(super) row_offset: usize,
 }
 
 /// One matrix of the assay (X, or another layer): its dgCMatrix parts (one,
 /// or one per split group) in X row order, and the CSR row pointer over them.
-struct Matrix {
-    parts: Vec<Layer>,
-    indptr: Vec<u64>,
+pub(super) struct Matrix {
+    pub(super) parts: Vec<Layer>,
+    pub(super) indptr: Vec<u64>,
 }
 
-pub struct RdsSeuratReader {
-    path: PathBuf,
-    chunk_size: usize,
-    n_vars: usize,
-    x: Matrix,
+/// A Seurat object, or a SummarizedExperiment (SingleCellExperiment,
+/// SpatialExperiment), read from an R data file. See the module docs and
+/// [`super::sce`].
+pub struct RdsReader {
+    pub(super) path: PathBuf,
+    pub(super) chunk_size: usize,
+    pub(super) n_vars: usize,
+    pub(super) x: Matrix,
     /// The assay's other dgCMatrix layers, by base name (`data`, ...).
-    layers: Vec<(String, Matrix)>,
-    obs: ObsTable,
-    var: VarTable,
-    /// The read assay's name: varm keeps only reductions computed on it.
-    assay: String,
+    pub(super) layers: Vec<(String, Matrix)>,
+    pub(super) obs: ObsTable,
+    pub(super) var: VarTable,
     /// The object's cells in object order, and each one's X row.
-    cells: Vec<String>,
-    row_of: HashMap<String, usize>,
-    /// `@reductions` (DimReduc) and `@graphs` (Graph) entries, still lazy.
-    reductions: Vec<(String, Node)>,
-    graphs: Vec<(String, Node)>,
+    pub(super) cells: Vec<String>,
+    pub(super) row_of: HashMap<String, usize>,
+    /// obsm entries by output key (`X_pca`, `spatial`): R numeric matrices,
+    /// cells x k, still lazy.
+    pub(super) obsm_src: Vec<(String, Node)>,
+    /// varm entries by output key: feature loadings, genes x k, still lazy.
+    pub(super) varm_src: Vec<(String, Node)>,
+    /// `@graphs` (Graph) entries, still lazy.
+    pub(super) graphs: Vec<(String, Node)>,
     /// Graphs as CSR in X row order, built by `obsp_metas`.
-    obsp: HashMap<String, SparseMatrixCSR>,
+    pub(super) obsp: HashMap<String, SparseMatrixCSR>,
 }
 
 /// Fetched lazy vectors, keyed by stream offset.
-type Fetched = HashMap<u64, Vec<u8>>;
+pub(super) type Fetched = HashMap<u64, Vec<u8>>;
 
 /// LogMap columns: layer name -> which rows belong to it.
 type Membership = HashMap<String, Vec<bool>>;
 
-impl RdsSeuratReader {
+impl RdsReader {
     /// Open the Seurat object in `path`, reading `layer` (default "counts")
-    /// of `assay` (default: the object's active assay).
+    /// of `assay` (default: the object's active assay). A
+    /// SummarizedExperiment (SingleCellExperiment, SpatialExperiment) is
+    /// read instead when the file holds one: `layer` then names its assay.
     pub fn open(
         path: &Path,
         chunk_size: usize,
@@ -92,7 +100,11 @@ impl RdsSeuratReader {
         let root = Parser::new(&mut xdr).item()?;
         drop(xdr);
 
-        let obj = find_seurat(&root)?;
+        let obj = match (find_seurat(&root), super::sce::find_se(&root)) {
+            (Ok(obj), _) => obj,
+            (Err(_), Some(se)) => return Self::from_se(path, se, chunk_size, assay, layer),
+            (Err(e), None) => return Err(e),
+        };
         let assay_name = match assay {
             Some(a) => a.to_string(),
             None => str1(obj.attr("active.assay")).unwrap_or_else(|| "RNA".into()),
@@ -238,7 +250,36 @@ impl RdsSeuratReader {
                     .collect()
             })
         };
-        let (reductions, graphs) = (named("reductions"), named("graphs"));
+        let reductions = named("reductions");
+        let obsm_src = reductions
+            .iter()
+            .filter_map(|(name, r)| {
+                Some((
+                    format!("X_{}", name.to_lowercase()),
+                    r.attr("cell.embeddings")?.clone(),
+                ))
+            })
+            .collect();
+        // Loadings of reductions computed on the read assay only.
+        let varm_src = reductions
+            .iter()
+            .filter(|(name, r)| {
+                let used = str1(r.attr("assay.used"));
+                let ok = used.as_deref().is_none_or(|a| a == assay_name);
+                if !ok {
+                    tracing::info!("rds: varm '{name}' is on assay {used:?}; skipped");
+                }
+                ok
+            })
+            .filter_map(|(name, r)| {
+                Some((
+                    format!("X_{}", name.to_lowercase()),
+                    r.attr("feature.loadings")?.clone(),
+                ))
+            })
+            .filter(|(_, n)| n.len() > 0)
+            .collect();
+        let graphs = named("graphs");
         let obs = ObsTable {
             index: order.iter().map(|&k| cells[k].clone()).collect(),
             columns: match meta {
@@ -257,10 +298,10 @@ impl RdsSeuratReader {
                 index: genes,
                 columns: var_columns,
             },
-            assay: assay_name,
             cells,
             row_of,
-            reductions,
+            obsm_src,
+            varm_src,
             graphs,
             obsp: HashMap::new(),
         })
@@ -289,11 +330,7 @@ impl RdsSeuratReader {
 
     /// Every reduction's cell embeddings, (n_obs, k) in X row order.
     fn read_obsm(&self) -> Result<Embeddings> {
-        let embs: Vec<(&str, &Node)> = self
-            .reductions
-            .iter()
-            .filter_map(|(name, r)| Some((name.as_str(), r.attr("cell.embeddings")?)))
-            .collect();
+        let embs: Vec<(&str, &Node)> = self.obsm_src.iter().map(|(k, n)| (k.as_str(), n)).collect();
         let fetched = fetch(
             &self.path,
             &embs.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
@@ -322,9 +359,9 @@ impl RdsSeuratReader {
             );
             match got {
                 Ok(m) => {
-                    map.insert(format!("X_{}", name.to_lowercase()), m);
+                    map.insert(name.to_string(), m);
                 }
-                Err(e) => tracing::warn!("rds: skipping reduction '{name}': {e}"),
+                Err(e) => tracing::warn!("rds: skipping obsm '{name}': {e}"),
             }
         }
         Ok(Embeddings { map })
@@ -334,20 +371,8 @@ impl RdsSeuratReader {
     /// the full var axis by name: NaN where a gene has no loading, as
     /// Seurat's `Loadings()` covers only the features the reduction used.
     fn read_varm(&self) -> Result<Varm> {
-        let loads: Vec<(&str, &Node)> = self
-            .reductions
-            .iter()
-            .filter(|(name, r)| {
-                let used = str1(r.attr("assay.used"));
-                let ok = used.as_deref().is_none_or(|a| a == self.assay);
-                if !ok {
-                    tracing::info!("rds: varm '{name}' is on assay {used:?}; skipped");
-                }
-                ok
-            })
-            .filter_map(|(name, r)| Some((name.as_str(), r.attr("feature.loadings")?)))
-            .filter(|(_, n)| n.len() > 0)
-            .collect();
+        let loads: Vec<(&str, &Node)> =
+            self.varm_src.iter().map(|(k, n)| (k.as_str(), n)).collect();
         let fetched = fetch(
             &self.path,
             &loads.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
@@ -391,9 +416,9 @@ impl RdsSeuratReader {
             });
             match got {
                 Ok(m) => {
-                    map.insert(format!("X_{}", name.to_lowercase()), m);
+                    map.insert(name.to_string(), m);
                 }
-                Err(e) => tracing::warn!("rds: skipping loadings of '{name}': {e}"),
+                Err(e) => tracing::warn!("rds: skipping varm '{name}': {e}"),
             }
         }
         Ok(Varm { map })
@@ -476,15 +501,15 @@ impl RdsSeuratReader {
 }
 
 /// An R numeric matrix.
-struct RMatrix {
-    nrow: usize,
-    ncol: usize,
+pub(super) struct RMatrix {
+    pub(super) nrow: usize,
+    pub(super) ncol: usize,
     /// Column-major, as R stores it.
-    values: Vec<f64>,
-    rownames: Option<Vec<String>>,
+    pub(super) values: Vec<f64>,
+    pub(super) rownames: Option<Vec<String>>,
 }
 
-fn dense(n: &Node, f: &Fetched) -> Result<RMatrix> {
+pub(super) fn dense(n: &Node, f: &Fetched) -> Result<RMatrix> {
     let dim = match n.attr("dim").map(|d| &d.kind) {
         Some(Kind::Int(d)) if d.len() == 2 => (d[0] as usize, d[1] as usize),
         _ => return Err(bad("matrix without a 2-D dim".into())),
@@ -526,7 +551,7 @@ fn find_seurat(root: &Node) -> Result<&Node> {
         .find(|n| n.has_class("Seurat"))
         .ok_or_else(|| {
             bad(format!(
-                "not a Seurat object; the file holds {}",
+                "not a Seurat object or SummarizedExperiment; the file holds {}",
                 describe(root)
             ))
         })
@@ -534,7 +559,7 @@ fn find_seurat(root: &Node) -> Result<&Node> {
 
 /// What a top-level object is, for the "not a Seurat object" error: its
 /// class, or for a plain list its elements' names and classes.
-fn describe(n: &Node) -> String {
+pub(super) fn describe(n: &Node) -> String {
     let class = |n: &Node| match n.class().join("/") {
         c if c.is_empty() => kind_name(n).to_string(),
         c => c,
@@ -585,7 +610,7 @@ fn kind_name(n: &Node) -> &'static str {
 
 /// The dgCMatrix parts `picked` of one layer, holding `rows` (object cells,
 /// per part), as one matrix over `n_vars` genes.
-fn build_matrix(
+pub(super) fn build_matrix(
     picked: &[(String, &Node)],
     rows: &[Vec<usize>],
     n_vars: usize,
@@ -728,7 +753,7 @@ fn logmap(m: &Node, f: &Fetched) -> Result<(Vec<String>, Membership)> {
 
 /// meta.data columns, reordered to X's row order. Columns of a type with no
 /// equivalent (lists, complex, ...) are skipped with a warning.
-fn meta_columns(
+pub(super) fn meta_columns(
     meta: &Node,
     cells: &[String],
     order: &[usize],
@@ -816,7 +841,7 @@ fn is_na_real(x: f64) -> bool {
 }
 
 /// Read the lazy vectors among `nodes` in one forward pass.
-fn fetch(path: &Path, nodes: &[&Node]) -> Result<Fetched> {
+pub(super) fn fetch(path: &Path, nodes: &[&Node]) -> Result<Fetched> {
     let mut lazy: Vec<(u64, u64)> = nodes
         .iter()
         .filter_map(|n| match n.kind {
@@ -838,7 +863,7 @@ fn fetch(path: &Path, nodes: &[&Node]) -> Result<Fetched> {
     Ok(out)
 }
 
-fn ints(n: &Node, f: &Fetched) -> Result<Vec<i32>> {
+pub(super) fn ints(n: &Node, f: &Fetched) -> Result<Vec<i32>> {
     match &n.kind {
         Kind::Int(v) | Kind::Lgl(v) => Ok(v.clone()),
         Kind::Lazy {
@@ -855,7 +880,7 @@ fn ints(n: &Node, f: &Fetched) -> Result<Vec<i32>> {
     }
 }
 
-fn reals(n: &Node, f: &Fetched) -> Result<Vec<f64>> {
+pub(super) fn reals(n: &Node, f: &Fetched) -> Result<Vec<f64>> {
     match &n.kind {
         Kind::Real(v) => Ok(v.clone()),
         Kind::Lazy {
@@ -872,19 +897,19 @@ fn reals(n: &Node, f: &Fetched) -> Result<Vec<f64>> {
     }
 }
 
-fn slot<'a>(n: &'a Node, name: &str) -> Result<&'a Node> {
+pub(super) fn slot<'a>(n: &'a Node, name: &str) -> Result<&'a Node> {
     n.attr(name)
         .ok_or_else(|| bad(format!("missing slot @{name} on {:?}", n.class())))
 }
 
-fn str1(n: Option<&Node>) -> Option<String> {
+pub(super) fn str1(n: Option<&Node>) -> Option<String> {
     match &n?.kind {
         Kind::Str(v) => v.first().cloned().flatten(),
         _ => None,
     }
 }
 
-fn bad(msg: String) -> ScxError {
+pub(super) fn bad(msg: String) -> ScxError {
     ScxError::InvalidFormat(format!("rds: {msg}"))
 }
 
@@ -991,7 +1016,7 @@ impl Scan {
 }
 
 #[async_trait]
-impl DatasetReader for RdsSeuratReader {
+impl DatasetReader for RdsReader {
     fn shape(&self) -> (usize, usize) {
         (self.x.indptr.len() - 1, self.n_vars)
     }
@@ -1084,6 +1109,42 @@ impl DatasetReader for RdsSeuratReader {
             .collect())
     }
 
+    /// X is stored by cell, but one forward pass can still collect whole
+    /// genes: it keeps only the nonzeros of the genes in `ranges` and emits
+    /// them once the pass is done. Memory is 12 bytes per kept nonzero
+    /// (freed chunk by chunk as they are consumed) plus the `@i` buffer a
+    /// row stream also holds; split the genes across calls to bound it.
+    fn x_stream_cols(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
+        let (n_obs, n_vars) = self.shape();
+        let ranges = normalize_ranges(ranges);
+        let mut gathered: Option<(Vec<u32>, Vec<GeneCol>)> = None;
+        let (path, parts) = (&self.path, &self.x.parts);
+        row_range_chunks(n_vars, ranges.clone(), self.chunk_size, move |cols| {
+            if gathered.is_none() {
+                gathered = Some(gather_genes(path, parts, n_vars, &ranges)?);
+            }
+            let (pos, genes) = gathered.as_mut().unwrap();
+            let mut indptr = vec![0u64];
+            let (mut indices, mut data) = (Vec::new(), Vec::new());
+            for g in cols.clone() {
+                let (rows, vals) = std::mem::take(&mut genes[pos[g] as usize]);
+                indices.extend(rows);
+                data.extend(vals);
+                indptr.push(indices.len() as u64);
+            }
+            Ok(MatrixChunk {
+                row_offset: cols.start,
+                nrows: cols.len(),
+                data: SparseMatrixCSR {
+                    shape: (cols.len(), n_obs),
+                    indptr,
+                    indices,
+                    data: TypedVec::F64(data),
+                },
+            })
+        })
+    }
+
     fn layer_stream<'a>(
         &'a self,
         meta: &'a SparseMatrixMeta,
@@ -1097,6 +1158,76 @@ impl DatasetReader for RdsSeuratReader {
             )),
         }
     }
+}
+
+/// One gene's nonzeros: X rows (ascending) and values.
+type GeneCol = (Vec<u32>, Vec<f64>);
+
+/// The genes of `ranges` (normalized, within `n_vars`) in one forward pass
+/// over `parts`: each gene's position in the returned list (`u32::MAX` when
+/// not selected) and its nonzeros.
+fn gather_genes(
+    path: &Path,
+    parts: &[Layer],
+    n_vars: usize,
+    ranges: &[Range<usize>],
+) -> Result<(Vec<u32>, Vec<GeneCol>)> {
+    let mut pos = vec![u32::MAX; n_vars];
+    let mut n = 0usize;
+    for g in ranges.iter().flat_map(|r| r.clone()) {
+        pos[g] = n as u32;
+        n += 1;
+    }
+    let mut genes: Vec<GeneCol> = (0..n).map(|_| Default::default()).collect();
+    let mut scan = Scan {
+        path: path.to_path_buf(),
+        xdr: None,
+        layer: 0,
+        row: 0,
+        started: false,
+        i: Vec::new(),
+        x_small: None,
+    };
+    let at = |pos: &[u32], g: u32| pos.get(g as usize).map_or(usize::MAX, |&p| p as usize);
+    for l in parts {
+        scan.start_layer(l)?;
+        if scan.i.iter().any(|&g| g as usize >= n_vars) {
+            return Err(bad(format!(
+                "@i holds a gene index past the {n_vars} genes"
+            )));
+        }
+        // Exact capacity: no growth slack on the kept nonzeros.
+        let mut count = vec![0usize; n];
+        for &g in &scan.i {
+            if let Some(c) = count.get_mut(at(&pos, g)) {
+                *c += 1;
+            }
+        }
+        for ((rows, vals), c) in genes.iter_mut().zip(count) {
+            rows.reserve_exact(c);
+            vals.reserve_exact(c);
+        }
+        const BLOCK: usize = 4096; // cells per read of @x
+        let n_rows = l.p.len() - 1;
+        for a in (0..n_rows).step_by(BLOCK) {
+            let b = (a + BLOCK).min(n_rows);
+            let (lo, hi) = (l.p[a] as usize, l.p[b] as usize);
+            let x = match &scan.x_small {
+                Some(x) => x[lo..hi].to_vec(),
+                None => scan.xdr()?.reals(hi - lo)?,
+            };
+            for c in a..b {
+                let row = (l.row_offset + c) as u32;
+                for t in l.p[c] as usize..l.p[c + 1] as usize {
+                    if let Some((rows, vals)) = genes.get_mut(at(&pos, scan.i[t])) {
+                        rows.push(row);
+                        vals.push(x[t - lo]);
+                    }
+                }
+            }
+        }
+    }
+    Ok((pos, genes))
 }
 
 /// Row chunks of a matrix's `parts`, read forward through the stream.

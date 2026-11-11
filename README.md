@@ -36,7 +36,7 @@ build can opt out with `--no-default-features` — see
 | Format | Read | Write |
 |---|:-:|:-:|
 | AnnData `.h5ad` (also the pre-0.7 layout, read only) | ✓ | ✓ |
-| AnnData Zarr (v2, v3; directory) | ✓ | ✓ (v3) |
+| AnnData Zarr (v2, v3; directory), or a SpatialData store's table | ✓ | ✓ (v3) |
 | MuData `.h5mu` (one modality per conversion, picked with `--assay`) | ✓ | |
 | Seurat `.h5seurat` (dgCMatrix or BPCells-backed) | ✓ | ✓ |
 | BPCells matrix directory | ✓ | ✓ X only |
@@ -45,6 +45,7 @@ build can opt out with `--no-default-features` — see
 | 10x Visium (Space Ranger `outs/`) and Visium HD (one bin, e.g. `binned_outputs/square_008um`): positions, scale factors and images, laid out as `scanpy.read_visium` | ✓ | |
 | Parquet, local or S3/GCS/HTTP (build with `--features net`) | ✓ | |
 | Seurat `.rds` / `.rda` (layers, cell and feature metadata, reductions, graphs; v3/v4 `Assay`, v5 `Assay5`) | ✓ | [no](docs/rds-write.md) |
+| SingleCellExperiment / SpatialExperiment `.rds` (dgCMatrix assays, colData, rowData, reducedDims, spatialCoords) | ✓ | |
 | bixverse binary sparse store, v3 and v4 (build with `--features bixverse`) | ✓ | |
 
 Any readable format converts to any writable one: everything goes through a
