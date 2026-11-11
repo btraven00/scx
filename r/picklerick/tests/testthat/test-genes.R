@@ -31,3 +31,23 @@ test_that("read_genes keeps the requested order, by position or name", {
   expect_error(read_genes(path, "NOT_A_GENE"), "NOT_A_GENE")
   expect_error(read_genes(path, 31L), "beyond")
 })
+
+test_that("gene_blocks covers the genes in order, block by block", {
+  path <- spe_fixture("visiumhd_spe.rds")
+  full <- read_genes(path)
+  it <- gene_blocks(path, block_size = 7L)
+  expect_identical(it$n, 5L)
+  expect_identical(lengths(it$genes), c(7L, 7L, 7L, 7L, 2L))
+  got <- list()
+  while (!is.null(m <- it$next_block())) got[[length(got) + 1L]] <- m
+  expect_length(got, 5L)
+  expect_null(it$next_block())
+  expect_identical(do.call(cbind, got), full)
+  # Random access, as forked workers would use it.
+  expect_identical(it$read(3L), full[, 15:21])
+  expect_error(it$read(6L), "no block 6")
+
+  sub <- gene_blocks(path, block_size = 2L, genes = colnames(full)[c(9L, 1L, 4L)])
+  expect_identical(do.call(cbind, lapply(seq_len(sub$n), sub$read)), full[, c(9L, 1L, 4L)])
+  expect_output(print(sub), "3 genes in 2 blocks")
+})

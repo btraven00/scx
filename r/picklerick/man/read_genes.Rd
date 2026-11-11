@@ -21,20 +21,18 @@ x cells.
 }
 \description{
 Reads only the genes in \code{genes} from \code{path}, for per-gene work (model
-fitting, tests) on a gene subset, e.g. one block per worker.
+fitting, tests) on a gene subset.
 }
 \details{
 Gene-major \code{.h5ad} / Zarr stores (written with
 \code{convert(..., gene_major = TRUE)}) read just those genes. A Seurat,
-SingleCellExperiment or SpatialExperiment \code{.rds} is decompressed once per
-call, keeping only the selected genes' nonzeros: memory is about 12 bytes
-per kept nonzero, so give each worker its own block of genes. Cell-major
-\code{.h5ad} and other formats are refused; convert them with
-\code{gene_major = TRUE} first.
+SingleCellExperiment or SpatialExperiment \code{.rds} is inflated once to
+index it, and the selected genes are then read in parallel; memory is
+about 12 bytes per kept nonzero plus 4 bytes per nonzero of the whole
+matrix. Cell-major \code{.h5ad} and other formats are refused; convert them
+with \code{gene_major = TRUE} first. To read many blocks of one file, use
+\code{\link[=gene_blocks]{gene_blocks()}}, which opens it once.
 }
-\examples{
-\dontrun{
-blocks <- split(seq_len(n_genes), ceiling(seq_len(n_genes) / 2000))
-fits <- parallel::mclapply(blocks, function(g) fit(read_genes("spe.rds", g)))
-}
+\seealso{
+\code{\link[=gene_blocks]{gene_blocks()}}
 }

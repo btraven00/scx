@@ -794,48 +794,68 @@ fn scx_read_rows_inner(
     .map_err(|e: anyhow::Error| Error::from(e.to_string()))
 }
 
-/// The genes `starts[k]..ends[k]` (0-based, half-open, sorted, disjoint) of
-/// X at `input`, as one CSR triplet (selected genes x cells). Gene-major
-/// h5ad / Zarr read only those genes; an `.rds` keeps only their nonzeros
-/// in one pass over the file.
-/// @noRd
-#[extendr]
-fn scx_read_cols(input: &str, chunk_size: i32, starts: &[i32], ends: &[i32]) -> Robj {
-    or_throw(scx_read_cols_inner(input, chunk_size, starts, ends))
+/// An open dataset that reads blocks of genes, for `read_genes()` and
+/// `gene_blocks()`. Holding it keeps what opening built: an `.rds` is
+/// inflated once, and each block is then read in parallel from its index.
+pub struct GeneReader {
+    reader: Box<dyn DatasetReader + Send>,
+    obs_index: Vec<String>,
+    var_index: Vec<String>,
 }
 
-fn scx_read_cols_inner(input: &str, chunk_size: i32, starts: &[i32], ends: &[i32]) -> Result<Robj> {
-    if starts.len() != ends.len() {
-        return Err(Error::from("starts and ends differ in length"));
-    }
-    block_on(async {
-        let mut r = open_matrix(input, chunk_size.max(1) as usize, "").await?;
-        let (n_obs, n_vars) = r.shape();
-        // No ranges: every gene.
-        let ranges: Vec<std::ops::Range<usize>> = if starts.is_empty() {
-            vec![0..n_vars]
-        } else {
-            starts.iter().zip(ends).map(|(&a, &b)| a.max(0) as usize..b.max(0) as usize).collect()
-        };
-        let var = r.var().await?.index;
-        let var_index: Vec<String> = ranges
-            .iter()
-            .flat_map(|g| var.get(g.clone()).unwrap_or_default().iter().cloned())
-            .collect();
-        let obs_index = r.obs().await?.index;
-        let (indptr, indices, data) = concat_csr(r.x_stream_cols(ranges), var_index.len()).await?;
-        Ok(list!(
-            n_rows    = var_index.len() as i32,
-            n_cols    = n_obs as i32,
-            indptr    = u64_to_intsxp(&indptr),
-            indices   = u32_to_intsxp(&indices),
-            data      = typed_vec_to_robj(data),
-            obs_index = obs_index,
-            var_index = var_index
+/// @noRd
+#[extendr]
+impl GeneReader {
+    fn open(input: &str, chunk_size: i32) -> Self {
+        or_throw(
+            block_on(async {
+                let mut reader = open_matrix(input, chunk_size.max(1) as usize, "").await?;
+                let obs_index = reader.obs().await?.index;
+                let var_index = reader.var().await?.index;
+                Ok(GeneReader {
+                    reader,
+                    obs_index,
+                    var_index,
+                })
+            })
+            .map_err(|e: anyhow::Error| Error::from(e.to_string())),
         )
-        .into_robj())
-    })
-    .map_err(|e: anyhow::Error| Error::from(e.to_string()))
+    }
+
+    fn obs_index(&self) -> Vec<String> {
+        self.obs_index.clone()
+    }
+
+    fn var_index(&self) -> Vec<String> {
+        self.var_index.clone()
+    }
+
+    /// The genes `starts[k]..ends[k]` (0-based, half-open, sorted, disjoint)
+    /// as one CSR triplet (selected genes x cells).
+    fn read(&mut self, starts: &[i32], ends: &[i32]) -> Robj {
+        or_throw(self.read_inner(starts, ends))
+    }
+}
+
+impl GeneReader {
+    fn read_inner(&mut self, starts: &[i32], ends: &[i32]) -> Result<Robj> {
+        if starts.len() != ends.len() {
+            return Err(Error::from("starts and ends differ in length"));
+        }
+        let ranges: Vec<std::ops::Range<usize>> = starts
+            .iter()
+            .zip(ends)
+            .map(|(&a, &b)| a.max(0) as usize..b.max(0) as usize)
+            .collect();
+        let n_genes: usize = ranges.iter().map(|r| r.end.saturating_sub(r.start)).sum();
+        let n_obs = self.obs_index.len();
+        block_on(async {
+            let (indptr, indices, data) =
+                concat_csr(self.reader.x_stream_cols(ranges), n_genes).await?;
+            Ok(csr_to_robj((indptr, indices, data), (n_genes, n_obs)))
+        })
+        .map_err(|e: anyhow::Error| Error::from(e.to_string()))
+    }
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -1032,5 +1052,5 @@ extendr_module! {
     fn scx_write_h5ad;
     fn scx_seed_open;
     fn scx_read_rows;
-    fn scx_read_cols;
+    impl GeneReader;
 }

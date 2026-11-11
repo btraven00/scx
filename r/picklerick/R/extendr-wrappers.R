@@ -64,11 +64,18 @@ scx_read_rows <- function(input, chunk_size, layer, starts, ends) {
   )
 }
 
-#' @keywords internal
-scx_read_cols <- function(input, chunk_size, starts, ends) {
-  .Call(
-    "wrap__scx_read_cols",
-    input, chunk_size, starts, ends,
-    PACKAGE = "picklerick"
-  )
-}
+GeneReader <- new.env(parent = emptyenv())
+
+GeneReader$open <- function(input, chunk_size) .Call("wrap__GeneReader__open", input, chunk_size, PACKAGE = "picklerick")
+
+GeneReader$obs_index <- function() .Call("wrap__GeneReader__obs_index", self, PACKAGE = "picklerick")
+
+GeneReader$var_index <- function() .Call("wrap__GeneReader__var_index", self, PACKAGE = "picklerick")
+
+GeneReader$read <- function(starts, ends) .Call("wrap__GeneReader__read", self, starts, ends, PACKAGE = "picklerick")
+
+#' @export
+`$.GeneReader` <- function (self, name) { func <- GeneReader[[name]]; environment(func) <- environment(); func }
+
+#' @export
+`[[.GeneReader` <- `$.GeneReader`
