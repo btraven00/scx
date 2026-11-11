@@ -127,7 +127,7 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
             Box::new(BpcellsDatasetReader::open_metadata_only(path)?)
         }
         Format::BPCells => Box::new(BpcellsDatasetReader::open(path, cs)?),
-        Format::Rds => Box::new(crate::rds::RdsSeuratReader::open(
+        Format::Rds => Box::new(crate::rds::RdsReader::open(
             path,
             cs,
             opts.assay.as_deref(),

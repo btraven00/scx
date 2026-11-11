@@ -218,8 +218,9 @@ fn non_seurat_rds_is_rejected() {
         .err()
         .unwrap();
     assert!(
-        err.to_string()
-            .contains("not a Seurat object; the file holds a integer vector"),
+        err.to_string().contains(
+            "not a Seurat object or SummarizedExperiment; the file holds a integer vector"
+        ),
         "{err}"
     );
     std::fs::remove_dir_all(&dir).ok();
@@ -419,7 +420,7 @@ fn unreadable_objects_are_described() {
     };
     let e = err("zoo.rds");
     assert!(
-        e.contains("not a Seurat object; the file holds a list of 18 (intseq: integer vector, realseq: numeric vector")
+        e.contains("not a Seurat object or SummarizedExperiment; the file holds a list of 18 (intseq: integer vector, realseq: numeric vector")
             && e.contains("+10 more"),
         "{e}"
     );

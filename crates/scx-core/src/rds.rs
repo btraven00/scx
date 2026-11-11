@@ -1,5 +1,6 @@
 //! R serialized objects: `saveRDS` (`.rds`) and `save` (`.rda`) files holding
-//! a Seurat object. See [`RdsSeuratReader`] for what is read.
+//! a Seurat object or a SummarizedExperiment (SingleCellExperiment,
+//! SpatialExperiment). See [`RdsReader`] for what is read.
 //!
 //! Only gzip-compressed (the `saveRDS` default) and uncompressed XDR streams
 //! are handled; bzip2/xz files get an error saying how to re-save them.
@@ -7,13 +8,16 @@
 //! With the `net` feature an `.rds` URL is downloaded to a temporary file
 //! first: the reader makes several forward passes over the stream.
 
+mod sce;
 mod seurat;
 mod xdr;
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
-pub use seurat::RdsSeuratReader;
+pub use seurat::RdsReader;
+/// The reader's name from when it read Seurat objects only.
+pub type RdsSeuratReader = RdsReader;
 
 use crate::error::{Result, ScxError};
 
