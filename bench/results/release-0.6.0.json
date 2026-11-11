@@ -1,0 +1,247 @@
+{
+ "label": "0.6.0",
+ "scx_version": "scx 0.6.0 (-net +zarr)",
+ "git": "d0811fb",
+ "reference": {
+  "url": "https://datasets.cellxgene.cziscience.com/7bcad396-49c3-40d9-80c1-16d74e7b88bd.h5ad",
+  "sha256": "f07114e5f491aa304e2199665bff500871c47f185d48737efc77d4abf29b9c52"
+ },
+ "rayon_threads": 8,
+ "machine": {
+  "host": "omnibenchmark",
+  "cpu": "AMD EPYC 7742 64-Core Processor",
+  "nproc": 128,
+  "kernel": "6.8.0-117-generic",
+  "loadavg_1m_at_start": 1.3671875
+ },
+ "elapsed_s": 1185,
+ "results": {
+  "e2e/gzip/bpcells": {
+   "wall_s": 36.92,
+   "peak_mb": 295.9140625,
+   "runs": [
+    [
+     37.73,
+     295.9140625
+    ],
+    [
+     36.92,
+     295.9140625
+    ],
+    [
+     36.92,
+     295.9140625
+    ]
+   ]
+  },
+  "e2e/gzip/h5seurat_dgc": {
+   "wall_s": 10.08,
+   "peak_mb": 282.9140625,
+   "runs": [
+    [
+     9.96,
+     283.20703125
+    ],
+    [
+     10.13,
+     282.9140625
+    ],
+    [
+     10.08,
+     281.671875
+    ]
+   ]
+  },
+  "e2e/gzip/h5ad": {
+   "wall_s": 52.57,
+   "peak_mb": 330.88671875,
+   "runs": [
+    [
+     53.05,
+     331.12890625
+    ],
+    [
+     52.57,
+     330.88671875
+    ],
+    [
+     50.21,
+     330.70703125
+    ]
+   ]
+  },
+  "e2e/raw/bpcells": {
+   "wall_s": 25.95,
+   "peak_mb": 296.3984375,
+   "runs": [
+    [
+     25.95,
+     296.3984375
+    ],
+    [
+     26.22,
+     296.3984375
+    ],
+    [
+     25.93,
+     296.40234375
+    ]
+   ]
+  },
+  "e2e/raw/h5seurat_dgc": {
+   "wall_s": 29.51,
+   "peak_mb": 283.3984375,
+   "runs": [
+    [
+     29.71,
+     283.3984375
+    ],
+    [
+     29.51,
+     283.4453125
+    ],
+    [
+     28.64,
+     283.39453125
+    ]
+   ]
+  },
+  "e2e/raw/h5ad": {
+   "wall_s": 35.15,
+   "peak_mb": 331.2109375,
+   "runs": [
+    [
+     32.76,
+     331.39453125
+    ],
+    [
+     35.31,
+     330.99609375
+    ],
+    [
+     35.15,
+     331.2109375
+    ]
+   ]
+  },
+  "criterion/read_raw/gzip/t1": {
+   "median_ms": 299.840594,
+   "ci_ms": [
+    296.04089025,
+    300.740881
+   ]
+  },
+  "criterion/read_raw/gzip/t8": {
+   "median_ms": 101.08187811607144,
+   "ci_ms": [
+    97.692499,
+    105.1703405
+   ]
+  },
+  "criterion/read_raw/raw/t1": {
+   "median_ms": 65.308246475,
+   "ci_ms": [
+    64.51153348214285,
+    68.3787215
+   ]
+  },
+  "criterion/read_raw/raw/t8": {
+   "median_ms": 56.76256433333333,
+   "ci_ms": [
+    54.04542829166667,
+    58.7232669
+   ]
+  },
+  "criterion/read_x/gzip/t1": {
+   "median_ms": 271.00670575,
+   "ci_ms": [
+    266.2397805,
+    272.05181
+   ]
+  },
+  "criterion/read_x/gzip/t8": {
+   "median_ms": 74.14636896527777,
+   "ci_ms": [
+    72.56805178571429,
+    74.97486305
+   ]
+  },
+  "criterion/read_x/raw/t1": {
+   "median_ms": 65.13347171666666,
+   "ci_ms": [
+    64.74810379166667,
+    65.42350901339286
+   ]
+  },
+  "criterion/read_x/raw/t8": {
+   "median_ms": 31.78516705952381,
+   "ci_ms": [
+    31.038973366666667,
+    33.00591585185185
+   ]
+  },
+  "criterion/write_x/bpcells/t1": {
+   "median_ms": 220.6577445,
+   "ci_ms": [
+    219.81210116666668,
+    221.472953
+   ]
+  },
+  "criterion/write_x/bpcells/t8": {
+   "median_ms": 191.521011,
+   "ci_ms": [
+    187.7809095,
+    202.11024916666668
+   ]
+  },
+  "criterion/write_x/h5seurat_dgc/t1": {
+   "median_ms": 234.236656,
+   "ci_ms": [
+    233.7870688333333,
+    237.8269895
+   ]
+  },
+  "criterion/write_x/h5seurat_dgc/t8": {
+   "median_ms": 232.1927675,
+   "ci_ms": [
+    224.52133366666666,
+    240.059658
+   ]
+  },
+  "criterion/write_x/h5ad/t1": {
+   "median_ms": 228.2581406666667,
+   "ci_ms": [
+    227.90770966666665,
+    228.9769925
+   ]
+  },
+  "criterion/write_x/h5ad/t8": {
+   "median_ms": 222.0428715,
+   "ci_ms": [
+    215.48433216666666,
+    226.620618
+   ]
+  },
+  "criterion/bp128/encode_for": {
+   "median_ms": 33.86858325,
+   "ci_ms": [
+    33.8513375,
+    33.8795235
+   ]
+  },
+  "criterion/bp128/decode_d1z": {
+   "median_ms": 31.4204245,
+   "ci_ms": [
+    31.388906,
+    31.472794
+   ]
+  },
+  "criterion/bp128/encode_d1z": {
+   "median_ms": 49.9001955,
+   "ci_ms": [
+    49.885948,
+    49.91328125
+   ]
+  }
+ }
+}
