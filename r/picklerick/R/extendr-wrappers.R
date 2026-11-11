@@ -63,3 +63,12 @@ scx_read_rows <- function(input, chunk_size, layer, starts, ends) {
     PACKAGE = "picklerick"
   )
 }
+
+#' @keywords internal
+scx_read_cols <- function(input, chunk_size, starts, ends) {
+  .Call(
+    "wrap__scx_read_cols",
+    input, chunk_size, starts, ends,
+    PACKAGE = "picklerick"
+  )
+}

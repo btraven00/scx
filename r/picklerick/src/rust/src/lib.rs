@@ -794,6 +794,50 @@ fn scx_read_rows_inner(
     .map_err(|e: anyhow::Error| Error::from(e.to_string()))
 }
 
+/// The genes `starts[k]..ends[k]` (0-based, half-open, sorted, disjoint) of
+/// X at `input`, as one CSR triplet (selected genes x cells). Gene-major
+/// h5ad / Zarr read only those genes; an `.rds` keeps only their nonzeros
+/// in one pass over the file.
+/// @noRd
+#[extendr]
+fn scx_read_cols(input: &str, chunk_size: i32, starts: &[i32], ends: &[i32]) -> Robj {
+    or_throw(scx_read_cols_inner(input, chunk_size, starts, ends))
+}
+
+fn scx_read_cols_inner(input: &str, chunk_size: i32, starts: &[i32], ends: &[i32]) -> Result<Robj> {
+    if starts.len() != ends.len() {
+        return Err(Error::from("starts and ends differ in length"));
+    }
+    block_on(async {
+        let mut r = open_matrix(input, chunk_size.max(1) as usize, "").await?;
+        let (n_obs, n_vars) = r.shape();
+        // No ranges: every gene.
+        let ranges: Vec<std::ops::Range<usize>> = if starts.is_empty() {
+            vec![0..n_vars]
+        } else {
+            starts.iter().zip(ends).map(|(&a, &b)| a.max(0) as usize..b.max(0) as usize).collect()
+        };
+        let var = r.var().await?.index;
+        let var_index: Vec<String> = ranges
+            .iter()
+            .flat_map(|g| var.get(g.clone()).unwrap_or_default().iter().cloned())
+            .collect();
+        let obs_index = r.obs().await?.index;
+        let (indptr, indices, data) = concat_csr(r.x_stream_cols(ranges), var_index.len()).await?;
+        Ok(list!(
+            n_rows    = var_index.len() as i32,
+            n_cols    = n_obs as i32,
+            indptr    = u64_to_intsxp(&indptr),
+            indices   = u32_to_intsxp(&indices),
+            data      = typed_vec_to_robj(data),
+            obs_index = obs_index,
+            var_index = var_index
+        )
+        .into_robj())
+    })
+    .map_err(|e: anyhow::Error| Error::from(e.to_string()))
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 async fn concat_csr(
@@ -988,4 +1032,5 @@ extendr_module! {
     fn scx_write_h5ad;
     fn scx_seed_open;
     fn scx_read_rows;
+    fn scx_read_cols;
 }
