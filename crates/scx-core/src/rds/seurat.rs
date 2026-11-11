@@ -20,13 +20,13 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use futures::stream;
 
-use super::open_stream;
 use super::xdr::{be_f64s, be_i32s, Kind, Node, Num, Parser, Xdr, NA_INT};
+use super::Source;
 use crate::dtype::{DataType, TypedVec};
 use crate::error::{Result, ScxError};
 use crate::ir::{
@@ -56,7 +56,7 @@ pub(super) struct Matrix {
 /// SpatialExperiment), read from an R data file. See the module docs and
 /// [`super::sce`].
 pub struct RdsReader {
-    pub(super) path: PathBuf,
+    pub(super) src: Source,
     pub(super) chunk_size: usize,
     pub(super) n_vars: usize,
     pub(super) x: Matrix,
@@ -66,7 +66,8 @@ pub struct RdsReader {
     pub(super) var: VarTable,
     /// The object's cells in object order, and each one's X row.
     pub(super) cells: Vec<String>,
-    pub(super) row_of: HashMap<String, usize>,
+    /// Each cell's X row, built from the obs index on first use.
+    pub(super) row_of: std::sync::OnceLock<HashMap<String, usize>>,
     /// obsm entries by output key (`X_pca`, `spatial`): R numeric matrices,
     /// cells x k, still lazy.
     pub(super) obsm_src: Vec<(String, Node)>,
@@ -95,14 +96,17 @@ impl RdsReader {
         assay: Option<&str>,
         layer: Option<&str>,
     ) -> Result<Self> {
-        let mut xdr = open_stream(path)?;
+        let (mut xdr, index) = super::open_indexing(path)?;
         xdr.header()?;
         let root = Parser::new(&mut xdr).item()?;
+        // To the gzip trailer: checks the CRC and completes the index.
+        xdr.drain()?;
         drop(xdr);
+        let src = super::indexed_source(path, &index);
 
         let obj = match (find_seurat(&root), super::sce::find_se(&root)) {
             (Ok(obj), _) => obj,
-            (Err(_), Some(se)) => return Self::from_se(path, se, chunk_size, assay, layer),
+            (Err(_), Some(se)) => return Self::from_se(src, se, chunk_size, assay, layer),
             (Err(e), None) => return Err(e),
         };
         let assay_name = match assay {
@@ -152,7 +156,7 @@ impl RdsReader {
         for m in meta.iter().chain(var_meta.iter()) {
             want.extend(m.items().iter().map(|(_, c)| c));
         }
-        let fetched = fetch(path, &want)?;
+        let fetched = fetch(&src, &want)?;
 
         // Cell and gene names, and which cells each layer holds.
         let (cells, genes, members) = if a.has_class("Assay5") {
@@ -237,11 +241,6 @@ impl RdsReader {
             None => Vec::new(),
         };
 
-        let row_of = order
-            .iter()
-            .enumerate()
-            .map(|(row, &k)| (cells[k].clone(), row))
-            .collect();
         let named = |slot_name: &str| -> Vec<(String, Node)> {
             obj.attr(slot_name).map_or_else(Vec::new, |l| {
                 l.names()
@@ -288,7 +287,7 @@ impl RdsReader {
             },
         };
         Ok(Self {
-            path: path.to_path_buf(),
+            src,
             chunk_size,
             n_vars,
             x,
@@ -299,7 +298,7 @@ impl RdsReader {
                 columns: var_columns,
             },
             cells,
-            row_of,
+            row_of: Default::default(),
             obsm_src,
             varm_src,
             graphs,
@@ -317,10 +316,18 @@ impl RdsReader {
                 self.cells.len()
             )));
         }
+        let row_of = self.row_of.get_or_init(|| {
+            self.obs
+                .index
+                .iter()
+                .enumerate()
+                .map(|(row, c)| (c.clone(), row))
+                .collect()
+        });
         names
             .iter()
             .map(|c| {
-                self.row_of
+                row_of
                     .get(c)
                     .copied()
                     .ok_or_else(|| bad(format!("cell '{c}' is not in the object")))
@@ -331,10 +338,7 @@ impl RdsReader {
     /// Every reduction's cell embeddings, (n_obs, k) in X row order.
     fn read_obsm(&self) -> Result<Embeddings> {
         let embs: Vec<(&str, &Node)> = self.obsm_src.iter().map(|(k, n)| (k.as_str(), n)).collect();
-        let fetched = fetch(
-            &self.path,
-            &embs.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
-        )?;
+        let fetched = fetch(&self.src, &embs.iter().map(|(_, n)| *n).collect::<Vec<_>>())?;
         let mut map = HashMap::new();
         for (name, n) in embs {
             let got = dense(n, &fetched).and_then(
@@ -374,7 +378,7 @@ impl RdsReader {
         let loads: Vec<(&str, &Node)> =
             self.varm_src.iter().map(|(k, n)| (k.as_str(), n)).collect();
         let fetched = fetch(
-            &self.path,
+            &self.src,
             &loads.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
         )?;
         let var_pos: HashMap<&str, usize> = self
@@ -436,7 +440,7 @@ impl RdsReader {
                 }
             }
         }
-        let fetched = fetch(&self.path, &want)?;
+        let fetched = fetch(&self.src, &want)?;
         let mut out = HashMap::new();
         for (name, g) in &self.graphs {
             match self.graph_csr(g, &fetched) {
@@ -841,7 +845,7 @@ fn is_na_real(x: f64) -> bool {
 }
 
 /// Read the lazy vectors among `nodes` in one forward pass.
-pub(super) fn fetch(path: &Path, nodes: &[&Node]) -> Result<Fetched> {
+pub(super) fn fetch(src: &Source, nodes: &[&Node]) -> Result<Fetched> {
     let mut lazy: Vec<(u64, u64)> = nodes
         .iter()
         .filter_map(|n| match n.kind {
@@ -855,7 +859,14 @@ pub(super) fn fetch(path: &Path, nodes: &[&Node]) -> Result<Fetched> {
     if lazy.is_empty() {
         return Ok(out);
     }
-    let mut xdr = open_stream(path)?;
+    if src.indexed() {
+        use rayon::prelude::*;
+        return lazy
+            .into_par_iter()
+            .map(|(offset, bytes)| Ok((offset, src.bytes_at(offset, bytes as usize)?)))
+            .collect();
+    }
+    let mut xdr = src.stream_at(0)?;
     for (offset, bytes) in lazy {
         xdr.seek_to(offset)?;
         out.insert(offset, xdr.bytes(bytes as usize)?);
@@ -918,7 +929,7 @@ pub(super) fn bad(msg: String) -> ScxError {
 // TODO: `i` costs 4 bytes per nonzero of the largest layer; spill it to a
 // temp file if that ever outgrows RAM at atlas scale.
 struct Scan {
-    path: PathBuf,
+    src: Source,
     xdr: Option<Xdr<Box<dyn Read + Send>>>,
     layer: usize,
     row: usize,
@@ -928,32 +939,56 @@ struct Scan {
 }
 
 impl Scan {
-    fn xdr(&mut self) -> Result<&mut Xdr<Box<dyn Read + Send>>> {
-        if self.xdr.is_none() {
-            self.xdr = Some(open_stream(&self.path)?);
+    /// The stream at `offset`: a fresh reader with an index, else the
+    /// current one moved forward (or a new one from the start).
+    fn xdr_at(&mut self, offset: u64) -> Result<&mut Xdr<Box<dyn Read + Send>>> {
+        let reuse = !self.src.indexed() && self.xdr.as_ref().is_some_and(|x| x.pos <= offset);
+        if !reuse {
+            self.xdr = Some(self.src.stream_at(offset)?);
         }
-        Ok(self.xdr.as_mut().unwrap())
+        let x = self.xdr.as_mut().unwrap();
+        x.seek_to(offset)?;
+        Ok(x)
+    }
+
+    /// The stream where `start_layer` left it, at the layer's `@x`.
+    fn xdr(&mut self) -> Result<&mut Xdr<Box<dyn Read + Send>>> {
+        self.xdr
+            .as_mut()
+            .ok_or_else(|| bad("@x read before its layer started".into()))
     }
 
     fn start_layer(&mut self, l: &Layer) -> Result<()> {
         let nnz = *l.p.last().unwrap() as usize;
-        let i = match &l.i.kind {
-            Kind::Int(v) => v.clone(),
+        let i: Vec<u32> = match &l.i.kind {
+            Kind::Int(v) => v.iter().map(|&v| v as u32).collect(),
             Kind::Lazy {
                 num: Num::Int,
                 offset,
                 len,
-            } => {
-                let xdr = self.xdr()?;
-                xdr.seek_to(*offset)?;
-                xdr.ints(*len as usize)?
+            } if self.src.indexed() => {
+                use rayon::prelude::*;
+                let raw = self.src.bytes_at(*offset, *len as usize * 4)?;
+                raw.par_chunks_exact(4)
+                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+                    .collect()
             }
+            Kind::Lazy {
+                num: Num::Int,
+                offset,
+                len,
+            } => self
+                .xdr_at(*offset)?
+                .ints(*len as usize)?
+                .into_iter()
+                .map(|v| v as u32)
+                .collect(),
             _ => return Err(bad("@i is not an integer vector".into())),
         };
         if i.len() != nnz || l.x.len() != nnz {
             return Err(bad("@i / @x lengths do not match @p".into()));
         }
-        self.i = i.into_iter().map(|v| v as u32).collect();
+        self.i = i;
         self.x_small = match &l.x.kind {
             Kind::Real(v) => Some(v.clone()),
             Kind::Lazy {
@@ -961,7 +996,7 @@ impl Scan {
                 offset,
                 ..
             } => {
-                self.xdr()?.seek_to(*offset)?;
+                self.xdr_at(*offset)?;
                 None
             }
             _ => return Err(bad("@x is not a double vector".into())),
@@ -1093,7 +1128,7 @@ impl DatasetReader for RdsReader {
     }
 
     fn x_stream(&mut self) -> ChunkStream<'_> {
-        scan_stream(&self.path, &self.x.parts, self.n_vars, self.chunk_size)
+        scan_stream(&self.src, &self.x.parts, self.n_vars, self.chunk_size)
     }
 
     async fn layer_metas(&mut self) -> Result<Vec<SparseMatrixMeta>> {
@@ -1117,19 +1152,23 @@ impl DatasetReader for RdsReader {
     fn x_stream_cols(&mut self, ranges: Vec<Range<usize>>) -> ChunkStream<'_> {
         let (n_obs, n_vars) = self.shape();
         let ranges = normalize_ranges(ranges);
-        let mut gathered: Option<(Vec<u32>, Vec<GeneCol>)> = None;
-        let (path, parts) = (&self.path, &self.x.parts);
+        let mut gathered: Option<(Vec<u32>, Vec<PartCols>)> = None;
+        let (src, parts) = (&self.src, &self.x.parts);
         row_range_chunks(n_vars, ranges.clone(), self.chunk_size, move |cols| {
             if gathered.is_none() {
-                gathered = Some(gather_genes(path, parts, n_vars, &ranges)?);
+                gathered = Some(gather_genes(src, parts, n_vars, &ranges)?);
             }
-            let (pos, genes) = gathered.as_mut().unwrap();
+            let (pos, parts) = gathered.as_ref().unwrap();
             let mut indptr = vec![0u64];
             let (mut indices, mut data) = (Vec::new(), Vec::new());
             for g in cols.clone() {
-                let (rows, vals) = std::mem::take(&mut genes[pos[g] as usize]);
-                indices.extend(rows);
-                data.extend(vals);
+                let k = pos[g] as usize;
+                // A gene's cells: each part's, parts in X row order.
+                for pc in parts {
+                    let r = pc.indptr[k] as usize..pc.indptr[k + 1] as usize;
+                    indices.extend_from_slice(&pc.rows[r.clone()]);
+                    data.extend_from_slice(&pc.vals[r]);
+                }
                 indptr.push(indices.len() as u64);
             }
             Ok(MatrixChunk {
@@ -1151,7 +1190,7 @@ impl DatasetReader for RdsReader {
         chunk_size: usize,
     ) -> ChunkStream<'a> {
         match self.layers.iter().find(|(n, _)| *n == meta.name) {
-            Some((_, m)) => scan_stream(&self.path, &m.parts, self.n_vars, chunk_size),
+            Some((_, m)) => scan_stream(&self.src, &m.parts, self.n_vars, chunk_size),
             None => crate::stream::error_stream(format!(
                 "rds: layer '{}' was not listed by layer_metas",
                 meta.name
@@ -1160,27 +1199,47 @@ impl DatasetReader for RdsReader {
     }
 }
 
-/// One gene's nonzeros: X rows (ascending) and values.
-type GeneCol = (Vec<u32>, Vec<f64>);
+/// The selected genes of one part, as CSR (selected genes x X rows).
+struct PartCols {
+    indptr: Vec<u64>,
+    rows: Vec<u32>,
+    vals: Vec<f64>,
+}
+
+/// Where threads write disjoint slots of a part's `rows` / `vals`.
+#[derive(Clone, Copy)]
+struct Slots(*mut u32, *mut f64);
+// SAFETY: shared only while each thread writes its own, disjoint slots.
+unsafe impl Send for Slots {}
+unsafe impl Sync for Slots {}
 
 /// The genes of `ranges` (normalized, within `n_vars`) in one forward pass
-/// over `parts`: each gene's position in the returned list (`u32::MAX` when
-/// not selected) and its nonzeros.
+/// over `parts`: each gene's position among the selected (`u32::MAX` when
+/// not selected), and per part their nonzeros by gene.
+///
+/// A counting-sort transpose: `@i` gives each gene's count, so each gene's
+/// slots are known up front; `@x` is then read in blocks, and each block's
+/// cells are split between threads, which write disjoint slots (offsets
+/// from per-thread counts), keeping cells ascending within a gene.
 fn gather_genes(
-    path: &Path,
+    src: &Source,
     parts: &[Layer],
     n_vars: usize,
     ranges: &[Range<usize>],
-) -> Result<(Vec<u32>, Vec<GeneCol>)> {
-    let mut pos = vec![u32::MAX; n_vars];
+) -> Result<(Vec<u32>, Vec<PartCols>)> {
+    use rayon::prelude::*;
+    const NONE: u32 = u32::MAX;
+    /// Nonzeros of `@x` read per block.
+    const BLOCK_NNZ: u64 = 8 << 20;
+
+    let mut pos = vec![NONE; n_vars];
     let mut n = 0usize;
     for g in ranges.iter().flat_map(|r| r.clone()) {
         pos[g] = n as u32;
         n += 1;
     }
-    let mut genes: Vec<GeneCol> = (0..n).map(|_| Default::default()).collect();
     let mut scan = Scan {
-        path: path.to_path_buf(),
+        src: src.clone(),
         xdr: None,
         layer: 0,
         row: 0,
@@ -1188,57 +1247,139 @@ fn gather_genes(
         i: Vec::new(),
         x_small: None,
     };
-    let at = |pos: &[u32], g: u32| pos.get(g as usize).map_or(usize::MAX, |&p| p as usize);
+    let mut out = Vec::with_capacity(parts.len());
     for l in parts {
         scan.start_layer(l)?;
-        if scan.i.iter().any(|&g| g as usize >= n_vars) {
+        let i = std::mem::take(&mut scan.i);
+        if i.par_iter().any(|&g| g as usize >= n_vars) {
             return Err(bad(format!(
                 "@i holds a gene index past the {n_vars} genes"
             )));
         }
-        // Exact capacity: no growth slack on the kept nonzeros.
-        let mut count = vec![0usize; n];
-        for &g in &scan.i {
-            if let Some(c) = count.get_mut(at(&pos, g)) {
-                *c += 1;
-            }
-        }
-        for ((rows, vals), c) in genes.iter_mut().zip(count) {
-            rows.reserve_exact(c);
-            vals.reserve_exact(c);
-        }
-        const BLOCK: usize = 4096; // cells per read of @x
-        let n_rows = l.p.len() - 1;
-        for a in (0..n_rows).step_by(BLOCK) {
-            let b = (a + BLOCK).min(n_rows);
-            let (lo, hi) = (l.p[a] as usize, l.p[b] as usize);
-            let x = match &scan.x_small {
-                Some(x) => x[lo..hi].to_vec(),
-                None => scan.xdr()?.reals(hi - lo)?,
-            };
-            for c in a..b {
-                let row = (l.row_offset + c) as u32;
-                for t in l.p[c] as usize..l.p[c + 1] as usize {
-                    if let Some((rows, vals)) = genes.get_mut(at(&pos, scan.i[t])) {
-                        rows.push(row);
-                        vals.push(x[t - lo]);
+        let pos = &pos;
+        let counts = i
+            .par_chunks(1 << 20)
+            .fold(
+                || vec![0u64; n],
+                |mut c, ch| {
+                    for &g in ch {
+                        let s = pos[g as usize];
+                        if s != NONE {
+                            c[s as usize] += 1;
+                        }
                     }
-                }
-            }
+                    c
+                },
+            )
+            .reduce(
+                || vec![0u64; n],
+                |mut a, b| {
+                    a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            );
+        let mut indptr = Vec::with_capacity(n + 1);
+        indptr.push(0u64);
+        for c in &counts {
+            indptr.push(indptr.last().unwrap() + c);
         }
+        let kept = indptr[n] as usize;
+        let mut rows: Vec<u32> = Vec::with_capacity(kept);
+        let mut vals: Vec<f64> = Vec::with_capacity(kept);
+        let slots = Slots(rows.as_mut_ptr(), vals.as_mut_ptr());
+        // Next free slot of each gene.
+        let mut next: Vec<u64> = indptr[..n].to_vec();
+
+        let (p, i) = (&l.p, &i);
+        let n_rows = p.len() - 1;
+        let threads = rayon::current_num_threads().max(1);
+        let mut a = 0;
+        while a < n_rows {
+            let b = (p.partition_point(|&q| q <= p[a] + BLOCK_NNZ) - 1).clamp(a + 1, n_rows);
+            let (lo, hi) = (p[a] as usize, p[b] as usize);
+            let x: Vec<u8> = match (&scan.x_small, &l.x.kind) {
+                (Some(x), _) => x[lo..hi].iter().flat_map(|v| v.to_be_bytes()).collect(),
+                // Straight from the index: one parallel read per block.
+                (None, Kind::Lazy { offset, .. }) if src.indexed() => {
+                    src.bytes_at(offset + lo as u64 * 8, (hi - lo) * 8)?
+                }
+                (None, _) => scan.xdr()?.bytes((hi - lo) * 8)?,
+            };
+            let mut cuts: Vec<usize> = (0..=threads).map(|k| a + (b - a) * k / threads).collect();
+            cuts.dedup();
+            let pieces: Vec<(usize, usize)> = cuts.windows(2).map(|w| (w[0], w[1])).collect();
+            let piece_counts: Vec<Vec<u64>> = pieces
+                .par_iter()
+                .map(|&(c0, c1)| {
+                    let mut c = vec![0u64; n];
+                    for &g in &i[p[c0] as usize..p[c1] as usize] {
+                        let s = pos[g as usize];
+                        if s != NONE {
+                            c[s as usize] += 1;
+                        }
+                    }
+                    c
+                })
+                .collect();
+            let mut starts: Vec<Vec<u64>> = Vec::with_capacity(pieces.len());
+            for c in &piece_counts {
+                starts.push(next.clone());
+                next.iter_mut().zip(c).for_each(|(s, k)| *s += k);
+            }
+            let x = &x;
+            pieces
+                .par_iter()
+                .zip(starts.par_iter_mut())
+                .for_each(|(&(c0, c1), st)| {
+                    let s = slots;
+                    for c in c0..c1 {
+                        let row = (l.row_offset + c) as u32;
+                        for t in p[c] as usize..p[c + 1] as usize {
+                            let g = pos[i[t] as usize];
+                            if g == NONE {
+                                continue;
+                            }
+                            let k = st[g as usize] as usize;
+                            st[g as usize] += 1;
+                            let at = (t - lo) * 8;
+                            let v = f64::from_be_bytes(x[at..at + 8].try_into().unwrap());
+                            // SAFETY: k lies in this piece's slots for gene g
+                            // (counted from the same cells), which no other
+                            // piece writes, and below `kept`.
+                            unsafe {
+                                *s.0.add(k) = row;
+                                *s.1.add(k) = v;
+                            }
+                        }
+                    }
+                });
+            a = b;
+        }
+        // Every slot was written exactly once.
+        assert_eq!(
+            next[..],
+            indptr[1..],
+            "rds: gene transpose left slots unfilled"
+        );
+        // SAFETY: slots 0..kept were all written above.
+        unsafe {
+            rows.set_len(kept);
+            vals.set_len(kept);
+        }
+        out.push(PartCols { indptr, rows, vals });
     }
-    Ok((pos, genes))
+    Ok((pos, out))
 }
 
 /// Row chunks of a matrix's `parts`, read forward through the stream.
 fn scan_stream<'a>(
-    path: &Path,
+    src: &Source,
     parts: &'a [Layer],
     n_vars: usize,
     chunk: usize,
 ) -> ChunkStream<'a> {
     let mut scan = Scan {
-        path: path.to_path_buf(),
+        src: src.clone(),
         xdr: None,
         layer: 0,
         row: 0,

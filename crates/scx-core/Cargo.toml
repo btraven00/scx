@@ -101,6 +101,7 @@ arrow = { version = "59", optional = true }
 async-stream = { version = "0.3", optional = true }
 # URL parsing for the net transport (object_store::parse_url takes a url::Url).
 url = { version = "2", optional = true }
+libz-rs-sys = { version = "0.6", default-features = false, features = ["rust-allocator"] }
 
 # madvise(MADV_HUGEPAGE) on large read buffers (h5_chunk::zeroed_vec_huge).
 # Already in the tree through hdf5-metno and memmap2.

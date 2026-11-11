@@ -14,7 +14,6 @@
 //! object's images are usually only paths to PNGs on the saving machine).
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use super::seurat::{bad, build_matrix, fetch, meta_columns, slot, Fetched, Matrix, RdsReader};
 use super::xdr::{Kind, Node};
@@ -44,7 +43,7 @@ fn strs(n: Option<&Node>) -> Option<Vec<String>> {
 
 impl RdsReader {
     pub(super) fn from_se(
-        path: &Path,
+        src: super::Source,
         se: &Node,
         chunk_size: usize,
         assay: Option<&str>,
@@ -130,7 +129,7 @@ impl RdsReader {
         for m in obs_cols.iter().chain(row_data.iter()) {
             want.extend(m.items().iter().map(|(_, c)| c));
         }
-        let fetched: Fetched = fetch(path, &want)?;
+        let fetched: Fetched = fetch(&src, &want)?;
 
         let dims = super::seurat::ints(slot(x_node, "Dim")?, &fetched)?;
         let (n_vars, n_obs) = match dims[..] {
@@ -199,13 +198,8 @@ impl RdsReader {
             }
             None => Vec::new(),
         };
-        let row_of: HashMap<String, usize> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.clone(), i))
-            .collect();
         Ok(Self {
-            path: path.to_path_buf(),
+            src,
             chunk_size,
             n_vars,
             x,
@@ -219,7 +213,7 @@ impl RdsReader {
                 columns: var_columns,
             },
             cells,
-            row_of,
+            row_of: Default::default(),
             obsm_src,
             varm_src: Vec::new(),
             graphs: Vec::new(),
