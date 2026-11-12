@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.1](https://github.com/btraven00/scx/compare/scx-core-v0.6.0...scx-core-v0.6.1) (2026-11-12)
+
+
+### Features
+
+* **core:** read SingleCellExperiment / SpatialExperiment .rds, stream .rds X by gene ([c136058](https://github.com/btraven00/scx/commit/c136058da2c3d6550fc5e24d2f9daa2c9effadaa))
+* **zarr:** open a SpatialData store's AnnData table from its root ([4837268](https://github.com/btraven00/scx/commit/4837268540f77bc2f9316b3fa45c4f559cde641c))
+
+
+### Bug Fixes
+
+* **core:** read .rds vectors in a per-process thread pool, so forked R workers don't hang ([8a2e473](https://github.com/btraven00/scx/commit/8a2e473c645de66e26d9a9698ccfa1fdb1cdceb4))
+
+
+### Performance Improvements
+
+* **core:** index an .rds's gzip stream once, read its vectors in parallel ([f1ac3cb](https://github.com/btraven00/scx/commit/f1ac3cbffe6d9b2d1f854132b66f32c840204214))
+
 ## [0.6.0](https://github.com/btraven00/scx/compare/scx-core-v0.5.0...scx-core-v0.6.0) (2026-11-11)
 
 

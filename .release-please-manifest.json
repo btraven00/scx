@@ -1,6 +1,6 @@
 {
-  "crates/scx-core": "0.6.0",
-  "crates/scx-cli": "0.6.0",
-  "python/picklerick": "0.6.0",
-  "crates/scx-capi": "0.1.1"
+  "crates/scx-core": "0.6.1",
+  "crates/scx-cli": "0.6.1",
+  "python/picklerick": "0.6.1",
+  "crates/scx-capi": "0.1.2"
 }

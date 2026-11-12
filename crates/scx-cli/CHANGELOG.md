@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.1](https://github.com/btraven00/scx/compare/scx-cli-v0.6.0...scx-cli-v0.6.1) (2026-11-12)
+
+
+### Features
+
+* **core:** read SingleCellExperiment / SpatialExperiment .rds, stream .rds X by gene ([c136058](https://github.com/btraven00/scx/commit/c136058da2c3d6550fc5e24d2f9daa2c9effadaa))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.6.0 to 0.6.1
+
 ## [0.6.0](https://github.com/btraven00/scx/compare/scx-cli-v0.5.0...scx-cli-v0.6.0) (2026-11-11)
 
 
