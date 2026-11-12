@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/btraven00/scx/compare/scx-core-v0.6.1...scx-core-v0.6.2) (2026-11-12)
+
+
+### Documentation
+
+* **core:** Format::Rds holds a Seurat object or a SummarizedExperiment ([0399159](https://github.com/btraven00/scx/commit/0399159a9bb0a84dbf684d8b091ec3a8c209232c))
+
 ## [0.6.1](https://github.com/btraven00/scx/compare/scx-core-v0.6.0...scx-core-v0.6.1) (2026-11-12)
 
 
