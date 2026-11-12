@@ -45,6 +45,10 @@ reference:
   - title: Lazy matrices
     contents:
       - PicklerickMatrix
+  - title: Reading by gene
+    contents:
+      - read_genes
+      - gene_blocks
 
 articles:
   - title: Articles
