@@ -40,7 +40,8 @@ pub enum Format {
     Mtx,
     /// AnnData Zarr store (v2 or v3): a directory with `.zgroup` / `zarr.json`.
     ZarrAd,
-    /// R serialization stream (`saveRDS` / `save`) holding a Seurat object.
+    /// R serialization stream (`saveRDS` / `save`) holding a Seurat object
+    /// or a SummarizedExperiment (SingleCellExperiment, SpatialExperiment).
     Rds,
     /// bixverse binary sparse store (file versions 3 and 4).
     Bixverse,
