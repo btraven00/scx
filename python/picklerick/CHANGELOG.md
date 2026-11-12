@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/btraven00/scx/compare/picklerick-v0.6.1...picklerick-v0.6.2) (2026-11-12)
+
+
+### Miscellaneous Chores
+
+* **picklerick:** Synchronize scx versions
+
 ## [0.6.1](https://github.com/btraven00/scx/compare/picklerick-v0.6.0...picklerick-v0.6.1) (2026-11-12)
 
 

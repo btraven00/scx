@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.2](https://github.com/btraven00/scx/compare/scx-cli-v0.6.1...scx-cli-v0.6.2) (2026-11-12)
+
+
+### Miscellaneous Chores
+
+* **scx-cli:** Synchronize scx versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.6.1 to 0.6.2
+
 ## [0.6.1](https://github.com/btraven00/scx/compare/scx-cli-v0.6.0...scx-cli-v0.6.1) (2026-11-12)
 
 
