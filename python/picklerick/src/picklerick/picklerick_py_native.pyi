@@ -69,6 +69,8 @@ class MatrixStream(Iterator[MatrixChunk]):
 
     def __iter__(self) -> MatrixStream: ...
     def __next__(self) -> MatrixChunk: ...
+    def _queued_bytes(self) -> int:
+        """Bytes of decoded chunks waiting for the consumer (for tests)."""
 
 def scx_convert(
     input: str,
@@ -91,10 +93,12 @@ def scx_open_stream(
     where: list[tuple[str, list[str]]] | None = None,
     by_gene: bool = False,
     genes: list[tuple[int, int]] | None = None,
+    readahead_bytes: int = 134217728,
 ) -> MatrixStream:
     """`rows` are (start, stop) half-open row ranges; `where` maps obs columns to
     the accepted values, all of which must hold. Both are turned into row
     ranges; `rows` and `where` together take their intersection. `by_gene`
     streams by gene instead, over the (start, stop) ranges in `genes`, or
-    every gene when that is `None`.
+    every gene when that is `None`. `readahead_bytes` bounds the chunks decoded
+    ahead of the consumer.
     """

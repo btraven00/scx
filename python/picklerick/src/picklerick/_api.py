@@ -237,12 +237,14 @@ def open_stream(
     where: Mapping[str, object] | None = None,
     axis: str = "obs",
     genes: Rows | None = None,
+    readahead_mb: float = 128,
 ) -> Iterator[MatrixChunk]:
     """Iterate over the matrix X in chunks of ``chunk_size`` rows, or of
     ``chunk_size`` genes with ``axis="var"``.
 
-    Decoding runs on a background thread a few chunks ahead of the
-    consumer, so peak memory is bounded by the chunk size, not the file.
+    Decoding runs on a background thread ahead of the consumer: up to 8
+    chunks, and no more than ``readahead_mb`` of them, so peak memory is
+    bounded by the chunk size and that budget, not the file.
 
     ``rows`` and ``where`` select rows; with both, a row must satisfy both.
     On h5ad, Zarr, h5seurat (dgCMatrix) and 10x HDF5 only the selected rows
@@ -283,6 +285,9 @@ def open_stream(
         ``"obs"`` (default) to stream rows, ``"var"`` to stream genes.
     genes
         With ``axis="var"``: like ``rows``, over genes. Default: all genes.
+    readahead_mb
+        Most decoded data, in MB, the background thread holds ahead of the
+        consumer. One chunk is always read ahead, however large.
 
     Returns
     -------
@@ -307,7 +312,7 @@ def open_stream(
         raise ValueError('genes= applies only with axis="var"')
     return _native.scx_open_stream(
         _path(path), chunk_size, assay, layer, _ranges(rows), _filters(where),
-        axis == "var", _ranges(genes),
+        axis == "var", _ranges(genes), int(readahead_mb * 2**20),
     )
 
 
