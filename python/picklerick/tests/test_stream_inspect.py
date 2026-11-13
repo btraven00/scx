@@ -42,6 +42,40 @@ def test_stream_can_be_abandoned(norman_path) -> None:
     del stream  # the reader thread must stop, not block on a full channel
 
 
+def _wait_for_reader(stream, expect_more: bool) -> int:
+    """Queued bytes once the reader thread has stopped adding to the queue."""
+    import time
+
+    seen = -1
+    for _ in range(200):
+        time.sleep(0.01)
+        now = stream._queued_bytes()
+        if now == seen and (now > 0 or not expect_more):
+            return now
+        seen = now
+    return seen
+
+
+def test_readahead_is_bounded_in_bytes(norman, norman_path) -> None:
+    # A consumer that stops after one chunk: the reader thread may queue chunks
+    # up to the budget and no further (it used to queue 8, whatever their size).
+    one = next(pk.open_stream(norman_path, chunk_size=7))
+    chunk_bytes = one.indptr.nbytes + one.indices.nbytes + one.data.nbytes
+
+    tight = pk.open_stream(norman_path, chunk_size=7, readahead_mb=0)
+    next(tight)
+    assert 0 < _wait_for_reader(tight, True) <= 2 * chunk_bytes  # one chunk, however small the budget
+
+    roomy = pk.open_stream(norman_path, chunk_size=7)
+    next(roomy)
+    assert _wait_for_reader(roomy, True) > 3 * chunk_bytes  # the count limit (8) applies instead
+
+    # The budget changes pacing, never the data.
+    chunks = list(pk.open_stream(norman_path, chunk_size=7, readahead_mb=0))
+    x = sparse.vstack([c.to_scipy() for c in chunks])
+    np.testing.assert_array_equal(x.toarray(), dense(norman.X))
+
+
 def test_stream_bpcells_dir_values(bpcells_csr_path) -> None:
     # Pure-Rust BP-128 decode path; synth_packed_uint_csr is this 4x5 matrix.
     expected = np.array(

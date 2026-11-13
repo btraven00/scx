@@ -432,13 +432,100 @@ fn chunk_to_py(
     }
 }
 
+/// Most chunks the reader thread may decode ahead of the consumer.
+const READAHEAD_CHUNKS: usize = 8;
+
+/// Bytes a decoded chunk holds (indptr, indices, values).
+fn chunk_bytes(c: &MatrixChunk) -> usize {
+    let m = &c.data;
+    m.indptr.len() * 8 + m.indices.len() * 4 + m.data.len() * m.data.dtype().size()
+}
+
+/// The hand-off between the reader thread and the consumer: chunks decoded
+/// ahead, bounded by count and by bytes. A count alone lets the queue grow
+/// with the chunk size (8 chunks of 5,000 atlas cells are over 600 MB behind
+/// a slow consumer). One chunk is always let in, so a chunk larger than the
+/// budget still streams.
+struct Readahead {
+    state: std::sync::Mutex<ReadaheadState>,
+    changed: std::sync::Condvar,
+    budget: usize,
+}
+
+#[derive(Default)]
+struct ReadaheadState {
+    queue: std::collections::VecDeque<(usize, Result<MatrixChunk, String>)>,
+    bytes: usize,
+    /// The reader thread has nothing more to push.
+    done: bool,
+    /// The consumer dropped the stream.
+    closed: bool,
+}
+
+impl Readahead {
+    fn new(budget: usize) -> Self {
+        Self {
+            state: Default::default(),
+            changed: Default::default(),
+            budget,
+        }
+    }
+
+    /// Blocks while the queue is full; false once the consumer is gone.
+    fn push(&self, item: Result<MatrixChunk, String>) -> bool {
+        let n = item.as_ref().map_or(0, chunk_bytes);
+        let mut s = self.state.lock().unwrap();
+        while !s.closed
+            && !s.queue.is_empty()
+            && (s.queue.len() >= READAHEAD_CHUNKS || s.bytes + n > self.budget)
+        {
+            s = self.changed.wait(s).unwrap();
+        }
+        if s.closed {
+            return false;
+        }
+        s.bytes += n;
+        s.queue.push_back((n, item));
+        self.changed.notify_all();
+        true
+    }
+
+    /// Blocks until a chunk is there; `None` when the reader has finished.
+    fn pop(&self) -> Option<Result<MatrixChunk, String>> {
+        let mut s = self.state.lock().unwrap();
+        loop {
+            if let Some((n, item)) = s.queue.pop_front() {
+                s.bytes -= n;
+                self.changed.notify_all();
+                return Some(item);
+            }
+            if s.done {
+                return None;
+            }
+            s = self.changed.wait(s).unwrap();
+        }
+    }
+
+    fn set(&self, f: impl FnOnce(&mut ReadaheadState)) {
+        f(&mut self.state.lock().unwrap());
+        self.changed.notify_all();
+    }
+}
+
 /// Iterator over `MatrixChunk`s, filled by a background reader thread.
 #[pyclass(name = "MatrixStream", module = "picklerick")]
 pub struct PyMatrixStream {
-    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Result<MatrixChunk, String>>>,
+    ahead: std::sync::Arc<Readahead>,
     n_vars: usize,
     /// Set when streaming by gene: every chunk spans these rows.
     n_obs: Option<usize>,
+}
+
+impl Drop for PyMatrixStream {
+    fn drop(&mut self) {
+        // The reader thread must stop, not wait on a full queue.
+        self.ahead.set(|s| s.closed = true);
+    }
 }
 
 #[pymethods]
@@ -448,12 +535,16 @@ impl PyMatrixStream {
     }
 
     fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyMatrixChunk>> {
-        let received = py.detach(|| self.rx.lock().unwrap().recv());
-        match received {
-            Ok(Ok(chunk)) => Ok(Some(chunk_to_py(py, chunk, self.n_vars, self.n_obs))),
-            Ok(Err(msg)) => Err(PickleRickError::new_err(msg)),
-            Err(_) => Ok(None), // reader thread finished
+        match py.detach(|| self.ahead.pop()) {
+            Some(Ok(chunk)) => Ok(Some(chunk_to_py(py, chunk, self.n_vars, self.n_obs))),
+            Some(Err(msg)) => Err(PickleRickError::new_err(msg)),
+            None => Ok(None), // reader thread finished
         }
+    }
+
+    /// Bytes of decoded chunks waiting for the consumer (for tests).
+    fn _queued_bytes(&self) -> usize {
+        self.ahead.state.lock().unwrap().bytes
     }
 }
 
@@ -461,9 +552,10 @@ impl PyMatrixStream {
 /// the accepted values, all of which must hold. Both are turned into row
 /// ranges; `rows` and `where` together take their intersection. `by_gene`
 /// streams by gene instead, over the (start, stop) ranges in `genes`, or
-/// every gene when that is `None`.
+/// every gene when that is `None`. `readahead_bytes` bounds the chunks decoded
+/// ahead of the consumer.
 #[pyfunction]
-#[pyo3(signature = (path, chunk_size, assay, layer, rows = None, r#where = None, by_gene = false, genes = None))]
+#[pyo3(signature = (path, chunk_size, assay, layer, rows = None, r#where = None, by_gene = false, genes = None, readahead_bytes = 128 << 20))]
 #[allow(clippy::too_many_arguments)]
 fn scx_open_stream(
     path: &str,
@@ -474,6 +566,7 @@ fn scx_open_stream(
     r#where: Option<Vec<(String, Vec<String>)>>,
     by_gene: bool,
     genes: Option<Vec<(usize, usize)>>,
+    readahead_bytes: usize,
 ) -> PyResult<PyMatrixStream> {
     let mut reader = open_reader(path, stream_opts(chunk_size, assay, layer)).map_err(py_err)?;
     let (n_obs, n_vars) = reader.shape();
@@ -510,26 +603,27 @@ fn scx_open_stream(
             Some(mask_to_ranges(&mask))
         }
     };
-    // Bounded so the reader stays at most 8 chunks ahead of the consumer.
-    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    let ahead = std::sync::Arc::new(Readahead::new(readahead_bytes));
+    let tx = ahead.clone();
 
     std::thread::spawn(move || {
-        block_on(async move {
+        block_on(async {
             let mut stream = match (genes, ranges) {
                 (Some(genes), _) => reader.x_stream_cols(genes),
                 (None, Some(ranges)) => reader.x_stream_rows(ranges),
                 (None, None) => reader.x_stream(),
             };
             while let Some(chunk) = stream.next().await {
-                if tx.send(chunk.map_err(|e| e.to_string())).is_err() {
+                if !tx.push(chunk.map_err(|e| e.to_string())) {
                     break; // consumer dropped the iterator
                 }
             }
         });
+        tx.set(|s| s.done = true);
     });
 
     Ok(PyMatrixStream {
-        rx: std::sync::Mutex::new(rx),
+        ahead,
         n_vars,
         n_obs: stream_n_obs,
     })
