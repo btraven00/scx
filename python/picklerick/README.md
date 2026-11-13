@@ -62,8 +62,9 @@ pk.inspect("atlas.h5ad")["n_obs"]
 ### Streaming
 
 `open_stream` yields CSR row blocks without loading the whole matrix or
-building an AnnData object. Decoding runs on a background thread a few
-chunks ahead of the consumer. The numpy arrays take ownership of the
+building an AnnData object. Decoding runs on a background thread ahead of
+the consumer: up to 8 chunks, and no more than `readahead_mb` (default 128)
+of them, so a slow consumer does not let decoded chunks pile up. The numpy arrays take ownership of the
 decoded buffers, so there is no copy per chunk.
 
 ```python

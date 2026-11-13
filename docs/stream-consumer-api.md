@@ -144,7 +144,9 @@ PickleRickError: HDF5 error: H5Dread(): can't synchronously read data: can't ope
 **API.**
 - `open_stream(..., threads=None, prefetch=8)`:
   - `threads`: the size of a picklerick-private rayon pool. Default: `RAYON_NUM_THREADS` if set, else the CPUs this process may use (sched affinity / cgroup quota), not `os.cpu_count()`.
-  - `prefetch`: the channel depth, currently hard-coded to 8.
+  - `prefetch`: the channel depth, hard-coded to 8. Shipped instead: `readahead_mb` (default 128), a byte budget on the
+    same queue. Behind a slow consumer 8 chunks of 5,000 atlas cells held about 500 MB (streaming PCA on 100k cells:
+    1.18 GB peak, 0.66 GB with the budget, same wall time).
 - Document the recommended split for decode + BLAS consumers (e.g. 2 decode + 6 BLAS on 8 cores, measured).
 
 **Acceptance.**
