@@ -435,6 +435,21 @@ pub fn same_stored(a: &Dataset, b: &Dataset) -> Result<bool> {
 fn chunk_locations(ds: &Dataset, chunk: usize, n: usize) -> Result<Vec<(u32, u64, usize)>> {
     #[cfg(hdf5_1_14)]
     {
+        #[cfg(target_os = "linux")]
+        if let Some((file, leaves, node)) = index_leaves(ds) {
+            use std::os::fd::AsRawFd;
+            for at in leaves {
+                // A hint: on failure the walk below reads the node itself.
+                unsafe {
+                    libc::posix_fadvise(
+                        file.as_raw_fd(),
+                        at as i64,
+                        node as i64,
+                        libc::POSIX_FADV_WILLNEED,
+                    )
+                };
+            }
+        }
         let mut locs = vec![None; n.div_ceil(chunk)];
         ds.chunks_visit(|c| {
             if let Some(slot) = locs.get_mut(c.offset[0] as usize / chunk) {
@@ -465,6 +480,159 @@ fn chunk_locations(ds: &Dataset, chunk: usize, n: usize) -> Result<Vec<(u32, u64
                 .collect()
         })
     }
+}
+
+/// Where the leaf nodes of `ds`'s chunk index are: the file, each leaf's
+/// address, and the node size. `None` whenever anything is not as expected.
+///
+/// libhdf5 walks a chunk index one node at a time, each a small read
+/// somewhere else in the file. Cold, on a seeking disk or a network mount,
+/// that is milliseconds per node and seconds per dataset, while the same
+/// reads issued together take a tenth of the time. So [`chunk_locations`]
+/// asks the kernel to read the leaves ahead of the walk. This only ever
+/// produces read-ahead hints: libhdf5 still does the walk that counts.
+///
+/// Reads the two structures that lead to the leaves, as the HDF5 file format
+/// specification lays them out: the dataset's object header, for
+/// its version 3 chunked layout message (the root node's address), and the
+/// version 1 B-tree's inner nodes. That is the index h5py, anndata and scx
+/// write; files with the newer index types (`libver="latest"`) get no hint.
+#[cfg(all(hdf5_1_14, target_os = "linux"))]
+fn index_leaves(ds: &Dataset) -> Option<(std::fs::File, Vec<u64>, usize)> {
+    let fcpl = ds.file().ok()?.fcpl().ok()?;
+    let sizes = fcpl.sizes();
+    if fcpl.userblock() != 0 || (sizes.sizeof_addr as usize, sizes.sizeof_size as usize) != (8, 8) {
+        return None;
+    }
+    // The object header's address is the dataset's token in the native file
+    // format (H5VLnative_token_to_addr copies it out the same way).
+    let header = hdf5::sync::sync(|| unsafe {
+        let mut info = std::mem::MaybeUninit::<hdf5_sys::h5o::H5O_info2_t>::zeroed();
+        let rc =
+            hdf5_sys::h5o::H5Oget_info3(ds.id(), info.as_mut_ptr(), hdf5_sys::h5o::H5O_INFO_BASIC);
+        (rc >= 0).then(|| {
+            let token: [u8; 16] = std::mem::transmute(info.assume_init().token);
+            le_u64(&token, 0)
+        })
+    })??;
+    let file = std::fs::File::open(ds.filename()).ok()?;
+    let (root, rank) = index_root(&file, header)?;
+    // A node holds up to 2K children and 2K + 1 keys. A key is the chunk's
+    // size and filter mask (4 bytes each) and its offset along each dimension.
+    let entry = 8 + 8 * rank + 8;
+    let node = 24 + 2 * fcpl.istore_k() as usize * entry + entry - 8;
+    if node > 1 << 20 {
+        return None; // not a node size any writer uses
+    }
+    let (mut level, mut nodes) = index_node(&file, root, node, entry)?;
+    if level == 0 {
+        return Some((file, vec![root], node));
+    }
+    while level > 1 {
+        level -= 1;
+        nodes = nodes
+            .par_iter()
+            .map(|&at| {
+                Some(
+                    index_node(&file, at, node, entry)
+                        .filter(|n| n.0 == level)?
+                        .1,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?
+            .concat();
+    }
+    Some((file, nodes, node))
+}
+
+/// The address of the root node of a chunk index and the rank of its keys
+/// (the dataset's rank + 1), from the object header at `header`: version 1
+/// (h5py's default) or version 2 ("OHDR", what hdf5-metno and so scx write).
+#[cfg(all(hdf5_1_14, target_os = "linux"))]
+fn index_root(file: &std::fs::File, header: u64) -> Option<(u64, usize)> {
+    let mut pre = [0u8; 40];
+    read_at(file, &mut pre, header).ok()?;
+    // Where the first block of messages is, its size, and the size of a
+    // message's own header.
+    let (v2, first, head) = if pre[0] == 1 {
+        (false, (header + 16, le_u64(&pre, 8)? & 0xffff_ffff), 8)
+    } else if pre[..5] == *b"OHDR\x02" {
+        // Flags say which optional fields precede the block's size (times,
+        // attribute thresholds), how wide the size is, and whether each
+        // message carries a creation order.
+        let flags = pre[5] as usize;
+        let at = 6 + (flags >> 5 & 1) * 16 + (flags >> 4 & 1) * 4;
+        let width = 1 << (flags & 3);
+        let mut len = [0u8; 8];
+        len[..width].copy_from_slice(&pre[at..at + width]);
+        let first = (header + (at + width) as u64, u64::from_le_bytes(len));
+        (true, first, 4 + (flags >> 2 & 1) * 2)
+    } else {
+        return None;
+    };
+    // More blocks are named by continuation messages. A real header has a
+    // handful.
+    let mut blocks = vec![first];
+    let mut k = 0;
+    while let Some(&(at, len)) = blocks.get(k).filter(|b| k < 16 && b.1 <= 1 << 20) {
+        k += 1;
+        let mut buf = vec![0u8; len as usize];
+        read_at(file, &mut buf, at).ok()?;
+        let mut p = 0;
+        while let Some(h) = buf.get(p..p + head) {
+            let (ty, size) = if v2 {
+                (h[0] as u16, u16::from_le_bytes([h[1], h[2]]))
+            } else {
+                (
+                    u16::from_le_bytes([h[0], h[1]]),
+                    u16::from_le_bytes([h[2], h[3]]),
+                )
+            };
+            let Some(body) = buf.get(p + head..p + head + size as usize) else {
+                break;
+            };
+            match ty {
+                // Continuation: address and length of another block, which in
+                // version 2 sits between "OCHK" and a checksum.
+                0x10 => {
+                    let (at, len) = (le_u64(body, 0)?, le_u64(body, 8)?);
+                    blocks.push(if v2 {
+                        (at + 4, len.checked_sub(8)?)
+                    } else {
+                        (at, len)
+                    });
+                }
+                // Layout: version 3, class 2 (chunked), rank, address.
+                0x08 if body.get(..2)? == [3, 2] => {
+                    return Some((le_u64(body, 3)?, body[2] as usize));
+                }
+                0x08 => return None,
+                _ => {}
+            }
+            p += head + size as usize;
+        }
+    }
+    None
+}
+
+/// The level and children of the chunk index node at `at`: "TREE", node type
+/// 1, level, entries used (2 bytes), two sibling addresses, then for each
+/// entry a key and a child's address. Level 0 children are chunks.
+#[cfg(all(hdf5_1_14, target_os = "linux"))]
+fn index_node(file: &std::fs::File, at: u64, node: usize, entry: usize) -> Option<(u8, Vec<u64>)> {
+    let mut buf = vec![0u8; node];
+    read_at(file, &mut buf, at).ok()?;
+    if &buf[..5] != b"TREE\x01" {
+        return None;
+    }
+    let used = u16::from_le_bytes([buf[6], buf[7]]) as usize;
+    let kids = (1..=used).map(|i| le_u64(&buf, 24 + i * entry - 8));
+    Some((buf[5], kids.collect::<Option<_>>()?))
+}
+
+#[cfg(all(hdf5_1_14, target_os = "linux"))]
+fn le_u64(buf: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(buf.get(at..at + 8)?.try_into().ok()?))
 }
 
 /// Fill `buf` from `file` at byte `offset`, leaving the file position alone.
@@ -1308,6 +1476,73 @@ mod tests {
                 }
             }
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The leaves the read-ahead hint names must be the dataset's real index:
+    /// read as nodes, they list exactly the chunks libhdf5 itself lists. Small
+    /// (one node), two levels and three; a file without this index gets none.
+    #[cfg(all(hdf5_1_14, target_os = "linux"))]
+    #[test]
+    fn index_leaves_list_every_chunk() {
+        let path = tmp("index_leaves");
+        for (n, depth, v1) in [
+            (40usize, 0, false),
+            (3000, 1, false),
+            (9000, 2, false),
+            (3000, 1, true),
+        ] {
+            {
+                // hdf5-metno writes version 2 object headers; the earliest
+                // format, h5py's default, version 1.
+                let f = File::with_options()
+                    .with_fapl(|p| if v1 { p.libver_earliest() } else { p })
+                    .create(&path)
+                    .unwrap();
+                let vals: Vec<u32> = (0..n as u32).collect();
+                let ds = f.new_dataset_builder().with_data(&vals).chunk(2);
+                ds.create("data").unwrap();
+                // Attributes push the layout message's neighbours around, as
+                // anndata's encoding attributes do.
+                let ds = f.dataset("data").unwrap();
+                for k in 0..20 {
+                    let a = ds.new_attr::<u64>().create(format!("a{k}").as_str());
+                    a.unwrap().write_scalar(&7u64).unwrap();
+                }
+            }
+            let f = File::open(&path).unwrap();
+            let ds = f.dataset("data").unwrap();
+            let (file, leaves, node) = index_leaves(&ds).expect("a v1 chunk index");
+            let entry = 32; // a 1-D key (24 bytes) and an address
+            let mut got = vec![];
+            for &at in &leaves {
+                let (level, chunks) = index_node(&file, at, node, entry).unwrap();
+                assert_eq!(level, 0);
+                got.extend(chunks);
+            }
+            let want: Vec<u64> = chunk_locations(&ds, 2, n)
+                .unwrap()
+                .iter()
+                .map(|l| l.1)
+                .collect();
+            assert_eq!(got, want, "{n} values");
+            assert_eq!(leaves.len() > 1, depth > 0, "{n} values");
+            assert_eq!(leaves.len() > 64, depth > 1, "{n} values");
+        }
+        // The newer file format indexes chunks another way: no hint, no harm.
+        {
+            let f = File::with_options()
+                .with_fapl(|p| p.libver_latest())
+                .create(&path)
+                .unwrap();
+            let vals: Vec<u32> = (0..3000).collect();
+            let ds = f.new_dataset_builder().with_data(&vals).chunk(2);
+            ds.create("data").unwrap();
+        }
+        let f = File::open(&path).unwrap();
+        let ds = f.dataset("data").unwrap();
+        assert!(index_leaves(&ds).is_none());
+        assert_eq!(chunk_locations(&ds, 2, 3000).unwrap().len(), 1500);
         let _ = std::fs::remove_file(&path);
     }
 
