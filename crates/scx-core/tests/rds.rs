@@ -765,3 +765,26 @@ async fn rds_to_h5ad_keeps_obs_types_and_slots() {
     assert!(f.group("layers/data").is_ok(), "the data layer");
     assert!(f.dataset("var/gene_symbol").is_ok(), "feature metadata");
 }
+
+/// A saved list of Seurat objects (one variable, two objects below it): with
+/// no object named, the error lists their paths instead of calling the file
+/// "a list of 1"; a path picks one. `sub` is the first 3 of `all`'s 6 cells.
+#[test]
+fn nested_object_is_picked_by_path() {
+    use scx_core::stream::DatasetReader;
+    let p = tiny("tiny_nested.rda");
+    let open = |object| scx_core::rds::RdsReader::open_object(&p, 4, None, None, object);
+    let err = |object| open(object).err().unwrap().to_string();
+    assert!(
+        err(None).contains("2 objects (seus$all, seus$sub)"),
+        "{}",
+        err(None)
+    );
+    assert_eq!(open(Some("seus$all")).unwrap().shape().0, 6);
+    assert_eq!(open(Some("seus$sub")).unwrap().shape().0, 3);
+    assert!(
+        err(Some("seus$x")).contains("no object 'seus$x' (have: seus$all, seus$sub)"),
+        "{}",
+        err(Some("seus$x"))
+    );
+}

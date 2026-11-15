@@ -29,6 +29,9 @@ pub struct OpenOptions {
     pub assay: Option<String>,
     /// H5Seurat layer (default "counts" when `None`).
     pub layer: Option<String>,
+    /// For an `.rds`/`.rda` holding several objects, the one to read
+    /// (see [`crate::rds::RdsReader::open_object`]).
+    pub object: Option<String>,
     /// Open only enough to serve metadata (uses BPCells' metadata-only path).
     pub metadata_only: bool,
     /// Parquet gene axis, when no dictionary is supplied (`net` feature).
@@ -47,6 +50,7 @@ impl OpenOptions {
             chunk_size,
             assay: None,
             layer: None,
+            object: None,
             metadata_only: false,
             n_vars: None,
             genes: None,
@@ -127,11 +131,12 @@ pub async fn open(input: &str, opts: &OpenOptions) -> Result<Box<dyn DatasetRead
             Box::new(BpcellsDatasetReader::open_metadata_only(path)?)
         }
         Format::BPCells => Box::new(BpcellsDatasetReader::open(path, cs)?),
-        Format::Rds => Box::new(crate::rds::RdsReader::open(
+        Format::Rds => Box::new(crate::rds::RdsReader::open_object(
             path,
             cs,
             opts.assay.as_deref(),
             opts.layer.as_deref(),
+            opts.object.as_deref(),
         )?),
         Format::H5Seurat => open_h5seurat(path, cs, opts.assay.as_deref(), opts.layer.as_deref())?,
         #[cfg(feature = "zarr")]

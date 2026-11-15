@@ -131,6 +131,12 @@ saveRDS(big5, file.path(dir, "big_v5_split.rds"))
 note <- "saved next to the object"
 save(note, big4, file = file.path(dir, "big_v4.rda"))
 
+# One saved variable holding a list of Seurat objects, as atlases split by
+# condition are shipped. The reader takes one by path (`seus$sub`); `sub` is
+# the first 3 cells, so the two can be told apart.
+seus <- list(all = v4, sub = v4[, 1:3])
+save(seus, file = file.path(dir, "tiny_nested.rda"))
+
 # One assay, not called RNA (as SeuratData's spatial objects): with no
 # --assay the reader must take the object's active assay.
 spatial <- CreateSeuratObject(counts = counts, meta.data = meta, assay = "Spatial",

@@ -85,6 +85,7 @@ Common options:
 | `--chunk-size N` | 5000 | Cells per streaming chunk |
 | `--dtype` | f32 | Output matrix dtype (`f32`, `f64`, `i32`, `u32`) |
 | `--assay` | RNA | Seurat assay (H5Seurat, `.rds`); MuData modality (`.h5mu`: the only one, else `rna`) |
+| `--object` | the only one | Which object of an `.rds`/`.rda` holding several to read, e.g. `seus$Control` for a saved list of Seurat objects |
 
 ### Inspect
 
