@@ -2,16 +2,17 @@
 """Convert every h5ad of a corpus (cxg_sample.py TSV) to each scx output
 format and check the result with that format's own reader.
 
-The checks are omni-scformats' (github.com/btraven00/omni-scformats,
-modules/): snapshot.py reads h5ad with anndata, snapshot.R reads .h5seurat
-with rhdf5 + BPCells, and compare.py compares input and output snapshots
-on names, every obs/var column (type, values, NA mask) and every matrix.
+The checks are in checks/ (omni-scformats' modules/ carries a copy):
+snapshot.py reads h5ad with anndata, snapshot.R reads .h5seurat with
+rhdf5 + BPCells, and compare.py compares input and output snapshots on
+names, every obs/var and raw.var column (type, values, NA mask), every
+matrix, obsm, varm, obsp, varp and every leaf of uns.
 Zarr outputs are read with anndata.read_zarr into the same layout. scx never
 judges its own output; `scx diff` is recorded beside the verdict.
 
 Arms: h5ad, zarr (v3), h5seurat (BPCells, the default), h5seurat --dgcmatrix.
 
-    run_corpus.py corpus.tsv data_dir out_dir --checks <omni-scformats>/modules [--scx BIN]
+    run_corpus.py corpus.tsv data_dir out_dir [--scx BIN]
 
 Run with a python that has anndata, and Rscript with rhdf5 + BPCells on PATH
 (omni-scformats envs/readers.yml). Writes out_dir/results.jsonl, one record
@@ -86,7 +87,8 @@ def main():
     p.add_argument("corpus")
     p.add_argument("data", type=Path, help="dir with <dataset_version_id>/<file>.h5ad")
     p.add_argument("out", type=Path)
-    p.add_argument("--checks", type=Path, required=True, help="omni-scformats/modules")
+    p.add_argument("--checks", type=Path, default=Path(__file__).resolve().parent / "checks",
+                   help="dir with snapshot.py, snapshot.R, compare.py (default: checks/ beside this script)")
     p.add_argument("--scx", default=shutil.which("scx"))
     p.add_argument("--arms", default=",".join(ARMS))
     a = p.parse_args()

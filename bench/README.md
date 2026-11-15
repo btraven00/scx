@@ -78,14 +78,18 @@ pixi run -e test Rscript bench/r/profile_read_h5ad.R    # profvis
 
 Converts real and generated h5ad files to every scx output format and checks
 each output with that format's own reader (anndata, rhdf5 + BPCells) through
-the omni-scformats `modules/` checks. `scx diff` is recorded beside the
-verdict, so its misses and false alarms show up too.
+the checks in `corpus/checks/` (snapshot.py, snapshot.R, compare.py): names,
+obs/var/raw.var columns, matrices, obsm, varm, obsp, varp and every leaf of
+uns. `checks/test_compare.py` is the checker's own test: each corruption it
+is meant to catch, applied to a file with every slot filled, must fail.
+`scx diff` is recorded beside the verdict, so its misses and false alarms
+show up too.
 
 ```sh
 cxg_sample.py snapshot catalog.json                  # freeze the CELLxGENE catalogue
 cxg_sample.py sample catalog.json --seed 1 --year 2025 --per-year 50 --n 50 \
     --max-mb 500 > corpus.tsv                        # same snapshot + seed = same corpus
-run_corpus.py corpus.tsv data/ out/ --checks omni-scformats/modules --scx target/release/scx
+run_corpus.py corpus.tsv data/ out/ --scx target/release/scx
 Rscript gen_types.R gen/ && python gen_types.py gen/   # one-type-per-slot files, same TSV layout
 ```
 
