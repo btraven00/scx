@@ -148,7 +148,10 @@ enum Cli {
         /// stdin (copied to a temporary file first, as a URL is)
         input: String,
 
-        /// Output file (.h5ad or .h5seurat), or a directory: `.zarr` (AnnData Zarr v3) or `.bpcells` (X only)
+        /// Output file (.h5ad or .h5seurat), a directory: `.zarr` (AnnData Zarr v3) or `.bpcells` (X only),
+        /// or `-` to write an h5ad to stdout (written to a temporary file
+        /// first; the log goes to stderr and no provenance sidecar is written),
+        /// e.g. `ssh host scx convert big.h5ad - --where donor=d1 | scx convert - d1.zarr`
         output: String,
 
         /// Cells per streaming chunk
@@ -259,13 +262,17 @@ enum Cli {
         /// `--only obsp` or `--only obsm:X_pca,layers`). Applies to
         /// obsm/varm/uns/layers/obsp; X/obs/var are always written.
         /// Excluding obsm also skips reading it (lowers peak RAM).
+        /// `obs:COL` / `var:COL` select columns: naming any keeps only the
+        /// named columns of that table (`--only obs:donor,obs:cell_type`
+        /// also drops every auxiliary slot; add them back by name).
         /// Mutually exclusive with --exclude.
         #[arg(long, conflicts_with = "exclude")]
         only: Option<String>,
 
         /// Drop these comma-separated auxiliary slots (e.g.
         /// `--exclude obsp,obsm,uns`). Applies to obsm/varm/uns/layers/obsp;
-        /// X/obs/var are always written. Mutually exclusive with --only.
+        /// X/obs/var are always written; `obs:COL` / `var:COL` drop one
+        /// column. Mutually exclusive with --only.
         #[arg(long, conflicts_with = "only")]
         exclude: Option<String>,
 
@@ -612,8 +619,18 @@ enum Cli {
     },
 }
 
+/// Set when the converted file itself goes to stdout: the log moves to stderr.
+static LOG_TO_STDERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn main() {
     tracing_subscriber::fmt()
+        .with_writer(|| -> Box<dyn std::io::Write> {
+            if LOG_TO_STDERR.load(std::sync::atomic::Ordering::Relaxed) {
+                Box::new(std::io::stderr())
+            } else {
+                Box::new(std::io::stdout())
+            }
+        })
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),
@@ -992,6 +1009,24 @@ async fn run() -> anyhow::Result<()> {
             let out_dtype = dtype.parse::<DataType>()?;
 
             let input_path = Path::new(&input);
+            // `-`: HDF5 can't be written to a pipe, so the h5ad goes to a
+            // temporary file that is copied to stdout once it is complete.
+            let to_stdout = output == "-";
+            let output = if to_stdout {
+                use std::io::IsTerminal;
+                if std::io::stdout().is_terminal() {
+                    anyhow::bail!(
+                        "refusing to write an h5ad to a terminal: pipe or redirect stdout"
+                    );
+                }
+                LOG_TO_STDERR.store(true, std::sync::atomic::Ordering::Relaxed);
+                std::env::temp_dir()
+                    .join(format!("scx-{}-stdout.h5ad", std::process::id()))
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                output
+            };
             let output_path = Path::new(&output);
             // The extension picks the writer; anything else used to become an
             // h5ad under the wrong name. Checked before the input is read.
@@ -1121,6 +1156,13 @@ async fn run() -> anyhow::Result<()> {
                     return Err(e);
                 }
             };
+            if to_stdout {
+                let copied = std::fs::File::open(output_path)
+                    .and_then(|mut f| std::io::copy(&mut f, &mut std::io::stdout().lock()));
+                remove_path(output_path)?;
+                copied.map_err(|e| anyhow::anyhow!("writing to stdout: {e}"))?;
+                return Ok(());
+            }
 
             // Directory outputs (BPCells, Zarr) are not hashed.
             let hash_span = obkit::span("output_hash");
@@ -1312,6 +1354,22 @@ fn release_freed_memory() {
     }
 }
 
+/// Whether `--only/--exclude` keep column `col` of `table` (obs or var).
+/// Only column specs count, so `--only obsm` still writes every column:
+/// `--exclude obs:a` drops a, and an `--only` naming any `obs:` column keeps
+/// just the named ones.
+fn keeps_column(filter: &SlotFilter, table: &str, col: &str) -> bool {
+    let spec = format!("{table}:{col}");
+    let prefix = format!("{table}:");
+    if filter.exclude.contains(&spec) {
+        return false;
+    }
+    match &filter.only {
+        Some(only) if only.iter().any(|s| s.starts_with(&prefix)) => only.contains(&spec),
+        _ => true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn convert_with_reader(
     reader: &mut dyn DatasetReader,
@@ -1383,8 +1441,10 @@ async fn convert_with_reader(
     // whole slot skips its read too, so `--exclude obsm` avoids materialising
     // the (potentially large) embeddings.
     let write_uns = filter.includes("uns");
-    let obs = reader.obs().await?;
-    let var = reader.var().await?;
+    let mut obs = reader.obs().await?;
+    let mut var = reader.var().await?;
+    obs.columns.retain(|c| keeps_column(filter, "obs", &c.name));
+    var.columns.retain(|c| keeps_column(filter, "var", &c.name));
     let mut uns = if write_uns {
         reader.uns().await?
     } else {
