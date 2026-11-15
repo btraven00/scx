@@ -183,6 +183,12 @@ enum Cli {
         #[arg(long, default_value = "counts")]
         layer: String,
 
+        /// For an .rds/.rda that holds several objects (a saved list of
+        /// Seurat objects), the one to read: list names joined by `$`, e.g.
+        /// `--object 'seus$Control'`. The error for such a file lists them.
+        #[arg(long)]
+        object: Option<String>,
+
         /// Write legacy `.h5seurat` output using dgCMatrix storage instead of BPCells
         #[arg(long)]
         dgcmatrix: bool,
@@ -311,6 +317,12 @@ enum Cli {
         /// `counts` for H5Seurat.
         #[arg(long)]
         layer: Option<String>,
+
+        /// For an .rds/.rda that holds several objects (a saved list of
+        /// Seurat objects), the one to read: list names joined by `$`, e.g.
+        /// `--object 'seus$Control'`. The error for such a file lists them.
+        #[arg(long)]
+        object: Option<String>,
 
         /// Download a URL input without asking, however large. Without it,
         /// inspect asks before downloading more than 1 GB, and stops when it
@@ -813,6 +825,7 @@ async fn run() -> anyhow::Result<()> {
             input,
             assay,
             layer,
+            object,
             yes,
         } => {
             // A URL other than Parquet is downloaded first (kept until inspect
@@ -897,11 +910,12 @@ async fn run() -> anyhow::Result<()> {
                     inspect(&mut r, &input, "MatrixMarket").await?;
                 }
                 Some(Format::Rds) => {
-                    match scx_core::rds::RdsReader::open(
+                    match scx_core::rds::RdsReader::open_object(
                         input_path,
                         chunk,
                         assay.as_deref(),
                         layer.as_deref(),
+                        object.as_deref(),
                     ) {
                         Ok(mut r) => inspect(&mut r, &input, "RDS").await?,
                         // Not something scx converts: show what the file holds.
@@ -963,6 +977,7 @@ async fn run() -> anyhow::Result<()> {
             dtype,
             assay,
             layer,
+            object,
             dgcmatrix,
             x_slot,
             project,
@@ -1035,6 +1050,7 @@ async fn run() -> anyhow::Result<()> {
                 chunk_size,
                 assay: assay.clone(),
                 layer: Some(layer.clone()),
+                object,
                 metadata_only: false,
                 n_vars: n_vars_arg,
                 genes: genes_arg.clone(),

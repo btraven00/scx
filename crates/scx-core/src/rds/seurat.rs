@@ -96,6 +96,21 @@ impl RdsReader {
         assay: Option<&str>,
         layer: Option<&str>,
     ) -> Result<Self> {
+        Self::open_object(path, chunk_size, assay, layer, None)
+    }
+
+    /// [`RdsReader::open`] for a file that holds several objects (a saved
+    /// list of Seurat objects, a `.rda` with more than one): `object` is the
+    /// path to the one to read, list names joined by `$` (`seus$Control`; an
+    /// unnamed element is its 1-based position). `None` reads the only
+    /// object there is, and is an error when there are several.
+    pub fn open_object(
+        path: &Path,
+        chunk_size: usize,
+        assay: Option<&str>,
+        layer: Option<&str>,
+        object: Option<&str>,
+    ) -> Result<Self> {
         let (mut xdr, index) = super::open_indexing(path)?;
         xdr.header()?;
         let root = Parser::new(&mut xdr).item()?;
@@ -104,11 +119,10 @@ impl RdsReader {
         drop(xdr);
         let src = super::indexed_source(path, &index);
 
-        let obj = match (find_seurat(&root), super::sce::find_se(&root)) {
-            (Ok(obj), _) => obj,
-            (Err(_), Some(se)) => return Self::from_se(src, se, chunk_size, assay, layer),
-            (Err(e), None) => return Err(e),
-        };
+        let obj = find_object(&root, object)?;
+        if !obj.has_class("Seurat") {
+            return Self::from_se(src, obj, chunk_size, assay, layer);
+        }
         let assay_name = match assay {
             Some(a) => a.to_string(),
             None => str1(obj.attr("active.assay")).unwrap_or_else(|| "RNA".into()),
@@ -544,21 +558,51 @@ pub(super) fn dense(n: &Node, f: &Fetched) -> Result<RMatrix> {
     })
 }
 
-/// The Seurat object: the root, or (for a `.rda`) the first saved Seurat object.
-fn find_seurat(root: &Node) -> Result<&Node> {
-    if root.has_class("Seurat") {
-        return Ok(root);
+/// The Seurat objects and SummarizedExperiments under `n`, each with its
+/// path (`seus$Control`; empty for the root itself). Only plain lists are
+/// descended into: a `.rda`'s saved variables, and lists of objects in them.
+fn objects<'a>(n: &'a Node, path: &str, depth: usize, out: &mut Vec<(String, &'a Node)>) {
+    if n.has_class("Seurat") || super::sce::is_se(n) {
+        out.push((path.to_string(), n));
+    } else if depth < 4 && n.class().is_empty() {
+        let names = n.names();
+        for (i, (tag, child)) in n.items().iter().enumerate() {
+            let name = match tag.clone().or_else(|| names.get(i).cloned()) {
+                Some(s) if !s.is_empty() => s,
+                _ => (i + 1).to_string(),
+            };
+            let sep = if path.is_empty() { "" } else { "$" };
+            objects(child, &format!("{path}{sep}{name}"), depth + 1, out);
+        }
     }
-    root.items()
-        .iter()
-        .map(|(_, n)| n)
-        .find(|n| n.has_class("Seurat"))
-        .ok_or_else(|| {
-            bad(format!(
-                "not a Seurat object or SummarizedExperiment; the file holds {}",
-                describe(root)
-            ))
-        })
+}
+
+/// The object to read: the one at path `object`, or with no path the only
+/// one in the file. Several without a path is an error that lists them.
+fn find_object<'a>(root: &'a Node, object: Option<&str>) -> Result<&'a Node> {
+    let mut found = Vec::new();
+    objects(root, "", 0, &mut found);
+    let paths = || {
+        let p: Vec<&str> = found.iter().map(|(p, _)| p.as_str()).collect();
+        p.join(", ")
+    };
+    match (object, found.as_slice()) {
+        (_, []) => Err(bad(format!(
+            "not a Seurat object or SummarizedExperiment; the file holds {}",
+            describe(root)
+        ))),
+        (Some(want), _) => found
+            .iter()
+            .find(|(p, _)| p == want)
+            .map(|(_, n)| *n)
+            .ok_or_else(|| bad(format!("no object '{want}' (have: {})", paths()))),
+        (None, [(_, n)]) => Ok(n),
+        (None, _) => Err(bad(format!(
+            "the file holds {} objects ({}); name the one to read (--object)",
+            found.len(),
+            paths()
+        ))),
+    }
 }
 
 /// What a top-level object is, for the "not a Seurat object" error: its

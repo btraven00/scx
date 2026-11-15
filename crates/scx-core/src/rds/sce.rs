@@ -20,17 +20,11 @@ use super::xdr::{Kind, Node};
 use crate::error::Result;
 use crate::ir::{ObsTable, VarTable};
 
-/// The SummarizedExperiment in `root`: the root itself, or (for a `.rda`)
-/// the first saved one. Recognised by its slots, not its class, so every
-/// subclass (SingleCellExperiment, SpatialExperiment, ...) matches.
-pub(super) fn find_se(root: &Node) -> Option<&Node> {
-    let is_se = |n: &Node| {
-        matches!(n.kind, Kind::S4) && n.attr("assays").is_some() && n.attr("colData").is_some()
-    };
-    if is_se(root) {
-        return Some(root);
-    }
-    root.items().iter().map(|(_, n)| n).find(|n| is_se(n))
+/// Whether `n` is a SummarizedExperiment. Recognised by its slots, not its
+/// class, so every subclass (SingleCellExperiment, SpatialExperiment, ...)
+/// matches.
+pub(super) fn is_se(n: &Node) -> bool {
+    matches!(n.kind, Kind::S4) && n.attr("assays").is_some() && n.attr("colData").is_some()
 }
 
 /// Strings of a character vector node, or `None` for NULL / anything else.
