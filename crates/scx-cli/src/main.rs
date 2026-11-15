@@ -1886,7 +1886,7 @@ fn numeric_stats(data: &ColumnData) -> String {
     // Binary {0, 1} column — show counts instead of quartiles
     if vals[0] >= 0.0 && vals[n - 1] <= 1.0 {
         let ones = vals.iter().filter(|&&v| v == 1.0).count();
-        let zeros = n - ones;
+        let zeros = vals.iter().filter(|&&v| v == 0.0).count();
         if ones + zeros == n {
             return format!(
                 "bool-like  0: {} ({:.1}%)  1: {} ({:.1}%){}",
@@ -2507,6 +2507,19 @@ mod stats_tests {
     /// Rust's sort detects that and aborts with "user-provided comparison
     /// function does not correctly implement a total order". anndata writes
     /// missing numbers as NaN, so real atlas files tripped it.
+    /// Floats inside [0, 1] that are not all 0 or 1 (scores, fractions) got
+    /// the bool-like summary, with every value counted as a zero.
+    #[test]
+    fn numeric_stats_fractions_are_not_bool_like() {
+        let out = numeric_stats(&ColumnData::Float(vec![0.00014, 0.000745, 0.5, 0.992]));
+        assert!(out.starts_with("min="), "{out}");
+        let out = numeric_stats(&ColumnData::Float(vec![0.0, 1.0, 1.0, f64::NAN]));
+        assert!(
+            out.starts_with("bool-like  0: 1 (33.3%)  1: 2 (66.7%)"),
+            "{out}"
+        );
+    }
+
     #[test]
     fn numeric_stats_survives_nan() {
         let with_nan = ColumnData::Float(vec![3.0, f64::NAN, 1.0, 2.0, f64::NAN]);
