@@ -58,6 +58,15 @@ format is downloaded to a temporary file first, and its SHA-256 recorded.
 `-` reads the input from stdin the same way, e.g.
 `curl -sL https://host/x.h5ad | scx convert - x.h5seurat`.
 
+`-` as the output writes an h5ad to stdout (through a temporary file; the log
+goes to stderr), so a remote file can be cut down where it lives and only the
+subset sent over, with scx on both ends:
+
+```sh
+ssh host scx convert big.h5ad - --where donor=d1 \
+    --only obs:cell_type,obs:donor | scx convert - d1.zarr
+```
+
 ## Usage
 
 ### Convert
