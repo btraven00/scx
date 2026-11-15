@@ -676,9 +676,9 @@ impl DatasetWriter for H5SeuratWriter {
 
         // Accumulate indptr.
         let base = *state.indptr.last().unwrap();
-        for i in 1..=chunk.nrows {
-            state.indptr.push(base + csr.indptr[i]);
-        }
+        state
+            .indptr
+            .extend(csr.indptr[1..=chunk.nrows].iter().map(|p| base + p));
         Ok(())
     }
 
@@ -801,9 +801,8 @@ impl DatasetWriter for H5SeuratWriter {
 
         // Accumulate cell-level indptr
         let base = *self.x_indptr.last().unwrap();
-        for i in 1..=chunk.nrows {
-            self.x_indptr.push(base + csr.indptr[i]);
-        }
+        self.x_indptr
+            .extend(csr.indptr[1..=chunk.nrows].iter().map(|p| base + p));
 
         Ok(())
     }

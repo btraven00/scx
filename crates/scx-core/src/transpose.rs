@@ -280,8 +280,9 @@ async fn read_columns(
         };
         let mut place = |dst: &mut dyn FnMut(usize, usize)| {
             for r in 0..chunk.nrows {
-                for k in csr.indptr[r] as usize..csr.indptr[r + 1] as usize {
-                    let c = csr.indices[k] as usize;
+                let (lo, hi) = (csr.indptr[r] as usize, csr.indptr[r + 1] as usize);
+                for (k, &c) in (lo..hi).zip(&csr.indices[lo..hi]) {
+                    let c = c as usize;
                     if cols.contains(&c) {
                         let slot = &mut next[c - cols.start];
                         indices[*slot as usize] = (chunk.row_offset + r) as u32;

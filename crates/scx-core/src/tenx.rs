@@ -529,9 +529,7 @@ mod tests {
         for (i, ch) in chunks.iter().enumerate() {
             assert_eq!(ch.row_offset, indptr.len() - 1, "row_offset chunk {i}");
             let base = *indptr.last().unwrap();
-            for r in 1..=ch.nrows {
-                indptr.push(base + ch.data.indptr[r]);
-            }
+            indptr.extend(ch.data.indptr[1..=ch.nrows].iter().map(|p| base + p));
             indices.extend_from_slice(&ch.data.indices);
             data.extend(ch.data.data.to_f64().into_iter().map(|x| x as i64));
         }
