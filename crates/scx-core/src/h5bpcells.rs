@@ -590,7 +590,11 @@ impl<S: BpSink> BpcellsStreamEncoder<S> {
         self.encode(&bi, is_uint.then_some(&bv[..]))?;
 
         // Pad idxptr for trailing cells never streamed (e.g. an empty matrix).
-        while self.idxptr.len() < self.ncol + 1 {
+        let n_outer = match self.storage_order {
+            StorageOrder::Col => self.ncol,
+            StorageOrder::Row => self.nrow,
+        };
+        while self.idxptr.len() < n_outer + 1 {
             let last = *self.idxptr.last().unwrap();
             self.idxptr.push(last);
         }
@@ -842,24 +846,31 @@ impl DatasetWriter for BpcellsH5Writer {
             ));
         }
 
-        // BPCells X is stored cells-as-columns: nrow = inner (genes), ncol =
-        // outer (cells) = meta.shape.0. Create the streaming encoder now; column
-        // names are resolved from obs/var at end_sparse.
-        let (group_path, nrow, ncol) = match group_prefix {
+        // A layer is stored like X, cells as columns: nrow = inner (genes),
+        // ncol = outer (cells) = meta.shape.0. A graph is cells x cells and R
+        // reads it as is, so it is stored row-major: the CSR chunks' rows are
+        // the matrix's rows. Column-major would make R see its transpose.
+        // Row/column names are resolved from obs/var at end_sparse.
+        let (group_path, order, nrow, ncol) = match group_prefix {
             "layers" => (
                 format!("assays/{}/{}", self.assay, name),
+                StorageOrder::Col,
                 meta.shape.1,
                 meta.shape.0,
             ),
-            "obsp" => (format!("graphs/{name}"), meta.shape.1, meta.shape.0),
+            "obsp" => (
+                format!("graphs/{name}"),
+                StorageOrder::Row,
+                meta.shape.0,
+                meta.shape.1,
+            ),
             other => {
                 return Err(ScxError::InvalidFormat(format!(
                     "BPCells writer: unsupported sparse group prefix '{other}'"
                 )))
             }
         };
-        let encoder =
-            BpcellsStreamEncoder::new_h5(&self.file, &group_path, StorageOrder::Col, nrow, ncol)?;
+        let encoder = BpcellsStreamEncoder::new_h5(&self.file, &group_path, order, nrow, ncol)?;
         self.sparse_state = Some(PendingSparseMatrix {
             group_prefix: group_prefix.to_string(),
             encoder,
