@@ -58,6 +58,39 @@ struct SparseWriteState {
     shape: (usize, usize),
     /// Value dtype, taken from the first chunk; `data` is created then.
     dtype: Option<DataType>,
+    /// For a graph (obsp): the CSR column ids and values, held until
+    /// `end_sparse` transposes them. A layer goes to disk chunk by chunk.
+    graph: Option<(Vec<u32>, Option<TypedVec>)>,
+}
+
+/// Append `indices`/`data` to the group's `indices` and `data` datasets,
+/// creating `data` with the values' dtype on first use.
+fn append_nonzeros(
+    file: &File,
+    state: &mut SparseWriteState,
+    indices: &[u32],
+    data: &TypedVec,
+) -> Result<()> {
+    let data_path = format!("{}/data", state.group_path);
+    if state.dtype.is_none() {
+        seurat_init_values(file, &data_path, data.dtype())?;
+        state.dtype = Some(data.dtype());
+    }
+    let nnz = indices.len();
+    if nnz == 0 {
+        return Ok(());
+    }
+    let data_ds = file.dataset(&data_path)?;
+    let old_len = data_ds.shape()[0];
+    let new_len = old_len + nnz;
+    data_ds.resize(new_len)?;
+    write_typed_slice(&data_ds, data, old_len)?;
+
+    let idx_ds = file.dataset(&format!("{}/indices", state.group_path))?;
+    idx_ds.resize(new_len)?;
+    let idx_i32: Vec<i32> = indices.iter().map(|&x| x as i32).collect();
+    idx_ds.write_slice(&Array1::from_vec(idx_i32), s![old_len..new_len])?;
+    Ok(())
 }
 
 pub struct H5SeuratWriter {
@@ -642,6 +675,7 @@ impl DatasetWriter for H5SeuratWriter {
             indptr: vec![0u64],
             shape: meta.shape,
             dtype: None,
+            graph: (group_prefix == "obsp").then(|| (Vec::new(), None)),
         });
         Ok(())
     }
@@ -652,26 +686,15 @@ impl DatasetWriter for H5SeuratWriter {
         })?;
 
         let csr = &chunk.data;
-        let nnz = csr.indices.len();
-        let data_path = format!("{}/data", state.group_path);
-        if state.dtype.is_none() {
-            seurat_init_values(&self.file, &data_path, csr.data.dtype())?;
-            state.dtype = Some(csr.data.dtype());
-        }
-
-        if nnz > 0 {
-            let data_ds = self.file.dataset(&data_path)?;
-            let old_len = data_ds.shape()[0];
-            let new_len = old_len + nnz;
-            data_ds.resize(new_len)?;
-            write_typed_slice(&data_ds, &csr.data, old_len)?;
-
-            let idx_ds = self
-                .file
-                .dataset(&format!("{}/indices", state.group_path))?;
-            idx_ds.resize(new_len)?;
-            let genes_i32: Vec<i32> = csr.indices.iter().map(|&x| x as i32).collect();
-            idx_ds.write_slice(&Array1::from_vec(genes_i32), s![old_len..new_len])?;
+        match &mut state.graph {
+            Some((indices, data)) => {
+                indices.extend_from_slice(&csr.indices);
+                match data {
+                    Some(d) => d.append(&csr.data),
+                    None => *data = Some(csr.data.clone()),
+                }
+            }
+            None => append_nonzeros(&self.file, state, &csr.indices, &csr.data)?,
         }
 
         // Accumulate indptr.
@@ -683,9 +706,31 @@ impl DatasetWriter for H5SeuratWriter {
     }
 
     async fn end_sparse(&mut self) -> Result<()> {
-        let state = self.sparse_state.take().ok_or_else(|| {
+        let mut state = self.sparse_state.take().ok_or_else(|| {
             ScxError::InvalidFormat("end_sparse called without begin_sparse".into())
         })?;
+
+        // A layer is cells x genes, so its CSR arrays are already the CSC of
+        // the genes x cells dgCMatrix. A graph is cells x cells and R reads it
+        // as is, so its CSC is the CSR of its transpose: the CSR arrays, read
+        // as a CSC over the rows, transposed in memory.
+        // A graph has about k nonzeros per cell, so holding it is cheap next to X.
+        let (nrows, ncols) = state.shape;
+        let dims = if let Some((indices, data)) = state.graph.take() {
+            if let Some(data) = data {
+                let t = crate::sparse::csc_to_csr((ncols, nrows), &state.indptr, &indices, &data);
+                append_nonzeros(&self.file, &mut state, &t.indices, &t.data)?;
+                state.indptr = t.indptr;
+            } else {
+                // No chunks arrived: an empty graph, all column pointers 0.
+                state.indptr = vec![0; ncols + 1];
+            }
+            vec![nrows as i32, ncols as i32]
+        } else {
+            // The IR matrix is cells x genes CSR, which on disk is a genes x
+            // cells CSC, so the order flips (as for X in write_x_chunk).
+            vec![ncols as i32, nrows as i32]
+        };
 
         let grp = self.file.group(&state.group_path)?;
         if state.dtype.is_none() {
@@ -709,11 +754,7 @@ impl DatasetWriter for H5SeuratWriter {
             ds.write(&Array1::from_vec(v))?;
         }
 
-        // dims is R's [nrow, ncol] of the dgCMatrix. The IR matrix is
-        // cells x genes CSR, which on disk is a genes x cells CSC, so the
-        // order flips (as for X in write_x_chunk).
-        let (nrows, ncols) = state.shape;
-        let dims = vec![ncols as i32, nrows as i32];
+        // dims is R's [nrow, ncol] of the dgCMatrix.
         let attr = grp.new_attr::<i32>().shape(2).create("dims")?;
         attr.write(&Array1::from_vec(dims))?;
 

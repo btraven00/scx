@@ -9,6 +9,7 @@ use hdf5::File;
 
 use crate::h5::{read_csr_rows, read_u64, read_u64_range, value_dtype, CsrReader};
 use crate::h5_str::{read_str_1d, read_str_attr, read_strings};
+use crate::sparse::{csc_to_csr, csr_rows};
 use crate::stream::ChunkStream;
 use crate::stream::{
     error_stream, load_indptr, normalize_ranges, read_block, row_chunks, row_range_chunks,
@@ -18,8 +19,8 @@ use crate::{
     dtype::DataType,
     error::{Result, ScxError},
     ir::{
-        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixMeta,
-        UnsTable, VarTable, Varm,
+        Column, ColumnData, DenseMatrix, Embeddings, MatrixChunk, ObsTable, SparseMatrixCSR,
+        SparseMatrixMeta, UnsTable, VarTable, Varm,
     },
     stream::DatasetReader,
 };
@@ -583,12 +584,58 @@ fn read_obsp_metas_sync(path: &Path) -> Result<Vec<SparseMatrixMeta>> {
         if detect_sparse_group_kind(&file, &grp_path).is_none() {
             continue;
         }
-        match seurat_read_sparse_meta(&file, &name, &grp_path) {
-            Ok(m) => metas.push(m),
+        match read_graph_sync(path, &name) {
+            Ok(g) => metas.push(SparseMatrixMeta {
+                name,
+                shape: g.shape,
+                indptr: g.indptr,
+            }),
             Err(e) => tracing::warn!("skipping graph '{name}': {e}"),
         }
     }
     Ok(metas)
+}
+
+/// `graphs/<name>` as a cells x cells CSR matrix, whole.
+///
+/// R reads a graph as is: a dgCMatrix graph is the CSC of the graph itself,
+/// not of its transpose as for X (genes x cells), so its column pointers are
+/// not the IR's rows and the arrays are transposed in memory. A BPCells graph
+/// stored row-major (as scx writes them) is already CSR.
+/// A graph holds about k nonzeros per cell, so it is read whole, as h5ad does
+/// for a CSC obsp.
+fn read_graph_sync(path: &Path, name: &str) -> Result<SparseMatrixCSR> {
+    let file = File::open(path)?;
+    let grp_path = format!("graphs/{name}");
+    let (stored, row_major) = if matches!(
+        detect_sparse_group_kind(&file, &grp_path),
+        Some(SparseGroupKind::BpCells)
+    ) {
+        let order = read_strings(&file.group(&grp_path)?, "storage_order")?;
+        let reader = crate::h5bpcells::open_bpcells_h5(&file, &grp_path, 1)?;
+        let n_outer = reader.n_obs;
+        (
+            reader.read_chunk(0, n_outer)?.data,
+            order.first().map(String::as_str) == Some("row"),
+        )
+    } else {
+        let disk = seurat_read_sparse_meta(&file, name, &grp_path)?;
+        let n_outer = disk.shape.0;
+        (
+            seurat_read_sparse_chunk(path, &grp_path, &disk, 0, n_outer)?.data,
+            false,
+        )
+    };
+    if row_major {
+        return Ok(stored);
+    }
+    // `stored` is the CSR of the transpose, i.e. the graph's CSC.
+    Ok(csc_to_csr(
+        (stored.shape.1, stored.shape.0),
+        &stored.indptr,
+        &stored.indices,
+        &stored.data,
+    ))
 }
 
 /// `varm` from the reductions' `feature.loadings`, aligned to the exported
@@ -838,44 +885,9 @@ impl DatasetReader for H5SeuratReader {
     }
 
     fn obsp_stream<'a>(&'a self, meta: &'a SparseMatrixMeta, chunk_size: usize) -> ChunkStream<'a> {
-        let path = self.path.clone();
-        let grp_path = format!("graphs/{}", meta.name);
-        let n_rows = meta.shape.0;
-
-        let is_bpcells = {
-            let file = File::open(&path);
-            match file {
-                Ok(file) => matches!(
-                    detect_sparse_group_kind(&file, &grp_path),
-                    Some(SparseGroupKind::BpCells)
-                ),
-                Err(_) => false,
-            }
-        };
-
-        if is_bpcells {
-            let bp_reader = {
-                let file = match File::open(&path) {
-                    Ok(file) => file,
-                    Err(e) => {
-                        return Box::pin(stream::once(async move { Err(ScxError::from(e)) }));
-                    }
-                };
-                match crate::h5bpcells::open_bpcells_h5(&file, &grp_path, chunk_size) {
-                    Ok(reader) => reader,
-                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
-                }
-            };
-
-            row_chunks(n_rows, chunk_size, move |rows| {
-                let (row_start, row_end) = (rows.start, rows.end);
-                bp_reader.read_chunk(row_start, row_end)
-            })
-        } else {
-            row_chunks(n_rows, chunk_size, move |rows| {
-                let (row_start, row_end) = (rows.start, rows.end);
-                seurat_read_sparse_chunk(&path, &grp_path, meta, row_start, row_end)
-            })
+        match read_graph_sync(&self.path, &meta.name) {
+            Ok(g) => row_chunks(g.shape.0, chunk_size, move |rows| Ok(csr_rows(&g, rows))),
+            Err(e) => Box::pin(stream::once(async move { Err(e) })),
         }
     }
 

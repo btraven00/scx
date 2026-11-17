@@ -999,3 +999,160 @@ async fn row_range_stream_reads_only_its_indptr() {
         "an unreadable indptr is not a row pointer"
     );
 }
+
+// -----------------------------------------------------------------------
+// Regression (BUGS.md 2026-11-12): graphs went to disk as the CSR arrays of
+// the IR matrix, which R reads as a CSC, so R saw every obsp transposed. The
+// reader made the same mistake, so a write-then-read round trip passed and a
+// symmetric graph hid it. The graph here is asymmetric, arrives in two chunks,
+// and is checked on disk in the layout R reads, for both h5seurat writers.
+// -----------------------------------------------------------------------
+
+/// The graph [[0, 5, 9], [0, 0, 7], [6, 0, 0]], as (column ids, values) per row.
+fn asymmetric_graph_rows() -> Vec<(Vec<u32>, Vec<f64>)> {
+    vec![
+        (vec![1, 2], vec![5.0, 9.0]),
+        (vec![2], vec![7.0]),
+        (vec![0], vec![6.0]),
+    ]
+}
+
+async fn write_asymmetric_graph<W: DatasetWriter>(mut w: W) {
+    let csr = |offset, indptr: Vec<u64>, indices: Vec<u32>, data: Vec<f64>| MatrixChunk {
+        row_offset: offset,
+        nrows: indptr.len() - 1,
+        data: SparseMatrixCSR {
+            shape: (indptr.len() - 1, 3),
+            indptr,
+            indices,
+            data: TypedVec::F64(data),
+        },
+    };
+    let names = |p: &str| (0..3).map(|i| format!("{p}{i}")).collect::<Vec<_>>();
+    w.write_obs(&ObsTable {
+        index: names("c"),
+        columns: vec![],
+    })
+    .await
+    .unwrap();
+    w.write_var(&VarTable {
+        index: names("g"),
+        columns: vec![],
+    })
+    .await
+    .unwrap();
+    w.write_obsm(&Embeddings::default()).await.unwrap();
+    w.write_uns(&UnsTable::default()).await.unwrap();
+    let meta = SparseMatrixMeta {
+        name: "g".into(),
+        shape: (3, 3),
+        indptr: vec![0, 2, 3, 4],
+    };
+    w.begin_sparse("obsp", "g", &meta).await.unwrap();
+    w.write_sparse_chunk(&csr(0, vec![0, 2, 3], vec![1, 2, 2], vec![5.0, 9.0, 7.0]))
+        .await
+        .unwrap();
+    w.write_sparse_chunk(&csr(2, vec![0, 1], vec![0], vec![6.0]))
+        .await
+        .unwrap();
+    w.end_sparse().await.unwrap();
+    w.write_x_chunk(&csr(0, vec![0, 1, 1, 1], vec![0], vec![1.0]))
+        .await
+        .unwrap();
+    w.finalize().await.unwrap();
+}
+
+/// The obsp graph as the reader streams it, one chunk per row.
+async fn read_graph_rows(path: &std::path::Path) -> Vec<(Vec<u32>, Vec<f64>)> {
+    let mut r = H5SeuratReader::open(path, 100, None, None).unwrap();
+    let metas = r.obsp_metas().await.unwrap();
+    assert_eq!(
+        (metas[0].shape, metas[0].indptr.clone()),
+        ((3, 3), vec![0, 2, 3, 4])
+    );
+    let chunks: Vec<_> = r
+        .obsp_stream(&metas[0], 1)
+        .map(|c| c.unwrap())
+        .collect()
+        .await;
+    chunks
+        .iter()
+        .map(|c| (c.data.indices.clone(), c.data.data.to_f64()))
+        .collect()
+}
+
+#[tokio::test]
+async fn dgcmatrix_graph_is_written_as_r_reads_it() {
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let w =
+        H5SeuratWriter::create(tmp.path(), 3, 3, DataType::F64, None, None, None, false).unwrap();
+    write_asymmetric_graph(w).await;
+
+    // R's dgCMatrix of the graph itself: column pointers, row ids, values.
+    let f = File::open(tmp.path()).unwrap();
+    let g = f.group("graphs/g").unwrap();
+    assert_eq!(
+        g.attr("dims").unwrap().read_1d::<i32>().unwrap().to_vec(),
+        vec![3, 3]
+    );
+    let ds = |n: &str| g.dataset(n).unwrap();
+    assert_eq!(
+        ds("indptr").read_1d::<i64>().unwrap().to_vec(),
+        vec![0, 1, 2, 4]
+    );
+    assert_eq!(
+        ds("indices").read_1d::<i32>().unwrap().to_vec(),
+        vec![2, 0, 0, 1]
+    );
+    assert_eq!(
+        ds("data").read_1d::<f64>().unwrap().to_vec(),
+        vec![6.0, 5.0, 9.0, 7.0]
+    );
+    drop(f);
+
+    assert_eq!(read_graph_rows(tmp.path()).await, asymmetric_graph_rows());
+}
+
+#[tokio::test]
+async fn bpcells_graph_is_written_as_r_reads_it() {
+    let tmp = tempfile::NamedTempFile::with_suffix(".h5seurat").unwrap();
+    let w = crate::h5bpcells::BpcellsH5Writer::create(
+        tmp.path(),
+        3,
+        3,
+        DataType::F64,
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    write_asymmetric_graph(w).await;
+
+    // Row-major, so BPCells' row pointers are the graph's rows.
+    let f = File::open(tmp.path()).unwrap();
+    let g = f.group("graphs/g").unwrap();
+    assert_eq!(
+        crate::h5_str::read_strings(&g, "storage_order").unwrap(),
+        vec!["row".to_string()]
+    );
+    assert_eq!(
+        g.dataset("shape")
+            .unwrap()
+            .read_1d::<u32>()
+            .unwrap()
+            .to_vec(),
+        vec![3, 3]
+    );
+    assert_eq!(
+        g.dataset("idxptr")
+            .unwrap()
+            .read_1d::<u64>()
+            .unwrap()
+            .to_vec(),
+        vec![0, 2, 3, 4]
+    );
+    drop(f);
+
+    assert_eq!(read_graph_rows(tmp.path()).await, asymmetric_graph_rows());
+}
