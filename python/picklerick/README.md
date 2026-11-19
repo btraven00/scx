@@ -90,6 +90,14 @@ for chunk in pk.open_stream("emt.h5ad", where={"CellLine": "A549", "Time": ["3d"
 For deflate-compressed H5AD, chunks are decompressed on all cores. HDF5's
 own filter pipeline would decompress them on a single core.
 
+Uncompressed H5AD on a slow spinning disk is the exception. Reading it
+cold with several threads is slower than with one, because the parallel
+reads make the disk seek between them (hlca_100k: 4.3 s at 8 threads,
+3.1 s at 1). There, set `RAYON_NUM_THREADS=1` in the environment before
+the first read; the thread pool is sized once per process. Compressed
+files, SSDs and data already in the page cache still gain from more
+threads.
+
 Peak RSS and wall time for a per-gene-sum workload (`bench/python/`,
 release build, chunk 5000, 16 cores):
 
