@@ -16,6 +16,8 @@
 #              project library, when rv is installed).
 #   DOCS_VENV  Python venv made from site/requirements.txt
 #              (default: .venv-docs).
+#   SCX_BIN    an scx binary to use instead of building the CLI (docs.yml
+#              passes the one CI's tests built).
 #   CARGO_TARGET_DIR  used by all three builds; the R package's
 #              ./rust/target is linked to it when that doesn't exist yet
 #              (docs.yml keeps it between runs).
@@ -36,8 +38,13 @@ if [ ! -x "$venv/bin/python" ]; then
 fi
 
 echo "==> scx CLI"
-cargo build --release -p scx-cli
-export PATH="${CARGO_TARGET_DIR:-$root/target}/release:$PATH"
+if [ -n "${SCX_BIN:-}" ]; then
+  export PATH="$(cd "$(dirname "$SCX_BIN")" && pwd):$PATH"
+else
+  cargo build --release -p scx-cli
+  export PATH="${CARGO_TARGET_DIR:-$root/target}/release:$PATH"
+fi
+scx --version
 
 echo "==> R package"
 # Build against the checked-out scx-core rather than the crates.io release
