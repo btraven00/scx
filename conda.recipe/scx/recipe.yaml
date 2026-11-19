@@ -33,6 +33,11 @@ requirements:
     - ${{ compiler('rust') }}
     - if: unix
       then: pkg-config
+    # rust pulls in vs_win-64 >=2019, which resolves to the vs2026 activation;
+    # that one wants MSVC 14.51 exactly and fails on runners with 14.52. Use
+    # VS 2022 (MSVC 14.44, on the windows-2022 runner) instead.
+    - if: win
+      then: vs_win-64 2022.*
   # Same HDF5 as picklerick-python (and conda-forge's current global pin), so
   # the two packages can be installed into one environment.
   host:
