@@ -787,7 +787,8 @@ async fn slots(r: &mut (dyn DatasetReader + Send), f: &SlotFilter) -> Result<Vec
 /// `scx convert` applies to h5seurat (`h5seurat::auto_counts_source`): when
 /// one side keeps its counts in raw.X or a `counts` layer and the other has
 /// a `data` layer instead, X pairs with `layers/data` and the counts with
-/// the other side's X. Then equal names.
+/// the other side's X (both of them, when a side has raw and the layer).
+/// Then equal names.
 fn pair(a: &[Slot], b: &[Slot], map: &[(String, String)]) -> Vec<(Option<usize>, Option<usize>)> {
     let find = |v: &[Slot], n: &str| v.iter().position(|s| s.name() == n);
     let mut pairs: Vec<(usize, usize)> = map
@@ -798,18 +799,34 @@ fn pair(a: &[Slot], b: &[Slot], map: &[(String, String)]) -> Vec<(Option<usize>,
     // h5ad (X normalised, counts in raw or a layer) vs h5seurat (X = counts,
     // layers/data), either way round.
     for (p, q, flip) in [(a, b, false), (b, a, true)] {
-        let Some(counts) = ["raw", "layers/counts"]
-            .into_iter()
-            .find(|c| has(p, c) && !has(q, c))
-        else {
+        if !has(q, "layers/data") || has(p, "layers/data") {
+            continue;
+        }
+        // X is absent under a filter such as `--only layers`.
+        let (Some(px), Some(qx)) = (find(p, "X"), find(q, "X")) else {
             continue;
         };
-        if has(q, "layers/data") && !has(p, "layers/data") {
-            for (x, y) in [("X", "layers/data"), (counts, "X")] {
-                let (i, j) = (find(p, x).unwrap(), find(q, y).unwrap());
-                let pr = if flip { (j, i) } else { (i, j) };
-                if !pairs.iter().any(|&(u, w)| u == pr.0 || w == pr.1) {
-                    pairs.push(pr);
+        // (p, q) order to (a, b) order, and back.
+        let sw = |(i, j): (usize, usize)| if flip { (j, i) } else { (i, j) };
+        let counts: Vec<usize> = ["layers/counts", "raw"]
+            .into_iter()
+            .filter(|c| !has(q, c))
+            .filter_map(|c| find(p, c))
+            .collect();
+        if counts.is_empty() {
+            continue;
+        }
+        let xd = sw((px, find(q, "layers/data").unwrap()));
+        if !pairs.iter().any(|&(u, w)| u == xd.0 || w == xd.1) {
+            pairs.push(xd);
+        }
+        // Convert keeps one counts matrix (the layer, else raw), so a side
+        // holding both has both compared with the other's X: a raw that
+        // repeats the layer is SAME, one that convert dropped is DIFF.
+        if !pairs.iter().any(|&o| sw(o).1 == qx) {
+            for c in counts {
+                if !pairs.iter().any(|&o| sw(o).0 == c) {
+                    pairs.push(sw((c, qx)));
                 }
             }
         }
@@ -1380,6 +1397,26 @@ mod tests {
         // --map wins over the rule.
         let pairs = pair(&a, &b, &[("X".into(), "X".into())]);
         assert!(pairs.contains(&(Some(0), Some(0))));
+        // Raw and a counts layer together: both compare with the other X,
+        // neither is left "only in A".
+        let a = vec![Slot::X, Slot::Raw(meta("raw")), Slot::Layer(meta("counts"))];
+        for (pairs, sw) in [(pair(&a, &b, &[]), false), (pair(&b, &a, &[]), true)] {
+            let or = |i, j| {
+                if sw {
+                    (Some(j), Some(i))
+                } else {
+                    (Some(i), Some(j))
+                }
+            };
+            assert_eq!(pairs.len(), 3, "{pairs:?}");
+            for pr in [or(0, 1), or(1, 0), or(2, 0)] {
+                assert!(pairs.contains(&pr), "{pairs:?}");
+            }
+        }
+        // No X (`--only layers`): nothing to pair, and no panic.
+        let a = vec![Slot::Layer(meta("counts"))];
+        let b = vec![Slot::Layer(meta("data"))];
+        assert_eq!(pair(&a, &b, &[]), vec![(Some(0), None), (None, Some(0))]);
     }
 
     /// Large uns arrays are compared typed: equal to the same table read
