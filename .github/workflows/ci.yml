@@ -61,6 +61,15 @@ jobs:
           HDF5_USE_FILE_LOCKING: "FALSE"
         run: cargo test --all --features scx-cli/net,scx-cli/bixverse-parquet
 
+      # The scx binary `cargo test` just built, for docs.yml to render the
+      # site with instead of building the CLI again. Debug is fine there: the
+      # examples run on tiny fixtures.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scx-cli
+          path: target/debug/scx
+          retention-days: 7
+
       - name: sccache hit rate
         if: always()
         run: sccache --show-stats

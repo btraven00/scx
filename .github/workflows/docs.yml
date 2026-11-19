@@ -4,17 +4,25 @@ name: Docs
 # chunk, so a broken example fails this check, and deploys it to GitHub Pages
 # (Settings -> Pages -> Source must be "GitHub Actions").
 #
-# Runs on merges to main (and by hand), not on pull requests: it needs the
-# single self-hosted runner, which pull requests were queueing behind. Run it
-# on a branch with workflow_dispatch to check the docs before merging.
+# Runs after CI on merges to main (and by hand), not on pull requests: it
+# needs the single self-hosted runner, which pull requests were queueing
+# behind. Run it on a branch with workflow_dispatch to check the docs before
+# merging.
+#
+# After CI it renders with the scx binary CI's tests built (artifact
+# `scx-cli`) instead of building the CLI again. By hand, and when CI's
+# vendored test job did not get as far as uploading it, it builds the CLI.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: docs-${{ github.ref }}
@@ -28,6 +36,8 @@ jobs:
   # for pull requests from forks, which shouldn't run code on a shared lab
   # machine.
   build:
+    # A push to main only: `branches` matches a fork PR's branch name too.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push'
     runs-on: self-hosted
     env:
       CARGO_HOME: /opt/cache/runner/scx/cargo
@@ -57,6 +67,24 @@ jobs:
       PIP_CACHE_DIR: /opt/cache/runner/scx/pip
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The commit CI tested, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: scx binary from CI
+        id: scx-bin
+        if: github.event_name == 'workflow_run'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: scx-cli
+          path: ${{ runner.temp }}/scx-cli
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Use it
+        if: steps.scx-bin.outcome == 'success'
+        run: |
+          chmod +x "$RUNNER_TEMP/scx-cli/scx"
+          echo "SCX_BIN=$RUNNER_TEMP/scx-cli/scx" >> "$GITHUB_ENV"
       # TODO: cleared wholesale past 40 GB; prune by age if that recurs often.
       - name: Cap the kept build dir
         run: |
@@ -90,7 +118,7 @@ jobs:
         run: sccache --show-stats
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_run'
     needs: build
     runs-on: ubuntu-latest
     permissions:
