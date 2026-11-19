@@ -91,7 +91,9 @@ reduction `pca` to obsm `X_pca`. Matrices pair by `--map` first, then by the
 counts/data rule `scx convert` applies for h5seurat
 (`h5seurat::auto_counts_source`): when one side keeps its counts in raw.X or a
 `counts` layer and the other has a `data` layer instead, X pairs with
-`layers/data` and the counts with the other side's X. Then by equal names.
+`layers/data` and the counts with the other side's X. A side with both raw
+and a `counts` layer has both compared with that X, since convert keeps only
+one of them (the layer). Then by equal names.
 Unpaired slots are reported "only in A/B" rather than guessed.
 
 ## Output
