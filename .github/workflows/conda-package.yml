@@ -21,6 +21,13 @@ jobs:
   build:
     name: Build ${{ matrix.recipe }} (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
+    # The win-64 build broke on 2026-11-16: the runner image moved to MSVC
+    # 14.52, but conda-forge's vs2026 activation (vs_win-64 2026.1) asks
+    # vcvars for exactly 14.51, so no cl.exe ends up on PATH. Let it fail
+    # without skipping `publish` for the other platforms; the job still shows
+    # red. Remove once win-64 is green again (or conda-forge ships a vs2026
+    # activation for 14.52).
+    continue-on-error: ${{ matrix.platform.target == 'win-64' }}
     strategy:
       fail-fast: false
       matrix:
