@@ -25,17 +25,12 @@ use scx_core::{
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
-// Async bridge: spin up a single-threaded tokio runtime per call.
-// This is appropriate for one-shot CLI-style invocations from R.
+// Async bridge: scx-core's local readers need no reactor (only its `net`
+// feature, which this crate does not enable, does), so a plain executor
+// suffices and keeps tokio out of the vendored tarball.
 // ---------------------------------------------------------------------------
 
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime")
-        .block_on(fut)
-}
+use futures::executor::block_on;
 
 // ---------------------------------------------------------------------------
 // Error bridge: raise a clean R error instead of panicking.

@@ -20,7 +20,16 @@ RUST_SRC = $(shell find ./rust/src -name '*.rs' 2>/dev/null) ./rust/Cargo.toml .
 $(SHLIB): $(STATLIB)
 
 $(STATLIB): $(RUST_SRC)
-	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir="$${PICKLERICK_TARGET_DIR:-$(TARGET_DIR)}"
+	@# With rust/vendor.tar.xz (tools/vendor.sh, for CRAN/Bioconductor
+	@# tarballs) build offline from it; otherwise fetch from crates.io.
+	set --; \
+	if [ -f ./rust/vendor.tar.xz ]; then \
+	    tar -xJf ./rust/vendor.tar.xz -C ./rust && \
+	    set -- --offline --config 'source.crates-io.replace-with="vendored"' \
+	        --config "source.vendored.directory=\"$$(pwd)/rust/vendor\""; \
+	fi; \
+	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir="$${PICKLERICK_TARGET_DIR:-$(TARGET_DIR)}" "$$@"; \
+	status=$$?; rm -rf ./rust/vendor; exit $$status
 	@# PICKLERICK_TARGET_DIR (optional; r.yml sets it) builds in a directory
 	@# kept outside the package, so the copies R CMD build and check install
 	@# from reuse one build. When CARGO_BUILD_TARGET is set (e.g. by conda's
