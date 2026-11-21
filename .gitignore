@@ -34,5 +34,5 @@ r/picklerick/.cargo/
 /site/tutorials/r/
 /site/objects.json
 r/picklerick/docs/
-r/picklerick/src/rust/vendor.tar.xz
+r/picklerick/src/rust/vendor.tar.xz.*
 r/picklerick/src/rust/vendor/

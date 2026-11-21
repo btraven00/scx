@@ -322,15 +322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cmake"
-version = "0.1.58"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -791,25 +782,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "hdf5-metno-src"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69c883c565498492954e344c482f8622525e58c7a71100dd9498c4940da82885"
-dependencies = [
- "cmake",
- "libz-sys",
-]
-
-[[package]]
 name = "hdf5-metno-sys"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "567a57ee34c38263f551f2cf02b95675def6b91d0e321c5e70f8c6d5ef9cee87"
 dependencies = [
- "hdf5-metno-src",
  "libc",
  "libloading",
- "libz-sys",
  "parking_lot",
  "pkg-config",
  "regex",
