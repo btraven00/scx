@@ -170,16 +170,17 @@ When in doubt, choose the option that is:
 Two non-obvious facts that have each caused a build failure. Full detail in
 `docs/packaging.md`; the short version for agents:
 
-### The R package must vendor HDF5 *statically*
+### The R package links HDF5 from Rhdf5lib, on R's link line
 `picklerick-r` compiles to a Rust `staticlib` that R links into `picklerick.so`
-via `src/Makevars` (which passes no `-lhdf5`). A Rust staticlib only bundles
-**statically**-linked native deps, and cargo's dynamic-link directives do not
-reach R's separate `.so` link step. So linking HDF5 *dynamically* (system
-`libhdf5`) leaves its symbols undefined at load (`undefined symbol:
-H5Sselect_elements`). The `conda.recipe/r-picklerick` recipe therefore must
-**not** set `HDF5_DIR` or depend on system `hdf5`, and must include `cmake` +
-a C++ compiler for the from-source HDF5 build. (CLI/Python packages *can* use
-system HDF5 via `--no-default-features`; the R staticlib cannot.)
+via `src/Makevars`. A Rust staticlib carries no cargo link directives for
+libraries it does not bundle, so an HDF5 linked by cargo leaves its symbols
+undefined at load (`undefined symbol: H5Sselect_elements`). HDF5 therefore
+comes from `LinkingTo: Rhdf5lib (>= 2.0.0)`, whose static `libhdf5.a`
+`Makevars` puts in `PKG_LIBS` (as rhdf5 does); the R crate builds scx-core
+without `vendored-hdf5`. The `conda.recipe/r-picklerick` recipe depends on
+`bioconductor-rhdf5lib`, never on system `hdf5`. A small C shim satisfies
+hdf5-metno-sys's dlopen version check (`src/rust/hdf5_version_shim.c`).
+(CLI/Python packages *can* use system HDF5 via `--no-default-features`.)
 
 ### scx-core comes from crates.io for the R package
 `r/picklerick` depends on the published `scx-core` (`scx-core = "X.Y.Z" #

@@ -25,6 +25,8 @@ Imports:
     SparseArray,
     SingleCellExperiment,
     SummarizedExperiment
+LinkingTo:
+    Rhdf5lib (>= 2.0.0)
 Suggests:
     HDF5Array,
     knitr,
@@ -40,5 +42,5 @@ BugReports: https://github.com/btraven00/scx/issues
 Config/Needs/website: pkgdown
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-SystemRequirements: Cargo (rustup) >= 1.70
+SystemRequirements: Cargo and rustc >= 1.91, GNU make
 Config/roxygen2/version: 8.1.1

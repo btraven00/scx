@@ -13,11 +13,10 @@ source:
 
 build:
   number: 0
-  # No HDF5_DIR / system hdf5: scx-core's vendored-hdf5 feature builds HDF5 +
-  # zlib from source and bundles them into the staticlib (Rust staticlibs only
-  # bundle *static* native deps, and Makevars passes no -lhdf5 — so a dynamic
-  # system HDF5 would leave symbols like H5Sselect_elements undefined at load).
-  # The from-source build needs cmake (see build requirements).
+  # HDF5 is Bioconductor's Rhdf5lib, whose static libhdf5.a src/Makevars puts
+  # on R's link line (a Rust staticlib does not carry cargo's directives for a
+  # library it does not bundle, so a dynamic system hdf5 would leave symbols
+  # undefined at load). No hdf5 or cmake here.
   # The R crate depends on scx-core from crates.io; build it against the
   # in-tree crate instead, so the package matches the tagged engine and does not
   # wait for `cargo publish`. The config goes in the work dir, where cargo finds
@@ -39,14 +38,12 @@ requirements:
   build:
     - ${{ compiler('rust') }}
     - ${{ compiler('c') }}
-    - ${{ compiler('cxx') }}
-    - cmake
     - if: unix
       then: pkg-config
     - make
   host:
-    # No hdf5 here: it is vendored statically into the staticlib (see build
-    # script note). zlib is likewise vendored via the hdf5/zlib feature.
+    # LinkingTo; brings its libcurl, openssl, libaec and zlib along.
+    - bioconductor-rhdf5lib >=2.0.0
     - r-base
     - r-matrix
     - r-jsonlite

@@ -1,10 +1,11 @@
 #!/bin/sh
-# Vendor the Rust dependencies into src/rust/vendor.tar.xz, so the package
+# Vendor the Rust dependencies into src/rust/vendor.tar.xz.NN, so the package
 # builds offline (CRAN/Bioconductor policy). Run before `R CMD build`:
 #
 #   sh tools/vendor.sh && R CMD build .
 #
-# src/Makevars uses the tarball when it is present, crates.io otherwise.
+# src/Makevars uses them when present, crates.io otherwise. The archive is
+# split in 4 MB parts: Bioconductor caps every file at 5 MB.
 # To keep the tarball small it:
 #   - stubs crates that no R platform compiles (wasm, other OSes): manifest
 #     plus an empty lib.rs, which is all cargo needs to resolve the lockfile;
@@ -66,5 +67,6 @@ for ws in windows-sys-*; do
         grep -qxF "$dir" "$tmp/winfeat" || rm "$f"
     done && find . -type d -empty -delete)
 done
-XZ_OPT=-9e tar -cJf "$out/vendor.tar.xz" -C "$tmp" vendor
-echo "src/rust/vendor.tar.xz: $(du -h "$out/vendor.tar.xz" | cut -f1), $(grep -c . "$tmp/keep") crates kept"
+rm -f "$out"/vendor.tar.xz.*
+XZ_OPT=-9e tar -cJf - -C "$tmp" vendor | split -b 4m -d -a 2 - "$out/vendor.tar.xz."
+echo "src/rust/vendor.tar.xz.*: $(cat "$out"/vendor.tar.xz.* | wc -c | awk '{printf "%.1f MB", $1 / 1e6}') in $(ls "$out"/vendor.tar.xz.* | wc -l) parts, $(grep -c . "$tmp/keep") crates kept"

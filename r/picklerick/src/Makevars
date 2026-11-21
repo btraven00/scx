@@ -1,17 +1,18 @@
-# entrypoint.c only needs R headers now; HDF5 headers not required.
+# entrypoint.c only needs R headers; HDF5 headers not required.
 PKG_CFLAGS =
 
 TARGET_DIR = ./rust/target
 LIBDIR     = $(TARGET_DIR)/release
 STATLIB    = $(LIBDIR)/libpicklerick_r.a
 
-# scx-core links HDF5 + zlib into libpicklerick_r.a. With the default
-# vendored-hdf5 feature it builds them from source and links statically (no
-# system libhdf5 / libz needed). Packagers that set HDF5_DIR (e.g. the conda
-# recipe, host hdf5 1.12.*) make hdf5-metno-sys link that system library
-# instead; the chunk-read ABI is then chosen from the detected version, not the
-# feature (see scx-core/build.rs + h5_chunk.rs). -ldl/-lm cover the static case.
-PKG_LIBS   = $(STATLIB) -ldl -lm
+# HDF5 is Bioconductor's Rhdf5lib: the static libhdf5.a (plus the libraries it
+# needs) that rhdf5 links too. A Rust staticlib does not carry cargo's link
+# directives for a library it does not bundle, so it goes on R's link line.
+RHDF5LIB   = $(shell "$(R_HOME)/bin$(R_ARCH_BIN)/Rscript" -e 'cat(system.file(package = "Rhdf5lib"))')
+# Passed to hdf5-metno-sys, which reruns when it changes: the shim's path does
+# not, so without it an Rhdf5lib upgrade would keep the old HDF5's ABI.
+HDF5_VER   = $(shell "$(R_HOME)/bin$(R_ARCH_BIN)/Rscript" -e 'cat(Rhdf5lib::getHdf5Version())')
+PKG_LIBS   = $(STATLIB) $(shell "$(R_HOME)/bin$(R_ARCH_BIN)/Rscript" -e 'Rhdf5lib::pkgconfig("PKG_C_LIBS")') -ldl -lm
 
 # scx-core comes from crates.io (./rust/Cargo.toml + Cargo.lock), fetched by
 # cargo. Rebuild on local source or lockfile changes.
@@ -19,17 +20,32 @@ RUST_SRC = $(shell find ./rust/src -name '*.rs' 2>/dev/null) ./rust/Cargo.toml .
 
 $(SHLIB): $(STATLIB)
 
-$(STATLIB): $(RUST_SRC)
-	@# With rust/vendor.tar.xz (tools/vendor.sh, for CRAN/Bioconductor
-	@# tarballs) build offline from it; otherwise fetch from crates.io.
+# Rebuild when Rhdf5lib's HDF5 changes, too (its ABI is fixed at build time).
+HDF5_STAMP = ./rust/target/.hdf5-$(HDF5_VER)
+
+$(HDF5_STAMP):
+	mkdir -p ./rust/target && touch $@
+
+$(STATLIB): $(RUST_SRC) $(HDF5_STAMP)
+	@# hdf5-metno-sys reads the HDF5 version from Rhdf5lib's headers, but also
+	@# dlopens a shared libhdf5 to check it, and Rhdf5lib has only the static
+	@# one: hdf5_version_shim.c stands in for that check.
+	@# With rust/vendor.tar.xz.* (tools/vendor.sh, for CRAN/Bioconductor
+	@# tarballs) build offline from them; otherwise fetch from crates.io.
+	shim="$$(pwd)/rust/hdf5-shim"; ext=so; \
+	if [ "$$(uname -s)" = Darwin ]; then ext=dylib; fi; \
+	rm -rf "$$shim" && mkdir -p "$$shim/lib" && \
+	ln -s "$(RHDF5LIB)/include" "$$shim/include" && \
+	$(CC) $(CPICFLAGS) $(SHLIB_LDFLAGS) -I"$(RHDF5LIB)/include" \
+	    -o "$$shim/lib/libhdf5.$$ext" ./rust/hdf5_version_shim.c || exit 1; \
 	set --; \
-	if [ -f ./rust/vendor.tar.xz ]; then \
-	    tar -xJf ./rust/vendor.tar.xz -C ./rust && \
+	if [ -f ./rust/vendor.tar.xz.00 ]; then \
+	    cat ./rust/vendor.tar.xz.* | tar -xJf - -C ./rust && \
 	    set -- --offline --config 'source.crates-io.replace-with="vendored"' \
 	        --config "source.vendored.directory=\"$$(pwd)/rust/vendor\""; \
 	fi; \
-	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir="$${PICKLERICK_TARGET_DIR:-$(TARGET_DIR)}" "$$@"; \
-	status=$$?; rm -rf ./rust/vendor; exit $$status
+	HDF5_DIR="$$shim" HDF5_VERSION="$(HDF5_VER)" cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir="$${PICKLERICK_TARGET_DIR:-$(TARGET_DIR)}" "$$@"; \
+	status=$$?; rm -rf ./rust/vendor "$$shim"; exit $$status
 	@# PICKLERICK_TARGET_DIR (optional; r.yml sets it) builds in a directory
 	@# kept outside the package, so the copies R CMD build and check install
 	@# from reuse one build. When CARGO_BUILD_TARGET is set (e.g. by conda's
@@ -46,4 +62,4 @@ $(STATLIB): $(RUST_SRC)
 	fi
 
 clean:
-	rm -Rf $(SHLIB) $(STATLIB) $(TARGET_DIR)
+	rm -Rf $(SHLIB) $(STATLIB) $(TARGET_DIR) ./rust/hdf5-shim

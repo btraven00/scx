@@ -34,29 +34,45 @@ The `conda.recipe/scx` and `conda.recipe/picklerick-python` recipes pass
 `--no-default-features` and depend on host `hdf5`, so they are working examples
 of the system-HDF5 path.
 
-## R (`picklerick`) — MUST use vendored-static HDF5
-
-**The R package cannot use the system/dynamic HDF5 path.** This is the
-non-obvious constraint that bit us (load-time `undefined symbol:
-H5Sselect_elements`):
+## R (`picklerick`) — HDF5 from Rhdf5lib, linked by R
 
 `picklerick-r` compiles to a Rust **`staticlib`** (`libpicklerick_r.a`), which R
-then links into `picklerick.so` via `src/Makevars` (`PKG_LIBS = $(STATLIB) -ldl
--lm`). A Rust `staticlib` only *bundles* native dependencies that are linked
-**statically**; cargo's link directives for a *dynamic* library are **not**
-propagated to R's separate `.so` link step, and `Makevars` passes no `-lhdf5`.
-So if HDF5 is linked dynamically (e.g. `HDF5_DIR` set, or a host `hdf5` dep),
-the HDF5 symbols are simply absent from `picklerick.so` and it fails to load.
+links into `picklerick.so` via `src/Makevars`. A Rust `staticlib` only *bundles*
+native dependencies linked **statically** by cargo; its link directives for any
+other library are **not** propagated to R's separate `.so` link step. Linking
+HDF5 that way leaves its symbols undefined at load (`undefined symbol:
+H5Sselect_elements`).
 
-Therefore the `conda.recipe/r-picklerick` recipe **must**:
+So HDF5 goes on R's link line instead, as in `rhdf5`: the package has
+`LinkingTo: Rhdf5lib (>= 2.0.0)` (HDF5 1.14), and `Makevars` adds
+`Rhdf5lib::pkgconfig("PKG_C_LIBS")` (its static `libhdf5.a` plus libcurl,
+openssl, libaec and zlib) to `PKG_LIBS`. The R crate builds scx-core without
+`vendored-hdf5`, so there is no cmake or HDF5 C build. Rhdf5lib 2.x is
+Bioconductor 3.23 but installs on R 4.5, so `rproject.toml` takes it from 3.23.
 
-- **not** set `HDF5_DIR` and **not** depend on system `hdf5`/`zlib` (host or
-  run) — let `vendored-hdf5` build and bundle them statically;
-- include `cmake` and a C++ compiler in build requirements (for the from-source
-  HDF5 build).
+Two build details in `Makevars`:
 
-This also isolates picklerick's HDF5 from R's `rhdf5` / `hdf5r` (avoiding the
-ABI conflicts that motivated static vendoring in the first place).
+- **Version shim.** hdf5-metno-sys reads the version from `HDF5_DIR`'s headers
+  but also dlopens a shared libhdf5 to check it, and Rhdf5lib ships only the
+  static one. `src/rust/hdf5_version_shim.c` is a two-function stand-in for that
+  check, compiled at build time and never linked into the package. It can go
+  once hdf5-metno-sys skips the check for a static-only HDF5.
+- **Rebuild on an Rhdf5lib upgrade.** The HDF5 version (`Rhdf5lib::getHdf5Version()`)
+  is passed as `HDF5_VERSION` and stamped into the target directory, so a new
+  HDF5 rebuilds the staticlib. The version picks the chunk-read ABI (`build.rs`).
+
+The `conda.recipe/r-picklerick` recipe depends on host
+`bioconductor-rhdf5lib >=2.0.0` and must **not** add a system `hdf5`.
+
+### Offline builds (CRAN / Bioconductor)
+
+Both build packages offline. `r/picklerick/tools/vendor.sh` vendors the crates
+into `src/rust/vendor.tar.xz.NN` before `R CMD build` (4 MB parts, since
+Bioconductor caps each file at 5 MB), and `Makevars` builds `--offline` from
+them when present. The script stubs crates no R platform compiles, drops tests,
+benches and winapi's MinGW import libraries (a Windows build must set
+`WINAPI_NO_BUNDLED_LIBRARIES=1`), and keeps only enabled windows-sys modules.
+The parts are generated, not committed.
 
 ## scx-core comes from crates.io
 

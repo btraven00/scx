@@ -7,6 +7,9 @@ repositories = [
     {alias = "Bioc",            url = "https://bioconductor.org/packages/3.22/bioc"},
     {alias = "BiocAnnotation",  url = "https://bioconductor.org/packages/3.22/data/annotation"},
     {alias = "BiocExperiment",  url = "https://bioconductor.org/packages/3.22/data/experiment"},
+    # Rhdf5lib 2.x (HDF5 1.14) is Bioconductor 3.23 but installs on R 4.5;
+    # picklerick links it (LinkingTo: Rhdf5lib (>= 2.0.0)).
+    {alias = "Bioc323",         url = "https://bioconductor.org/packages/3.23/bioc"},
 ]
 
 dependencies = [
@@ -15,6 +18,7 @@ dependencies = [
     # r/picklerick's Imports and Suggests, so the package can be installed,
     # tested and documented against this library.
     "Matrix",
+    {name = "Rhdf5lib", repository = "Bioc323"},
     "jsonlite",
     "DelayedArray",
     "S4Arrays",

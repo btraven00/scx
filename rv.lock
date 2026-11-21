@@ -230,10 +230,12 @@ dependencies = []
 
 [[packages]]
 name = "Rhdf5lib"
-version = "1.32.0"
-source = { repository = "https://bioconductor.org/packages/3.22/bioc" }
+version = "2.0.0"
+source = { repository = "https://bioconductor.org/packages/3.23/bioc" }
 force_source = false
-dependencies = []
+dependencies = [
+    "biocmake",
+]
 
 [[packages]]
 name = "Rtsne"
@@ -460,6 +462,15 @@ force_source = false
 dependencies = []
 
 [[packages]]
+name = "biocmake"
+version = "1.2.0"
+source = { repository = "https://bioconductor.org/packages/3.22/bioc" }
+force_source = false
+dependencies = [
+    "dir.expiry",
+]
+
+[[packages]]
 name = "bitops"
 version = "1.1-0"
 source = { repository = "https://cloud.r-project.org/" }
@@ -643,6 +654,15 @@ force_source = false
 dependencies = []
 
 [[packages]]
+name = "dir.expiry"
+version = "1.18.0"
+source = { repository = "https://bioconductor.org/packages/3.22/bioc" }
+force_source = false
+dependencies = [
+    "filelock",
+]
+
+[[packages]]
 name = "dotCall64"
 version = "1.2"
 source = { repository = "https://cloud.r-project.org/" }
@@ -732,6 +752,13 @@ dependencies = [
 [[packages]]
 name = "fastmap"
 version = "1.2.0"
+source = { repository = "https://cloud.r-project.org/" }
+force_source = false
+dependencies = []
+
+[[packages]]
+name = "filelock"
+version = "1.0.3"
 source = { repository = "https://cloud.r-project.org/" }
 force_source = false
 dependencies = []
