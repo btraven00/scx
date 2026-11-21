@@ -14,8 +14,9 @@ name = "scx"
 path = "src/main.rs"
 
 [features]
-default = ["vendored-hdf5", "zarr"]
+default = ["vendored-hdf5", "zarr", "visium-hd"]
 vendored-hdf5 = ["scx-core/vendored-hdf5"]
+visium-hd = ["scx-core/visium-hd"]
 # AnnData Zarr stores (v2 and v3) as convert/inspect input.
 zarr = ["scx-core/zarr"]
 # bixverse binary sparse stores (v3 and v4) as convert/inspect input; the

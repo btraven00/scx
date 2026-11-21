@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/btraven00/scx"
 
 [features]
-default = ["vendored-hdf5", "zarr"]
+default = ["vendored-hdf5", "zarr", "visium-hd"]
 # Build HDF5 from source and link it statically along with a vendored zlib.
 # Produces self-contained binaries/wheels with no system libhdf5 requirement.
 # Distro packagers (conda, debian) can opt out with --no-default-features to
@@ -20,6 +20,11 @@ vendored-hdf5 = ["hdf5/static", "hdf5/zlib"]
 # arrays (sharding + crc32c index). Codecs: anndata's zarr v2
 # default is Blosc(lz4), its v3 default zstd; gzip/zlib for older writers.
 zarr = ["dep:zarrs"]
+# Visium HD positions (spatial/tissue_positions.parquet), read with parquet's
+# record API (no arrow). Without it a Visium HD directory is an error; Visium
+# (CSV positions) still reads. The R package leaves it off to keep its
+# vendored crates small.
+visium-hd = ["dep:parquet"]
 # Network-backed readers (Zarr/Parquet over object_store, 0.4.0). Pulls in the
 # tokio runtime so the existing async trait surface gets a real reactor and can
 # pipeline cloud I/O (buffer_unordered / tokio::spawn). Off by default: local
@@ -92,9 +97,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = tr
 # ObjectStore trait our InMemory/S3 handles satisfy is the same type the
 # parquet async reader consumes (a version split would break the trait object).
 object_store = { version = "0.13", optional = true }
-# Always on without arrow, for Visium HD tissue_positions.parquet (the record
-# API reads six columns); `net` and `bixverse-parquet` turn on its defaults.
-parquet = { version = "59", default-features = false, features = ["snap", "zstd", "flate2", "flate2-zlib-rs"] }
+# Without arrow for Visium HD tissue_positions.parquet (the record API reads six
+# columns); `net` and `bixverse-parquet` turn on its defaults.
+parquet = { version = "59", default-features = false, features = ["snap", "zstd", "flate2", "flate2-zlib-rs"], optional = true }
 arrow = { version = "59", optional = true }
 # Lets x_stream() defer the async footer read into the returned Stream (the
 # DatasetReader::x_stream signature is sync-returns-stream).

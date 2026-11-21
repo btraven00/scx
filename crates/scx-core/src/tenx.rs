@@ -621,6 +621,7 @@ mod tests {
     /// A Visium HD bin directory: positions in parquet, float pixel
     /// coordinates, an extra off-tissue bin, rows in the matrix's order.
     #[test]
+    #[cfg(feature = "visium-hd")]
     fn visium_hd_bin_dir_reads_parquet_positions() {
         use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int32Type};
         use parquet::file::writer::SerializedFileWriter;
@@ -691,6 +692,21 @@ mod tests {
         let mut r = TenxH5Reader::open_visium(dir.path(), 2).unwrap();
         let e = block_on(r.obs()).unwrap_err().to_string();
         assert!(e.contains("barcode CCC not in"), "{e}");
+    }
+
+    /// Without `visium-hd`, parquet positions are a clear error, not a
+    /// silent fall-through to the CSV scanner.
+    #[test]
+    #[cfg(not(feature = "visium-hd"))]
+    fn visium_hd_without_feature_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_standard(&dir.path().join(crate::visium::MATRIX));
+        let sp = dir.path().join("spatial");
+        std::fs::create_dir(&sp).unwrap();
+        std::fs::write(sp.join("tissue_positions.parquet"), b"").unwrap();
+        let mut r = TenxH5Reader::open_visium(dir.path(), 2).unwrap();
+        let e = block_on(r.obs()).unwrap_err().to_string();
+        assert!(e.contains("`visium-hd` feature"), "{e}");
     }
 
     #[test]

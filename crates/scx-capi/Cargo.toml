@@ -20,5 +20,5 @@ default = ["vendored-hdf5"]
 vendored-hdf5 = ["scx-core/vendored-hdf5"]
 
 [dependencies]
-scx-core = { path = "../scx-core", default-features = false, features = ["zarr"] }
+scx-core = { path = "../scx-core", default-features = false, features = ["zarr", "visium-hd"] }
 futures = "0.3"
