@@ -249,7 +249,8 @@ fn plain_summarized_experiment() {
         .err()
         .unwrap();
     assert!(
-        err.to_string().contains("only dgCMatrix assays are supported"),
+        err.to_string()
+            .contains("only dgCMatrix assays are supported"),
         "{err}"
     );
 }
