@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.3](https://github.com/btraven00/scx/compare/scx-cli-v0.6.2...scx-cli-v0.6.3) (2026-11-21)
+
+
+### Features
+
+* **cli:** convert writes an h5ad to stdout with - as the output, and --only/--exclude select obs and var columns ([ca5621e](https://github.com/btraven00/scx/commit/ca5621e9fa61d24efee44b280ee5cbd19da1d784))
+* **core:** put Visium HD parquet positions behind a visium-hd feature ([2dc724d](https://github.com/btraven00/scx/commit/2dc724df50cfc910a1d0ec41765c392b24f307da))
+* **rds:** --object reads one object of a file that holds several ([18c0c8d](https://github.com/btraven00/scx/commit/18c0c8d27fe3995c5dd4cab09303ed798b249c59))
+
+
+### Bug Fixes
+
+* **cli:** inspect no longer summarises fractional obs columns as bool-like ([e02d855](https://github.com/btraven00/scx/commit/e02d855abcb4c981d707a2b8ecc7fc749f98e625))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * scx-core bumped from 0.6.2 to 0.6.3
+
 ## [0.6.2](https://github.com/btraven00/scx/compare/scx-cli-v0.6.1...scx-cli-v0.6.2) (2026-11-12)
 
 

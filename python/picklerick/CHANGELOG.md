@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.3](https://github.com/btraven00/scx/compare/picklerick-v0.6.2...picklerick-v0.6.3) (2026-11-21)
+
+
+### Features
+
+* **core:** put Visium HD parquet positions behind a visium-hd feature ([2dc724d](https://github.com/btraven00/scx/commit/2dc724df50cfc910a1d0ec41765c392b24f307da))
+
+
+### Bug Fixes
+
+* **picklerick:** bound the stream read-ahead in bytes ([64f1ad7](https://github.com/btraven00/scx/commit/64f1ad7acd1a75a17b518c31d10f48a8880482d1))
+
 ## [0.6.2](https://github.com/btraven00/scx/compare/picklerick-v0.6.1...picklerick-v0.6.2) (2026-11-12)
 
 

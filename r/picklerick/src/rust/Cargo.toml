@@ -19,7 +19,7 @@ extendr-api = "0.7"
 # either: it pulls in parquet. release-please bumps the version with the rest
 # of the scx group; CI and the conda recipe patch it to the in-tree crate, so
 # main is tested against main (docs/releasing.md).
-scx-core    = { version = "0.6.2", default-features = false, features = ["zarr", "bixverse"] } # x-release-please-version
+scx-core    = { version = "0.6.3", default-features = false, features = ["zarr", "bixverse"] } # x-release-please-version
 futures     = "0.3"
 anyhow      = "1"
 serde_json  = "1"
