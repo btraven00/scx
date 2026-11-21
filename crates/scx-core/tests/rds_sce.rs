@@ -225,6 +225,35 @@ fn se_assay_is_picked_with_layer() {
     assert!(err.to_string().contains("--layer"), "{err}");
 }
 
+/// A plain SummarizedExperiment: rowData without row ranges, no dimnames
+/// (cells and genes numbered), and a dense assay that is skipped as a layer
+/// and refused as X.
+#[test]
+fn plain_summarized_experiment() {
+    let e = json("expected.json");
+    let mut r = reader("tiny_se.rds", 4);
+    assert_eq!(r.shape(), (6, 5));
+    let obs = block_on(r.obs()).unwrap();
+    assert_eq!(obs.index, ["0", "1", "2", "3", "4", "5"]);
+    assert_eq!(obs.columns[0].name, "score");
+    let var = block_on(r.var()).unwrap();
+    assert_eq!(var.index, ["0", "1", "2", "3", "4"]);
+    let want = strs(&e["var"]["gene_symbol"]["values"]);
+    assert!((0..5).all(|g| var.columns[0].data.value_str(g) == want[g]));
+
+    let counts: Vec<Vec<f64>> = e["counts"].as_array().unwrap().iter().map(f64s).collect();
+    assert_eq!(dense_by_cell(r.as_mut()), counts);
+    assert!(block_on(r.layer_metas()).unwrap().is_empty());
+
+    let err = scx_core::rds::RdsReader::open(&tiny("tiny_se.rds"), 4, None, Some("logcounts"))
+        .err()
+        .unwrap();
+    assert!(
+        err.to_string().contains("only dgCMatrix assays are supported"),
+        "{err}"
+    );
+}
+
 /// A real Visium HD SpatialExperiment, past the lazy-read threshold.
 #[test]
 fn visium_hd_spatial_experiment() {

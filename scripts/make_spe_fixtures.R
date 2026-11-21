@@ -4,6 +4,8 @@
 #                 rowData gene_symbol, reducedDim PCA = obsm X_pca
 #   tiny_spe.rds  the same as a SpatialExperiment, plus spatialCoords
 #                 (cell k: x = 10k, y = 100 - k) and a stored image
+#   tiny_se.rds   a plain SummarizedExperiment without dimnames: counts, a
+#                 dense logcounts, colData score, rowData gene_symbol
 #   visiumhd_spe.rds + visiumhd_spe.json
 #                 5000 bins x 30 genes of the public 10x Visium HD lung cancer
 #                 8 um SpatialExperiment (pass its .rds as the first argument),
@@ -66,6 +68,17 @@ imgData(spe) <- DataFrame(
 )
 stopifnot(is(spe@assays, "SimpleAssays"))
 saveRDS(spe, file.path(dir, "tiny_spe.rds"))
+
+# A plain SummarizedExperiment without names: rowData on the object (no row
+# ranges), cells and genes numbered, and a dense logcounts assay (skipped as a
+# layer; an error as X).
+se <- SummarizedExperiment(
+  assays = list(counts = unname(counts), logcounts = unname(as.matrix(logcounts))),
+  colData = DataFrame(score = obs$score),
+  rowData = DataFrame(gene_symbol = e$var$gene_symbol$values)
+)
+stopifnot(is.null(rownames(se)), is.null(colnames(se)))
+saveRDS(se, file.path(dir, "tiny_se.rds"))
 
 src <- commandArgs(TRUE)[1]
 if (!is.na(src)) {
