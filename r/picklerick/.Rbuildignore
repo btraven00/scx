@@ -3,3 +3,5 @@
 ^vignettes/.*\.html$
 ^_pkgdown\.yml$
 ^src/rust/target$
+^tools$
+^src/rust/vendor$
