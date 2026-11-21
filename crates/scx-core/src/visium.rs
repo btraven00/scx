@@ -77,7 +77,13 @@ pub(crate) fn obs_and_spatial(
         }
     };
     if path.extension().is_some_and(|e| e == "parquet") {
+        #[cfg(feature = "visium-hd")]
         scan_parquet(&path, &mut keep)?;
+        #[cfg(not(feature = "visium-hd"))]
+        return Err(ScxError::InvalidFormat(format!(
+            "{}: Visium HD needs scx-core's `visium-hd` feature, not built in",
+            path.display()
+        )));
     } else {
         scan_csv(&path, &mut keep)?;
     }
@@ -131,6 +137,7 @@ fn scan_csv(path: &Path, f: &mut dyn FnMut(&[u8], [f64; 5])) -> Result<()> {
 /// As [`scan_csv`]. The six columns are read in step, `BATCH` rows at a
 /// time: the record API allocates every row's column names (35 s for a 2 um
 /// Visium HD bin), and a whole row group of it is ~11M rows.
+#[cfg(feature = "visium-hd")]
 fn scan_parquet(path: &Path, f: &mut dyn FnMut(&[u8], [f64; 5])) -> Result<()> {
     use parquet::basic::Type;
     use parquet::column::reader::{get_typed_column_reader, ColumnReaderImpl};
