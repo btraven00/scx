@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.3](https://github.com/btraven00/scx/compare/scx-core-v0.6.2...scx-core-v0.6.3) (2026-11-24)
+
+
+### Features
+
+* **core:** put Visium HD parquet positions behind a visium-hd feature ([2dc724d](https://github.com/btraven00/scx/commit/2dc724df50cfc910a1d0ec41765c392b24f307da))
+* **rds:** --object reads one object of a file that holds several ([18c0c8d](https://github.com/btraven00/scx/commit/18c0c8d27fe3995c5dd4cab09303ed798b249c59))
+
+
+### Bug Fixes
+
+* **diff:** pair both raw and a counts layer with the other side's X ([527f496](https://github.com/btraven00/scx/commit/527f49670940d51d41dad44f41a28c0442d28064))
+* **h5seurat:** write and read obsp graphs untransposed ([d4fb2de](https://github.com/btraven00/scx/commit/d4fb2dedc03c7647d923ed5668100cdf5c1e32e3))
+
+
+### Performance Improvements
+
+* **core:** read a chunk index's leaves ahead of the cold walk ([cf97b3e](https://github.com/btraven00/scx/commit/cf97b3e73c809f6b4fd7c9714981393a23a338ad))
+
 ## [0.6.2](https://github.com/btraven00/scx/compare/scx-core-v0.6.1...scx-core-v0.6.2) (2026-11-12)
 
 
